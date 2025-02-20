@@ -214,7 +214,7 @@ run_docker_container() {
     --name payram \
     --publish 8080:8080 \
     --publish 8443:8443 \
-    --publish 8000:80 \
+    --publish 80:80 \
     --publish 443:443 \
     -e AES_KEY="$aes_key" \
     -e BLOCKCHAIN_NETWORK_TYPE=testnet \
