@@ -5,6 +5,49 @@ set -euo pipefail
 # OS Detection and Dependency Installation
 ####################################
 
+reset_dependencies() {
+  local CONTAINER_NAME="payram"
+  local IMAGE_NAME="buddhasource/payram-core:develop"
+
+  # Stop the container if it's running.
+  if docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+    echo "Stopping running container: ${CONTAINER_NAME}..."
+    docker stop "${CONTAINER_NAME}"
+  else
+    echo "Container ${CONTAINER_NAME} is not running."
+  fi
+
+  # Remove the container along with its volumes.
+  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+    echo "Removing container and its volumes: ${CONTAINER_NAME}..."
+    docker rm -v "${CONTAINER_NAME}"
+  else
+    echo "Container ${CONTAINER_NAME} does not exist."
+  fi
+
+  # Remove the Docker image.
+  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${IMAGE_NAME}$"; then
+    echo "Removing Docker image: ${IMAGE_NAME}..."
+    docker rmi "${IMAGE_NAME}"
+  else
+    echo "Docker image ${IMAGE_NAME} not found."
+  fi
+
+  # Remove associated files/directories (.payram-core and .payram)
+  echo "Searching and deleting .payram-core and .payram files/directories..."
+  sudo find / -type d \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -rf {} \; 2>/dev/null || true
+  sudo find / -type f \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -f {} \; 2>/dev/null || true
+
+  echo "Container, image, volumes, and associated files have been permanently removed."
+}
+
+# Execute the function only if "restart" is passed as the first argument.
+if [[ "${1:-}" == "--reset" ]]; then
+  reset_dependencies
+  exit 0
+fi
+
+
 if [[ -f /etc/os-release ]]; then
   source /etc/os-release
   OS=$ID
@@ -139,7 +182,51 @@ install_yq() {
         exit 1
         ;;
     esac
-    echo "✅ yq installed successfully."
+    echo "✅ yq installed sucrestart_dependencies() {
+  local CONTAINER_NAME="payram"
+  local IMAGE_NAME="buddhasource/payram-core:develop"
+
+  # Stop the container if it's running.
+  if docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+    echo "Stopping running container: ${CONTAINER_NAME}..."
+    docker stop "${CONTAINER_NAME}"
+  else
+    echo "Container ${CONTAINER_NAME} is not running."
+  fi
+
+  # Remove the container along with its volumes.
+  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+    echo "Removing container and its volumes: ${CONTAINER_NAME}..."
+    docker rm -v "${CONTAINER_NAME}"
+  else
+    echo "Container ${CONTAINER_NAME} does not exist."
+  fi
+
+  # Remove the Docker image.
+  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${IMAGE_NAME}$"; then
+    echo "Removing Docker image: ${IMAGE_NAME}..."
+    docker rmi "${IMAGE_NAME}"
+  else
+    echo "Docker image ${IMAGE_NAME} not found."
+  fi
+
+  # Remove associated files/directories (.payram-core and .payram)
+  echo "Searching and deleting .payram-core and .payram files/directories..."
+  sudo find / -type d \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -rf {} \; 2>/dev/null || true
+  sudo find / -type f \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -f {} \; 2>/dev/null || true
+
+  echo "Container, image, volumes, and associated files have been permanently removed."
+}
+
+# Execute the function only if "restart" is passed as the first argument.
+if [[ "${1:-}" == "restart" ]]; then
+  restart_dependencies
+  exit 0
+else
+  echo "Usage: $0 restart"
+  exit 1
+fi
+cessfully."
   fi
 }
 
