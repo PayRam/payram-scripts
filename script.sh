@@ -41,9 +41,53 @@ reset_dependencies() {
   echo "Container, image, volumes, and associated files have been permanently removed."
 }
 
-# Execute the function only if "restart" is passed as the first argument.
+update_container() {
+  local CONTAINER_NAME="payram"
+  local IMAGE_NAME="buddhasource/payram-core:develop"
+
+  echo "🚀 Stopping and removing existing container..."
+  docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+  docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+
+  echo "🗑️ Removing existing image..."
+  docker rmi -f "${IMAGE_NAME}" 2>/dev/null || true
+
+  echo "📥 Pulling the latest image..."
+  docker pull "${IMAGE_NAME}"
+
+  # Generate an AES key (32 bytes for AES-256)
+  aes_key=$(openssl rand -hex 32)
+  echo "Generated AES key: $aes_key"
+
+  sudo bash -c "echo \"AES_KEY=$aes_key\" > /.payram/aes/$aes_key"
+  echo "AES key saved to /.payram/aes/$aes_key"
+
+  echo "🔄 Running a new container..."
+   docker run -d \
+    --name ${CONTAINER_NAME} \
+    --publish 8080:8080 \
+    --publish 8443:8443 \
+    --publish 80:80 \
+    --publish 443:443 \
+    -e AES_KEY="$aes_key" \
+    -e BLOCKCHAIN_NETWORK_TYPE=testnet \
+    -e SERVER=DEVELOPMENT \
+    -v /home/ubuntu/.payram-core:/root/payram \
+    -v /home/ubuntu/.payram-core/log/supervisord:/var/log \
+    -v /etc/letsencrypt:/etc/letsencrypt \
+    ${IMAGE_NAME}
+
+  echo "✅ Update complete! Payram is now running with the latest version."
+}
+
+# Execute the appropriate function based on command-line arguments.
 if [[ "${1:-}" == "--reset" ]]; then
   reset_dependencies
+  exit 0
+fi
+
+if [[ "${1:-}" == "--update" ]]; then
+  update_container
   exit 0
 fi
 
@@ -351,7 +395,7 @@ process_projects() {
         echo "$body"  # Return the body so it can be processed
     }
 
-    perform_request_http() {
+    perform_request_http() {  
         description="$1"
         shift
         response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
