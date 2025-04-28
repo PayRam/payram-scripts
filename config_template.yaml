@@ -4,6 +4,12 @@ configuration:
   postal.endpoint: ""
   postal.apikey: ""
   ssl: ""
+database:
+  postgres.host: ""
+  postgres.port: ""
+  postgres.database: ""
+  postgres.username: ""
+  postgres.password: ""
 projects:
   project1:
     name: ""
@@ -12,6 +18,9 @@ projects:
     webhookEndpoint: ""
 blockchain:
   ETH:
+    client: ""
+    server: ""
+    server_api_key: ""
     explorer_address: ""
     explorer_transaction: ""
     min_confirmations: ""

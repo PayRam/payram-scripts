@@ -44,41 +44,63 @@ reset_dependencies() {
 update_container() {
   local CONTAINER_NAME="payram"
   local IMAGE_NAME="buddhasource/payram-core:develop"
+  local CONFIG_FILE="config.yaml"
+  local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD aes_key
+
+  # Load flat-key database values from config.yaml
+  DB_HOST=$(yq e -r '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
+  DB_PORT=$(yq e -r '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
+  DB_NAME=$(yq e -r '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
+  DB_USER=$(yq e -r '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
+  DB_PASSWORD=$(yq e -r '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
+
+  # Validate
+  if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
+    echo "Error: Database details are missing or invalid in config.yaml."
+    exit 1
+  fi
 
   echo "🚀 Stopping and removing existing container..."
-  docker stop "${CONTAINER_NAME}" 2>/dev/null || true
-  docker rm "${CONTAINER_NAME}" 2>/dev/null || true
+  docker stop "${CONTAINER_NAME}"   2>/dev/null || true
+  docker rm   "${CONTAINER_NAME}"   2>/dev/null || true
 
   echo "🗑️ Removing existing image..."
-  docker rmi -f "${IMAGE_NAME}" 2>/dev/null || true
+  docker rmi -f "${IMAGE_NAME}"     2>/dev/null || true
 
   echo "📥 Pulling the latest image..."
   docker pull "${IMAGE_NAME}"
 
-  # Generate an AES key (32 bytes for AES-256)
+  # Generate a new AES key and save it
   aes_key=$(openssl rand -hex 32)
   echo "Generated AES key: $aes_key"
-
   sudo bash -c "echo \"AES_KEY=$aes_key\" > /.payram/aes/$aes_key"
   echo "AES key saved to /.payram/aes/$aes_key"
 
   echo "🔄 Running a new container..."
-   docker run -d \
-    --name ${CONTAINER_NAME} \
+  docker run -d \
+    --name "${CONTAINER_NAME}" \
     --publish 8080:8080 \
     --publish 8443:8443 \
     --publish 80:80 \
     --publish 443:443 \
+    --publish 5432:5432 \
     -e AES_KEY="$aes_key" \
     -e BLOCKCHAIN_NETWORK_TYPE=testnet \
     -e SERVER=DEVELOPMENT \
+    -e POSTGRES_HOST="$DB_HOST" \
+    -e POSTGRES_PORT="$DB_PORT" \
+    -e POSTGRES_DATABASE="$DB_NAME" \
+    -e POSTGRES_USERNAME="$DB_USER" \
+    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
     -v /home/ubuntu/.payram-core:/root/payram \
     -v /home/ubuntu/.payram-core/log/supervisord:/var/log \
+    -v /home/ubuntu/.payram-core/db/postgres:/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt \
-    ${IMAGE_NAME}
+    "${IMAGE_NAME}"
 
   echo "✅ Update complete! Payram is now running with the latest version."
 }
+
 
 # Execute the appropriate function based on command-line arguments.
 if [[ "${1:-}" == "--reset" ]]; then
@@ -319,6 +341,8 @@ install_dependencies() {
 ############################
 # Pull and Run Docker Container if Not Already Runningconfig
 ############################
+
+
 run_docker_container() {
   if docker ps --format '{{.Names}}' | grep -wq '^payram$'; then
     echo "Docker container 'payram' is already running."
@@ -336,9 +360,34 @@ run_docker_container() {
     sudo mkdir -p "/.payram/aes"
   fi
 
-  # Save the AES key to a file with the key name and content "AES_KEY=<generated_key>"
+  # Save the AES key to a file
   sudo bash -c "echo \"AES_KEY=$aes_key\" > /.payram/aes/$aes_key"
   echo "AES key saved to /.payram/aes/$aes_key"
+
+  CONFIG_FILE="config.yaml"
+
+  # Declare DB vars
+  local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
+
+  # Import the database details from flat-key config.yaml
+  DB_HOST=$(yq e -r '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
+  DB_PORT=$(yq e -r '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
+  DB_NAME=$(yq e -r '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
+  DB_USER=$(yq e -r '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
+  DB_PASSWORD=$(yq e -r '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
+
+  # Validate
+  if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
+    echo "Error: Database details are missing in config.yaml."
+    exit 1
+  fi
+
+  echo "Database details loaded from config.yaml:"
+  echo "  DB_HOST:     $DB_HOST"
+  echo "  DB_PORT:     $DB_PORT"
+  echo "  DB_NAME:     $DB_NAME"
+  echo "  DB_USER:     $DB_USER"
+  echo "  DB_PASSWORD: $DB_PASSWORD"
 
   # Run the Docker container
   docker run -d \
@@ -347,11 +396,18 @@ run_docker_container() {
     --publish 8443:8443 \
     --publish 80:80 \
     --publish 443:443 \
+    --publish 5432:5432 \
     -e AES_KEY="$aes_key" \
     -e BLOCKCHAIN_NETWORK_TYPE=testnet \
     -e SERVER=DEVELOPMENT \
+    -e POSTGRES_HOST="$DB_HOST" \
+    -e POSTGRES_PORT="$DB_PORT" \
+    -e POSTGRES_DATABASE="$DB_NAME" \
+    -e POSTGRES_USERNAME="$DB_USER" \
+    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
     -v /home/ubuntu/.payram-core:/root/payram \
     -v /home/ubuntu/.payram-core/log/supervisord:/var/log \
+    -v /home/ubuntu/.payram-core/db/postgres:/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt \
     buddhasource/payram-core:develop
 
@@ -362,6 +418,9 @@ run_docker_container() {
     echo "Failed to start docker container 'payram'."
   fi
 }
+
+
+
 
 ############################
 # Main Execution for OS/Dependency/Docker Setup
@@ -376,36 +435,47 @@ docker --version && sqlite3 --version && jq --version && yq --version
 echo "🎉 Setup complete!"
 
 
-
-
 process_projects() {
     CONFIG_FILE="config.yaml"
     STATE_FILE="/.payram/state.txt"  
     API_URL="http://localhost:8080/api/v1/external-platform"
     
-    perform_request() {
-        description="$1"
-        shift
-        response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
-        body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-        http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-        >&2 echo "$description Response:"
-        # >&2 echo "$body"
-        >&2 echo "HTTP Status: $http_code  in th perform_request function"
-        echo "$body"  # Return the body so it can be processed
-    }
+  perform_request() {
+    description="$1"
+    shift
+    # perform curl and capture body+status
+    response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
+    body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
+    http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
 
-    perform_request_http() {  
-        description="$1"
-        shift
-        response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
-        body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-        http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-        >&2 echo "$description Response:"
-        # >&2 echo "$body"
-        >&2 echo "HTTP Status: $http_code  in th perform_request function"
-        echo "$http_code"  # Return the http_code so it can be processed
-    }
+    >&2 echo "$description Response:"
+
+    # print in the requested format
+    echo "---------------------"
+    echo "$http_code"
+    echo
+    echo "$body"
+    echo "---------------------"
+  }
+
+  perform_request_http() {
+      description="$1"
+      shift
+      # perform curl and capture body+status
+      response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
+      body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
+      http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+
+      >&2 echo "$description Response:"
+
+      # print in the requested format
+      echo "---------------------"
+      echo "$http_code"
+      echo
+      echo "$body"
+      echo "---------------------"
+  }
+
 
     # Function to update the state file
     update_state() {
@@ -590,7 +660,10 @@ run_api_requests() {
   STATE_FILE="/.payram/state.txt"  # using the same hidden state file
 
   validate_config $CONFIG_FILE
-
+  # Load configuration values from config.yaml
+  update_blockchain_eth_client=$(yq e '.blockchain.ETH.client' "$CONFIG_FILE" | tr -d '\n' | xargs)
+  update_blockchain_eth_server=$(yq e '.blockchain.ETH.server' "$CONFIG_FILE" | tr -d '\n' | xargs)
+  update_blockchain_eth_server_api_key=$(yq e '.blockchain.ETH.server_api_key' "$CONFIG_FILE" | tr -d '\n' | xargs)
   update_blockchain_eth_explorer_address=$(yq e '.blockchain.ETH.explorer_address' "$CONFIG_FILE" | tr -d '\n' | xargs)
   update_blockchain_eth_explorer_transaction=$(yq e '.blockchain.ETH.explorer_transaction' "$CONFIG_FILE" | tr -d '\n' | xargs)
   update_blockchain_eth_min_confirmations=$(yq e '.blockchain.ETH.min_confirmations' "$CONFIG_FILE" | tr -d '\n' | xargs)
@@ -607,6 +680,8 @@ run_api_requests() {
 
   # List of required variables
   required_vars=(
+    "$update_blockchain_eth_client"
+    "$update_blockchain_eth_server"
     "$update_blockchain_eth_explorer_address"
     "$update_blockchain_eth_explorer_transaction"
     "$update_blockchain_eth_min_confirmations"
@@ -620,6 +695,8 @@ run_api_requests() {
     "$update_blockchain_trx_height"
   )
 
+
+
   # Loop through and exit if any are empty
   for var in "${required_vars[@]}"; do
     if [ -z "$var" ]; then
@@ -631,15 +708,13 @@ run_api_requests() {
     fi
   done
 
-
-
   echo "Loading API variables from config.yaml (for non-credential values)"
   
   read -p "Enter your email: " USER_EMAIL
-
   read -s -p "Enter your password: " USER_PASSWORD
   echo ""
   read -s -p "Confirm your password: " CONFIRM_PASSWORD
+  echo ""
   echo ""
 
 # Check if the entered passwords match
@@ -647,7 +722,6 @@ if [ "$USER_PASSWORD" != "$CONFIRM_PASSWORD" ]; then
   echo "Passwords do not match. Exiting."
   exit 1
 fi
-
   
   # Override email and password with user input
   EMAIL="$USER_EMAIL"
@@ -937,7 +1011,7 @@ fi
         http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
         >&2 echo "$description Response:"
         # >&2 echo "$body"
-        >&2 echo "HTTP Status: $http_code  in th perform_request function"
+        >&2 echo "the respose is $response"
         echo "$http_code"  # Return the http_code so it can be processed
     }
 
@@ -958,14 +1032,15 @@ fi
             --request PUT \
             --data-raw "{
                \"name\": \"Ethereum\",
-               \"client\": \"geth\",
-               \"server\": \"wss://ethereum-sepolia-rpc.publicnode.com\",
-               \"server_api_key\": \"\",
+               \"client\": \"$update_blockchain_eth_client\",
+               \"server\": \"$update_blockchain_eth_server\",
+               \"server_api_key\": \"$update_blockchain_eth_server_api_key\",
                \"height\": 0,
                \"explorer_address\": \"$update_blockchain_eth_explorer_address\",
                \"explorer_transaction\": \"$update_blockchain_eth_explorer_transaction\",
                \"min_confirmations\": $update_blockchain_eth_min_confirmations
             }")
+            echo "t---------------------------------------------------------------------------------------- is $code"
           if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
               update_state "blockchain_ethereum_done"
           fi
@@ -1069,6 +1144,7 @@ fi
   #########################
   # Xpub Ethereum and generate addresses
   #########################
+  echo "this is the xpub ethereum thing, $x_pub_Ethereum"
   if ! grep -q "xpub_ethereum_done" "$STATE_FILE" && [ -n "$x_pub_Ethereum" ]; then
       if check_params "xpub Ethereum" "$x_pub_Ethereum" "Ethereum address count" "$x_pub_Ethereum_address"; then
           echo "Processing xpub Ethereum"
@@ -1079,13 +1155,16 @@ fi
                \"xpub\": \"$x_pub_Ethereum\"
             }")
           if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              code=$(perform_request_http "Generate Ethereum Addresses" "$BASE_URL/api/v1/blockchain-family/ETH_Family/generate" \
+              code=$(perform_request_http "Generate Ethereum Addresses" "$BASE_URL/api/v1/blockchain-family/ETH_Family/create-pool" \
                 --header "API-Key: $API_KEY" \
                 --header "Content-Type: application/json" \
                 --data-raw "{
                    \"count\": $x_pub_Ethereum_address
                 }")
+
+                echo "the status code is after trying to generate the xpub addresses is $code"
               if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
+                  echo "trying to update the state of the xpub_ethereum"
                   update_state "xpub_ethereum_done"
               fi
           fi
@@ -1116,13 +1195,16 @@ fi
             }")
             echo "the status code is asdadad $code"
           if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              code=$(perform_request_http "Create Bitcoin Pool" "$BASE_URL/api/v1/blockchain-family/BTC_Family/generate" \
+              code=$(perform_request_http "Create Bitcoin Pool" "$BASE_URL/api/v1/blockchain-family/BTC_Family/create-pool" \
                 --header "API-Key: $API_KEY" \
                 --header "Content-Type: application/json" \
                 --data-raw "{
                    \"count\": $x_pub_Bitcoin_address
                 }")
+                echo "the status code is after trying to generate the xpub addresses is $code"
+
               if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
+                  echo "trying to update the state of the xpub_bitcoin"
                   update_state "xpub_bitcoin_done"
               fi
           fi
@@ -1152,13 +1234,15 @@ fi
                \"xpub\": \"$x_pub_TRX\"
             }")
           if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              code=$(perform_request_http "Generate TRX Addresses" "$BASE_URL/api/v1/blockchain-family/TRX_Family/generate" \
+              code=$(perform_request_http "Generate TRX Addresses" "$BASE_URL/api/v1/blockchain-family/TRX_Family/create-pool" \
                 --header "API-Key: $API_KEY" \
                 --header "Content-Type: application/json" \
                 --data-raw "{
                    \"count\": $x_pub_Trx_address
                 }")
+                echo "the status code is after trying to generate the xpub addresses is $code"
               if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
+                  echo "trying to update the state of the xpub_trx"
                   update_state "xpub_trx_done"
               fi
           fi
@@ -1491,6 +1575,7 @@ setup_container() {
     "configuration_frontend_done"
     "configuration_postal_endpoint_done"
     "configuration_postal_apikey_done"
+    "blockchain_ethereum_done"
     "blockchain_bitcoin_done"
     "blockchain_trx_done"
     "xpub_ethereum_done"
