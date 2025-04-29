@@ -1626,6 +1626,10 @@ setup_container() {
     return 0
   fi
 
+  echo -e "\n✨ Please wait... we're generating the addresses for you!"
+  sleep 30
+  echo -e "✅ Addresses have been generated.\n"
+
   # Restart the container since required states are met and restart has not been done.
   echo "Container 'payram' is running. Restarting the container..."
   docker restart payram
