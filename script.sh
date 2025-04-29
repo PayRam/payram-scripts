@@ -7,7 +7,7 @@ set -euo pipefail
 
 reset_dependencies() {
   local CONTAINER_NAME="payram"
-  local IMAGE_NAME="buddhasource/payram-core:develop"
+  local IMAGE_NAME="buddhasource/payram-core:main"
 
   # Stop the container if it's running.
   if docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
@@ -43,7 +43,7 @@ reset_dependencies() {
 
 update_container() {
   local CONTAINER_NAME="payram"
-  local IMAGE_NAME="buddhasource/payram-core:develop"
+  local IMAGE_NAME="buddhasource/payram-core:main"
   local CONFIG_FILE="config.yaml"
   local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD aes_key
 
@@ -87,8 +87,8 @@ update_container() {
     --publish 443:443 \
     --publish 5432:5432 \
     -e AES_KEY="$aes_key" \
-    -e BLOCKCHAIN_NETWORK_TYPE=testnet \
-    -e SERVER=DEVELOPMENT \
+    -e BLOCKCHAIN_NETWORK_TYPE=mainnet \
+    -e SERVER=PRODUCTION \
     -e POSTGRES_HOST="$DB_HOST" \
     -e POSTGRES_PORT="$DB_PORT" \
     -e POSTGRES_DATABASE="$DB_NAME" \
@@ -395,8 +395,8 @@ run_docker_container() {
     --publish 443:443 \
     --publish 5432:5432 \
     -e AES_KEY="$aes_key" \
-    -e BLOCKCHAIN_NETWORK_TYPE=testnet \
-    -e SERVER=DEVELOPMENT \
+    -e BLOCKCHAIN_NETWORK_TYPE=mainnet \
+    -e SERVER=PRODUCTION \
     -e POSTGRES_HOST="$DB_HOST" \
     -e POSTGRES_PORT="$DB_PORT" \
     -e POSTGRES_DATABASE="$DB_NAME" \
@@ -406,7 +406,7 @@ run_docker_container() {
     -v /home/ubuntu/.payram-core/log/supervisord:/var/log \
     -v /home/ubuntu/.payram-core/db/postgres:/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt \
-    buddhasource/payram-core:develop
+    buddhasource/payram-core:main
 
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
     echo "Docker container 'payram' is now running."
