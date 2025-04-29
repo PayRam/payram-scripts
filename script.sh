@@ -48,17 +48,19 @@ update_container() {
   local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD aes_key
 
   # Load flat-key database values from config.yaml
-  DB_HOST=$(yq e -r '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
-  DB_PORT=$(yq e -r '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
-  DB_NAME=$(yq e -r '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
-  DB_USER=$(yq e -r '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
-  DB_PASSWORD=$(yq e -r '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
+  DB_HOST=$(yq e  '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
+  DB_PORT=$(yq e  '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
+  DB_NAME=$(yq e  '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
+  DB_USER=$(yq e  '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
+  DB_PASSWORD=$(yq e  '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
 
   # Validate
   if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
     echo "Error: Database details are missing or invalid in config.yaml."
     exit 1
   fi
+
+
 
   echo "🚀 Stopping and removing existing container..."
   docker stop "${CONTAINER_NAME}"   2>/dev/null || true
@@ -370,24 +372,19 @@ run_docker_container() {
   local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
 
   # Import the database details from flat-key config.yaml
-  DB_HOST=$(yq e -r '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
-  DB_PORT=$(yq e -r '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
-  DB_NAME=$(yq e -r '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
-  DB_USER=$(yq e -r '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
-  DB_PASSWORD=$(yq e -r '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
+  DB_HOST=$(yq e  '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
+  DB_PORT=$(yq e  '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
+  DB_NAME=$(yq e  '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
+  DB_USER=$(yq e  '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
+  DB_PASSWORD=$(yq e  '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
+
+  echo "Didnt came here yet"
 
   # Validate
   if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
     echo "Error: Database details are missing in config.yaml."
     exit 1
   fi
-
-  echo "Database details loaded from config.yaml:"
-  echo "  DB_HOST:     $DB_HOST"
-  echo "  DB_PORT:     $DB_PORT"
-  echo "  DB_NAME:     $DB_NAME"
-  echo "  DB_USER:     $DB_USER"
-  echo "  DB_PASSWORD: $DB_PASSWORD"
 
   # Run the Docker container
   docker run -d \
