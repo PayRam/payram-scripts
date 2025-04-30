@@ -54,6 +54,20 @@ update_container() {
   DB_USER=$(yq e  '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
   DB_PASSWORD=$(yq e  '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
 
+  CONFIG_FILE="config.yaml"
+  
+  SERVER=$(yq e '.server' "$CONFIG_FILE" | xargs)
+  if [[ "$SERVER" == "PRODUCTION" ]]; then
+    NETWORK_TYPE="mainnet"
+    echo "Running in production mode."
+  elif [[ "$SERVER" == "DEVELOPMENT" ]]; then
+    NETWORK_TYPE="testnet"
+    echo "Running in development mode."
+  else
+    echo "❌ Unknown server type: $SERVER"
+    exit 1
+  fi
+
   # Validate
   if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
     echo "Error: Database details are missing or invalid in config.yaml."
@@ -250,51 +264,7 @@ install_yq() {
         exit 1
         ;;
     esac
-    echo "✅ yq installed sucrestart_dependencies() {
-  local CONTAINER_NAME="payram"
-  local IMAGE_NAME="buddhasource/payram-core:develop"
-
-  # Stop the container if it's running.
-  if docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    echo "Stopping running container: ${CONTAINER_NAME}..."
-    docker stop "${CONTAINER_NAME}"
-  else
-    echo "Container ${CONTAINER_NAME} is not running."
-  fi
-
-  # Remove the container along with its volumes.
-  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    echo "Removing container and its volumes: ${CONTAINER_NAME}..."
-    docker rm -v "${CONTAINER_NAME}"
-  else
-    echo "Container ${CONTAINER_NAME} does not exist."
-  fi
-
-  # Remove the Docker image.
-  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${IMAGE_NAME}$"; then
-    echo "Removing Docker image: ${IMAGE_NAME}..."
-    docker rmi "${IMAGE_NAME}"
-  else
-    echo "Docker image ${IMAGE_NAME} not found."
-  fi
-
-  # Remove associated files/directories (.payram-core and .payram)
-  echo "Searching and deleting .payram-core and .payram files/directories..."
-  sudo find / -type d \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -rf {} \; 2>/dev/null || true
-  sudo find / -type f \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -f {} \; 2>/dev/null || true
-
-  echo "Container, image, volumes, and associated files have been permanently removed."
-}
-
-# Execute the function only if "restart" is passed as the first argument.
-if [[ "${1:-}" == "restart" ]]; then
-  restart_dependencies
-  exit 0
-else
-  echo "Usage: $0 restart"
-  exit 1
-fi
-cessfully."
+    echo "✅ yq installed"
   fi
 }
 
@@ -350,8 +320,11 @@ run_docker_container() {
     echo "Docker container 'payram' is already running."
     return
   fi
+  CONFIG_FILE="config.yaml"
+  
+  SERVER=$(yq e '.server' "$CONFIG_FILE" | xargs)
 
-  echo "Container 'payram' is not running. Proceeding to pull and run the container..."
+  echo "You will be running the server in the  $SERVER"
 
   # Generate an AES key (32 bytes for AES-256)
   aes_key=$(openssl rand -hex 32)
@@ -366,7 +339,6 @@ run_docker_container() {
   sudo bash -c "echo \"AES_KEY=$aes_key\" > /.payram/aes/$aes_key"
   echo "AES key saved to /.payram/aes/$aes_key"
 
-  CONFIG_FILE="config.yaml"
 
   # Declare DB vars
   local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
@@ -378,11 +350,21 @@ run_docker_container() {
   DB_USER=$(yq e  '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
   DB_PASSWORD=$(yq e  '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
 
-  echo "Didnt came here yet"
 
   # Validate
   if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
     echo "Error: Database details are missing in config.yaml."
+    exit 1
+  fi
+  
+  if [[ "$SERVER" == "PRODUCTION" ]]; then
+    NETWORK_TYPE="mainnet"
+    echo "Running in production mode."
+  elif [[ "$SERVER" == "DEVELOPMENT" ]]; then
+    NETWORK_TYPE="testnet"
+    echo "Running in development mode."
+  else
+    echo "❌ Unknown server type: $SERVER"
     exit 1
   fi
 
@@ -395,8 +377,8 @@ run_docker_container() {
     --publish 443:443 \
     --publish 5432:5432 \
     -e AES_KEY="$aes_key" \
-    -e BLOCKCHAIN_NETWORK_TYPE=mainnet \
-    -e SERVER=PRODUCTION \
+    -e BLOCKCHAIN_NETWORK_TYPE=$NETWORK_TYPE \
+    -e SERVER=$SERVER \
     -e POSTGRES_HOST="$DB_HOST" \
     -e POSTGRES_PORT="$DB_PORT" \
     -e POSTGRES_DATABASE="$DB_NAME" \
@@ -737,9 +719,9 @@ fi
   
  
   
-  x_pub_Ethereum=$(yq e '.wallets.Ethereum.xpub' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  x_pub_Bitcoin=$(yq e '.wallets.Bitcoin.xpub' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  x_pub_TRX=$(yq e '.wallets.Trx.xpub' "$CONFIG_FILE" | tr -d '\n' | xargs)
+  x_pub_Ethereum=$(yq e '.wallets.Ethereum.xpub' "$CONFIG_FILE" | xargs)
+  x_pub_Bitcoin=$(yq e '.wallets.Bitcoin.xpub' "$CONFIG_FILE" | xargs)
+  x_pub_TRX=$(yq e '.wallets.Trx.xpub' "$CONFIG_FILE" | xargs)
 
   x_pub_Ethereum_address=$(yq e '.wallets.Ethereum.deposit_addresses_count' "$CONFIG_FILE" | tr -d '\n' | xargs)
   x_pub_Bitcoin_address=$(yq e '.wallets.Bitcoin.deposit_addresses_count' "$CONFIG_FILE" | tr -d '\n' | xargs)
@@ -1141,7 +1123,6 @@ fi
   #########################
   # Xpub Ethereum and generate addresses
   #########################
-  echo "this is the xpub ethereum thing, $x_pub_Ethereum"
   if ! grep -q "xpub_ethereum_done" "$STATE_FILE" && [ -n "$x_pub_Ethereum" ]; then
       if check_params "xpub Ethereum" "$x_pub_Ethereum" "Ethereum address count" "$x_pub_Ethereum_address"; then
           echo "Processing xpub Ethereum"
@@ -1636,6 +1617,8 @@ setup_container() {
 
   max_attempts=3
   wait_time=20
+  CONFIG_FILE="config.yaml"
+  FRONTEND_URL=$(yq e '.configuration["payram.frontend"]' "$CONFIG_FILE" | xargs)
 
 
   # Try to hit the endpoint until a 200 status code is received or max attempts reached.
@@ -1651,6 +1634,8 @@ setup_container() {
           echo "Your setup is successful!"
           # Append the container_restarted flag if it is not already present.
           update_state "$container_restarted_flag"
+          echo "🚀 Go to this link to login with your credentials:"
+          echo "$FRONTEND_URL/login"
           return 0
       fi
   done
@@ -1662,8 +1647,7 @@ setup_container() {
 
 setup_container
 
-  
-  echo "All API requests completed."
+  echo "Script execution finished."
 }
 
 
