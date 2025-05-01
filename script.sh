@@ -188,29 +188,7 @@ install_docker() {
   fi
 }
 
-install_sqlite() {
-  if is_installed sqlite3; then
-    echo "✅ SQLite is already installed."
-  else
-    echo "🚀 Installing SQLite..."
-    case "$OS" in
-      ubuntu|debian)
-        sudo apt update && sudo apt install -y sqlite3
-        ;;
-      amzn|centos|rhel)
-        sudo yum update -y && sudo yum install -y sqlite
-        ;;
-      macos)
-        brew install sqlite
-        ;;
-      *)
-        echo "❌ OS not supported for SQLite installation."
-        exit 1
-        ;;
-    esac
-    echo "✅ SQLite installed successfully."
-  fi
-}
+
 
 install_jq() {
   if is_installed jq; then
@@ -301,8 +279,7 @@ install_dependencies() {
     return
   fi
 
-  install_docker
-  install_sqlite
+  install_docker  
   install_jq
   install_yq
 
@@ -410,7 +387,7 @@ run_docker_container
 
 echo ""
 echo "🔍 Verifying installations..."
-docker --version && sqlite3 --version && jq --version && yq --version
+docker --version && jq --version && yq --version
 echo "🎉 Setup complete!"
 
 
@@ -489,7 +466,9 @@ process_projects() {
     "name": "$project_name",
     "website": "$project_website",
     "successEndpoint": "$success_endpoint",
-    "webhookEndpoint": "$webhook_endpoint"
+    "webhookEndpoint": "$webhook_endpoint",
+    "defaultPaymentBlockchainID":1,
+    "defaultPaymentBlockchainCurrencyID",1
 }
 EOF
 )
