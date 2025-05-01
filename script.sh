@@ -466,7 +466,9 @@ process_projects() {
     "name": "$project_name",
     "website": "$project_website",
     "successEndpoint": "$success_endpoint",
-    "webhookEndpoint": "$webhook_endpoint"
+    "webhookEndpoint": "$webhook_endpoint",
+    "defaultPaymentBlockchainID":1,
+    "defaultPaymentBlockchainCurrencyID":1
 }
 EOF
 )
