@@ -1,4 +1,6 @@
+server: ""
 configuration:
+  wallet_connect_id: ""
   payram.backend: ""
   payram.frontend: ""
   postal.endpoint: ""
