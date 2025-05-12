@@ -510,32 +510,8 @@ EOF
             if [[ "$platform_id" =~ ^[0-9]+$ ]]; then
                 echo "Request successful for $project_key"
                 echo "Extracted platform ID: $platform_id"
-
-                # Send the second request with the extracted ID
-                second_request_data=$(cat <<EOF
-{
-    "externalPlatformID": $platform_id,
-    "roleName": "platform_admin"
-}
-EOF
-)
-                echo "Sending second request for $project_key with externalPlatformID $platform_id"
-                second_response=$(perform_request_http "Sending API key data for $project_key" \
-                    --header "API-Key: $API_KEY" \
-                    --header "Content-Type: application/json" \
-                    --data-raw "$second_request_data" \
-                    "http://localhost:8080/api/v1/api-key")
-
-                # Extract the HTTP status from the second request's response
-                second_http_code=$(echo "$second_response" | tail -n 1)
-                echo "Second request HTTP Status: $second_http_code"
-                # Check if the second request was successful
-                if [[ "$second_http_code" -eq 200 || "$second_http_code" -eq 201 ]]; then
-                    echo "Second request successful for $project_key. Updating state."
-                    update_state "$flag"  # This should update the state file
-                else
-                    echo "Second request failed for $project_key. HTTP Status: $second_http_code"
-                fi
+                echo "Updating state for $project_key."
+                update_state "$flag"  # This should update the state file
             else
                 echo "Error: platform_id is not a valid integer. Response: $response"
             fi
@@ -893,7 +869,6 @@ fi
               echo "Configuration backend already done; skipping."
           fi
           ;;
-        
         "payram.frontend")
           if ! grep -q "configuration_frontend_done" "$STATE_FILE"; then
               echo "Configuring frontend"
@@ -911,7 +886,23 @@ fi
               echo "Configuration frontend already done; skipping."
           fi
           ;;
-          
+        "wallet_connect_id")
+          if ! grep -q "configuration_wallet_connect_id_done" "$STATE_FILE"; then
+              echo "Configuring WalletConnect ID"
+              code=$(perform_request "Configuration WalletConnect ID" "$BASE_URL/api/v1/configuration" \
+                --header "API-Key: $API_KEY" \
+                --header "Content-Type: application/json" \
+                --data-raw "{
+                  \"key\": \"$key\",
+                  \"value\": \"$value\"
+                }")
+              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
+                  update_state "configuration_wallet_connect_id_done"
+              fi
+          else
+              echo "Configuration WalletConnect ID already done; skipping."
+          fi
+          ;;
         "ssl")
           if ! grep -q "configuration_ssl_done" "$STATE_FILE"; then
               echo "Configuring SSL"
@@ -929,7 +920,6 @@ fi
               echo "Configuration SSL already done or not required; skipping."
           fi
           ;;
-          
         "postal.endpoint")
           if ! grep -q "configuration_postal_endpoint_done" "$STATE_FILE"; then
               echo "Configuring postal endpoint"
@@ -947,7 +937,6 @@ fi
               echo "Configuration postal endpoint already done; skipping."
           fi
           ;;
-          
         "postal.apikey")
           if ! grep -q "configuration_postal_apikey_done" "$STATE_FILE"; then
               echo "Configuring postal API key"
@@ -1473,7 +1462,7 @@ else
   json_payload=$(cat <<'EOF'
 {
   "key": "payram.templates.email.body",
-  "value": "<table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"heading_block block-2\" role=\"presentation\" style=\"mso-table-lspace: 0pt; mso-table-rspace: 0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <h1 style=\"margin: 0; color: #1e0e4b; direction: ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 38px; font-weight: 700; letter-spacing: normal; line-height: 120%; text-align: left; margin-top: 0; margin-bottom: 0; mso-line-height-alt: 45.6px;\"><span class=\"tinyMce-placeholder\">Let me help you with payments</span></h1> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"paragraph_block block-3\" role=\"presentation\" style=\"mso-table-lspace: 0pt; mso-table-rspace: 0pt; word-break: break-word;\" width=\"100%\"> <tr> <td class=\"pad\"> <div style=\"color:#444a5b; direction:ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 16px; font-weight: 400; letter-spacing: 0px; line-height: 120%; text-align: left; mso-line-height-alt: 19.2px;\"> <p style=\"margin:0; margin-bottom:16px;\">Payram has helped millions with lead generation and grow their business by 30-40% in just 90 days.</p> <p style=\"margin:0; margin-bottom:16px;\">Let's get you more client.</p> <p style=\"margin:0;\"></p> </div> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"button_block block-4\" role=\"presentation\" style=\"mso-table-lspace: 0pt; mso-table-rspace: 0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <div align=\"center\" class=\"alignment\"><a href=\"{{ .PaymentURL }}\" target=\"_blank\" style=\"text-decoration:none; display:inline-block; color:#ffffff; background-color:#4d9aff; border-radius:4px; width:auto; border-top:0px solid transparent; font-weight:400; border-right:0px solid transparent; border-bottom:0px solid transparent; border-left:0px solid transparent; padding-top:5px; padding-bottom:5px; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size:16px; text-align:center; mso-border-alt:none; word-break:keep-all;\"><span style=\"padding-left:20px; padding-right:20px; font-size:16px; display:inline-block; letter-spacing:normal;\"><span style=\"word-break:break-word; line-height:32px;\">Pay</span></span></a></div> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"divider_block block-5\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <div align=\"center\" class=\"alignment\"> <table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt;\" width=\"100%\"> <tr> <td class=\"divider_inner\" style=\"font-size:1px; line-height:1px; border-top:1px solid #dddddd;\"><span> </span></td> </tr> </table> </div> </td> </tr> </table> <div class=\"spacer_block block-6\" style=\"height:60px; line-height:60px; font-size:1px;\"> </div> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"paragraph_block block-7\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt; word-break:break-word;\" width=\"100%\"> <tr> <td class=\"pad\"> <div style=\"color:#444a5b; direction:ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size:16px; font-weight:400; letter-spacing:0px; line-height:120%; text-align:left; mso-line-height-alt:19.2px;\"> <p style=\"margin:0; margin-bottom:16px;\">\"Since I started using Payram, I've seen a 30-40% increase in my lead generation. The platform's reach is incredible!\" - <em><strong>Tom, NY</strong></em></p> <p style=\"margin:0;\">\"Payram has been a game-changer for my business. It's an investment that pays for itself.\" <em><strong>- Adam, LA</strong></em></p> </div> </td> </tr> </table><!-- End --> </body>"
+  "value": "<table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"heading_block block-2\" role=\"presentation\" style=\"mso-table-lspace: 0pt; mso-table-rspace: 0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <h1 style=\"margin: 0; color: #1e0e4b; direction: ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 38px; font-weight: 700; letter-spacing: normal; line-height: 120%; text-align: left; margin-top: 0; margin-bottom: 0; mso-line-height-alt: 45.6px;\"><span class=\"tinyMce-placeholder\">Let me help you with payments</span></h1> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"paragraph_block block-3\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt; word-break:break-word;\" width=\"100%\"> <tr> <td class=\"pad\"> <div style=\"color:#444a5b; direction:ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 16px; font-weight: 400; letter-spacing: 0px; line-height: 120%; text-align: left; mso-line-height-alt: 19.2px;\"> <p style=\"margin:0; margin-bottom:16px;\">Payram has helped millions with lead generation and grow their business by 30-40% in just 90 days.</p> <p style=\"margin:0; margin-bottom:16px;\">Let's get you more client.</p> <p style=\"margin:0;\"></p> </div> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"button_block block-4\" role=\"presentation\" style=\"mso-table-lspace: 0pt; mso-table-rspace: 0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <div align=\"center\" class=\"alignment\"><a href=\"{{ .PaymentURL }}\" target=\"_blank\" style=\"text-decoration:none; display:inline-block; color:#ffffff; background-color:#4d9aff; border-radius:4px; width:auto; border-top:0px solid transparent; font-weight:400; border-right:0px solid transparent; border-bottom:0px solid transparent; border-left:0px solid transparent; padding-top:5px; padding-bottom:5px; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size:16px; text-align:center; mso-border-alt:none; word-break:keep-all;\"><span style=\"padding-left:20px; padding-right:20px; font-size:16px; display:inline-block; letter-spacing:normal;\"><span style=\"word-break:break-word; line-height:32px;\">Pay</span></span></a></div> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"divider_block block-5\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <div align=\"center\" class=\"alignment\"> <table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt;\" width=\"100%\"> <tr> <td class=\"divider_inner\" style=\"font-size:1px; line-height:1px; border-top:1px solid #dddddd;\"><span> </span></td> </tr> </table> </div> </td> </tr> </table> <div class=\"spacer_block block-6\" style=\"height:60px; line-height:60px; font-size:1px;\"> </div> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"paragraph_block block-7\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt; word-break:break-word;\" width=\"100%\"> <tr> <td class=\"pad\"> <div style=\"color:#444a5b; direction:ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size:16px; font-weight:400; letter-spacing:0px; line-height:120%; text-align:left; mso-line-height-alt:19.2px;\"> <p style=\"margin:0; margin-bottom:16px;\">\"Since I started using Payram, I've seen a 30-40% increase in my lead generation. The platform's reach is incredible!\" - <em><strong>Tom, NY</strong></em></p> <p style=\"margin:0;\">\"Payram has been a game-changer for my business. It's an investment that pays for itself.\" <em><strong>- Adam, LA</strong></em></p> </div> </td> </tr> </table><!-- End --> </body>"
 }
 EOF
 )
@@ -1543,6 +1532,58 @@ else
   fi
 fi
 
+# Function to create a platform admin API key
+create_platform_admin_api_key() {
+    local ext_pid=$1 project_key=$2
+    local url="http://localhost:8080/api/v1/api-key"
+    local flag="pa_api_key_${project_key}_${ext_pid}_done"
+
+    # Check if already processed
+    if [ -f "$STATE_FILE" ] && grep -qF "$flag" "$STATE_FILE"; then
+        echo "INFO: API Key for $project_key (ID: $ext_pid) already exists. Skipping."
+        return 0
+    fi
+
+    echo "INFO: Creating API Key for project '$project_key' (ID: $ext_pid)..."
+    local payload
+    payload=$(cat <<EOF
+{
+    "externalPlatformID": ${ext_pid},
+    "roleName": "platform_admin"
+}
+EOF
+)
+    local resp body code key
+
+    resp=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" \
+        --request POST \
+        --header "API-Key: $API_KEY" \
+        --header "Content-Type: application/json" \
+        --data-raw "$payload" \
+        "$url")
+
+    body=$(echo "$resp" | sed -e 's/HTTPSTATUS\:.*//g')
+    code=$(echo "$resp" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+
+    if [[ "$code" -eq 200 || "$code" -eq 201 ]]; then
+        key=$(echo "$body" | jq -r '.key // empty')
+        if [[ -n "$key" ]]; then
+            echo "SUCCESS: API Key for $project_key (ID: $ext_pid) created: $key"
+            # Update state file
+            if sudo bash -c "echo '$flag' >> \"$STATE_FILE\""; then
+                echo "INFO: State file updated for $project_key (ID: $ext_pid)."
+            else
+                echo "ERROR: Failed to write flag '$flag' to state file '$STATE_FILE' for $project_key (ID: $ext_pid)." >&2
+            fi
+        else
+            echo "ERROR: API Key for $project_key (ID: $ext_pid) request OK (HTTP $code), but 'key' field missing/empty in response. Body: $body" >&2
+        fi
+    else
+        echo "ERROR: Failed to create API Key for $project_key (ID: $ext_pid). HTTP Status: $code. Body: $body" >&2
+    fi
+}
+
+
 setup_container() {
   
   required_states=(
@@ -1553,6 +1594,7 @@ setup_container() {
     "configuration_frontend_done"
     "configuration_postal_endpoint_done"
     "configuration_postal_apikey_done"
+    "configuration_wallet_connect_id_done"
     "blockchain_ethereum_done"
     "blockchain_bitcoin_done"
     "blockchain_trx_done"
@@ -1630,8 +1672,36 @@ setup_container() {
       status_code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL")
       echo "Received status code: $status_code"
 
-      if [ "$status_code" -eq 200 ]; then
+       if [ "$status_code" -eq 200 ]; then
           echo "Your setup is successful!"
+          echo -e "\nINFO: --- Starting Project-specific Platform Admin API Key Creation ---"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+              echo "ERROR: Configuration file '$CONFIG_FILE' not found. Skipping platform admin API key creation for projects." >&2
+          else
+              project_keys=$(yq eval '.projects | keys | .[]' "$CONFIG_FILE" 2>/dev/null)
+
+              if [ -z "$project_keys" ]; then
+                  echo "INFO: No projects found under '.projects' in '$CONFIG_FILE' or yq error. Skipping project API key creation loop."
+              else
+                  echo "INFO: Processing projects for API key creation: $project_keys"
+                  for project_key_name in $project_keys; do
+                      # Extract numeric ID from project_key_name (e.g., project1 -> 1)
+                      project_numeric_id=$(echo "$project_key_name" | sed -n 's/^project\([0-9]\+\)$/\1/p')
+
+                      if [[ -n "$project_numeric_id" ]]; then
+                          create_platform_admin_api_key "$project_numeric_id" "$project_key_name"
+                      else
+                          echo "WARN: Project key '$project_key_name' does not match 'project<number>' format. Skipping API key creation for this project."
+                      fi
+                  done
+                  echo "INFO: --- Finished Project-specific Platform Admin API Key Creation ---"
+              fi
+          fi
+
+          echo -e "\n\e[1m\e[33mIMPORTANT:\e[0m The API keys displayed during this setup are generated ONLY ONCE."
+          echo -e "\e[1m\e[33mPlease make sure to COPY and STORE them securely NOW.\e[0m"
+          echo -e "\e[1m\e[33mThese keys are required for interacting with your PayRam server.\e[0m\n"
           # Append the container_restarted flag if it is not already present.
           update_state "$container_restarted_flag"
           echo "🚀 Go to this link to login with your credentials:"
@@ -1653,7 +1723,3 @@ setup_container
 
 # Call the API requests function
 run_api_requests
-
-
-
-
