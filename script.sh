@@ -161,7 +161,25 @@ is_installed() {
 
 ############################
 # Dependency Installation Functions
-############################
+# Installs Docker on the system if it is not already present.
+#
+# Globals:
+#
+# * OS: The detected operating system type, used to determine the installation method.
+#
+# Outputs:
+#
+# * Prints status messages to STDOUT regarding Docker installation progress and results.
+#
+# Returns:
+#
+# * Exits with status 1 if the operating system is not supported for Docker installation.
+#
+# Example:
+#
+# ```bash
+# install_docker
+# ```
 install_docker() {
   if is_installed docker; then
     echo "✅ Docker is already installed."
@@ -190,6 +208,25 @@ install_docker() {
 
 
 
+# Installs the jq command-line JSON processor if it is not already present.
+#
+# Globals:
+#
+# * OS: The detected operating system type, used to determine the installation method.
+#
+# Outputs:
+#
+# * Prints status messages to STDOUT regarding the installation process.
+#
+# Returns:
+#
+# * Exits with status 1 if the operating system is not supported for jq installation.
+#
+# Example:
+#
+# ```bash
+# install_jq
+# ```
 install_jq() {
   if is_installed jq; then
     echo "✅ jq is already installed."
@@ -270,7 +307,18 @@ check_STATE_FILE() {
 
 ############################
 # Install Dependencies if Not Already Done
-############################
+# Installs required dependencies (Docker, jq, yq) if not already installed, and updates the state file to prevent redundant installations.
+#
+# Globals:
+# * /.payram/state.txt - Used to track whether dependencies have been installed.
+#
+# Outputs:
+# * Prints status messages to STDOUT.
+#
+# Example:
+#
+#   install_dependencies
+#   # Installs Docker, jq, and yq if not already installed, and updates the state file.
 install_dependencies() {
   local STATE_FILE="/.payram/state.txt"
 
@@ -289,7 +337,24 @@ install_dependencies() {
 
 ############################
 # Pull and Run Docker Container if Not Already Runningconfig
-############################
+# Starts the Payram Docker container with environment variables and volumes based on configuration.
+#
+# Reads server mode and PostgreSQL database credentials from config.yaml, generates a new AES-256 key, and saves it to the local filesystem. Launches the "payram" Docker container with the appropriate environment variables and volume mounts for configuration, logs, database, and SSL certificates. Updates the state file upon successful startup.
+#
+# Globals:
+# * Reads from config.yaml for server and database configuration.
+# * Writes AES key to /.payram/aes/
+# * Updates /.payram/state.txt to track container state.
+#
+# Outputs:
+# * Prints status and error messages to STDOUT.
+#
+# Returns:
+# * Exits with status 1 if required configuration is missing or container fails to start.
+#
+# Example:
+#
+#   run_docker_container
 
 
 run_docker_container() {
@@ -391,6 +456,24 @@ docker --version && jq --version && yq --version
 echo "🎉 Setup complete!"
 
 
+# Processes each project defined in the configuration file by creating an external platform via API and updates the state to prevent duplicate processing.
+#
+# Globals:
+#   CONFIG_FILE: Path to the YAML configuration file.
+#   STATE_FILE: Path to the state tracking file.
+#   API_KEY: API key used for authentication in API requests (must be set in the environment).
+#
+# Arguments:
+#   None
+#
+# Outputs:
+#   Prints status messages, HTTP response codes, and API responses to STDOUT and STDERR.
+#
+# Example:
+#
+#   process_projects
+#
+# For each project in the config, sends a POST request to create the external platform. If successful, marks the project as processed in the state file to avoid reprocessing. Skips projects already marked as done.
 process_projects() {
     CONFIG_FILE="config.yaml"
     STATE_FILE="/.payram/state.txt"  
@@ -501,7 +584,13 @@ EOF
 
 ####################################
 # API Requests Section (wrapped in a function)
-####################################
+# Validates the presence and non-empty values of required configuration keys in the provided config.yaml file.
+#
+# Arguments:
+#
+# * CONFIG_FILE (optional): Path to the configuration YAML file. Defaults to 'config.yaml' if not specified.
+#
+# Exits with an error if any required top-level key or project block key is missing or empty. Ensures that all required fields for Payram, Postal, SSL, wallet connect, and each project are present and populated.
 
 validate_config() {
   local CONFIG_FILE="${1:-config.yaml}"
@@ -586,6 +675,20 @@ $line"
 }
 
 
+# Runs the full API-based configuration and initialization for the Payram server environment.
+#
+# This function performs user signup and signin, applies all required API configurations, sets up blockchain and wallet integrations, processes project registrations, and configures email and webhook templates. It ensures each step is idempotent by tracking progress in a state file, and prompts for user credentials as needed.
+#
+# Globals:
+#   CONFIG_FILE: Path to the YAML configuration file.
+#   STATE_FILE: Path to the state tracking file.
+#
+# Outputs:
+#   Prints status messages, API responses, and error messages to STDOUT and STDERR.
+#
+# Example:
+#   run_api_requests
+#   # Prompts for email and password, then configures the Payram server via API calls according to config.yaml.
 run_api_requests() {
 
   CONFIG_FILE="config.yaml"
