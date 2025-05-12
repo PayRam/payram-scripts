@@ -551,6 +551,7 @@ validate_config() {
   check_top_level_key "postal.endpoint"
   check_top_level_key "postal.apikey"
   check_top_level_key "ssl"
+  check_top_level_key "wallet_connect_id"
 
   local projects_block
   projects_block=$(
