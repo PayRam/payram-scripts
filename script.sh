@@ -1704,7 +1704,7 @@ setup_container() {
           echo -e "\e[1m\e[33mPlease make sure to COPY and STORE them securely NOW.\e[0m"
           echo -e "\e[1m\e[33mThese keys are required for interacting with your PayRam server.\e[0m\n"
           # Append the container_restarted flag if it is not already present.
-          update_state "$container_restarted_flag"
+          # update_state "$container_restarted_flag"
           echo "🚀 Go to this link to login with your credentials:"
           echo "$FRONTEND_URL/login"
           return 0
