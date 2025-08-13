@@ -146,6 +146,9 @@ save_configuration() {
   
   mkdir -p "$config_dir"
 
+  # Set restrictive umask before creating the file
+  umask 077
+
   # Write all relevant variables to the config file
   cat > "$config_file" << EOL
 # PayRam Configuration - Do not edit manually unless you know what you are doing.
@@ -162,7 +165,9 @@ POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-}"
 SSL_CERT_PATH="${SSL_CERT_PATH:-}"
 EOL
 
-  print_color "green" "✅ Configuration saved."
+  # Double-check permissions are set correctly
+  chmod 600 "$config_file" || true
+  print_color "green" "✅ Configuration saved (permissions 600)."
 }
 
 # Function to perform a full reset
