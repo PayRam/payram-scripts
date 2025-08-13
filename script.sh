@@ -4,15 +4,11 @@ set -euo pipefail
 # Check if script is run as root
 check_root() {
   if [ "$(id -u)" -ne 0 ]; then
-    echo -e "\033[0;31mError: This script must be run as root (or with sudo).\033[0m"
-    echo -e "\033[0;33mPlease run: sudo su\033[0m"
-    echo -e "\033[0;33mThen try again.\033[0m"
+    echo -e "\033[0;31mError: This script must be run as root.\033[0m"
+    echo -e "\033[0;33mPlease run: sudo ./$(basename "$0")\033[0m"
     exit 1
   fi
 }
-
-# Execute root check immediately
-check_root
 
 # --- Default Configuration ---
 DEFAULT_IMAGE_TAG="develop"
@@ -521,33 +517,40 @@ configure_ssl_path() {
 # --- Main Logic ---
 
 main() {
-  check_and_install_dependencies
-
   # --- Argument Parsing ---
   local UPDATE_FLAG=false
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --update)
-        UPDATE_FLAG=true
-        shift # past argument
-        ;;
-      --reset)
-        reset_environment
-        exit 0
-        ;;
-      --testnet)
-        NETWORK_TYPE="testnet"
-        SERVER="DEVELOPMENT"
-        shift # past argument
-        ;;
-      --tag=*|-T=*)
-        IMAGE_TAG="${1#*=}"
-        shift # past argument
-        ;;
       -h|--help)
+        # Help can be run without root
         usage
         exit 0
+        ;;
+      --update|--reset|--testnet|--tag=*|-T=*)
+        # For operations that require root, check privileges first
+        check_root
+        
+        # Now process the actual argument
+        case "$1" in
+          --update)
+            UPDATE_FLAG=true
+            shift # past argument
+            ;;
+          --reset)
+            reset_environment
+            exit 0
+            ;;
+          --testnet)
+            NETWORK_TYPE="testnet"
+            SERVER="DEVELOPMENT"
+            shift # past argument
+            ;;
+          --tag=*|-T=*)
+            IMAGE_TAG="${1#*=}"
+            shift # past argument
+            ;;
+        esac
         ;;
       *)
         print_color "red" "Error: Unknown option '$1'"
@@ -557,10 +560,17 @@ main() {
     esac
   done
   
+  # Check for root for interactive mode (when no args provided)
+  if [ $# -eq 0 ]; then
+    check_root
+  fi
+  
   # Process update after all arguments are parsed
   if [[ "$UPDATE_FLAG" = true ]]; then
     update_container
   fi
+  
+  check_and_install_dependencies
 
   # --- Pre-flight Check for Interactive Mode ---
   if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
