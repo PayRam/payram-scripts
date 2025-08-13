@@ -19,6 +19,11 @@ POSTGRES_SSLMODE="prefer"
 SSL_CERT_PATH=""
 AES_KEY=""
 
+# PayRam directories
+PAYRAM_HOME="/home/ubuntu"
+PAYRAM_INFO_DIR="$PAYRAM_HOME/.payraminfo"
+PAYRAM_CORE_DIR="$PAYRAM_HOME/.payram-core"
+
 # --- Helper Functions ---
 
 # Function to display usage information
@@ -124,8 +129,8 @@ generate_aes_key() {
   print_color "yellow" "Generating a new secure AES key..."
   AES_KEY=$(openssl rand -hex 32)
   
-  # Also save the key to /home/ubuntu/.payraminfo/aes/ for legacy compatibility
-  local aes_dir="/home/ubuntu/.payraminfo/aes"
+  # Also save the key to the aes directory for legacy compatibility
+  local aes_dir="$PAYRAM_INFO_DIR/aes"
   print_color "yellow" "Saving AES key to $aes_dir for legacy compatibility..."
   
   mkdir -p "$aes_dir"
@@ -135,7 +140,7 @@ generate_aes_key() {
 
 # Function to save the configuration to a file
 save_configuration() {
-  local config_dir="/home/ubuntu/.payraminfo"
+  local config_dir="$PAYRAM_INFO_DIR"
   local config_file="$config_dir/config.env"
 
   print_color "yellow" "\nSaving configuration to $config_file..."
@@ -185,15 +190,15 @@ reset_environment() {
 
   print_color "yellow" "Deleting PayRam data and configuration directories..."
   # Use specific rm commands for safety and precision
-  sudo rm -rf /home/ubuntu/.payram-core
-  rm -rf /home/ubuntu/.payraminfo
+  sudo rm -rf "$PAYRAM_CORE_DIR"
+  rm -rf "$PAYRAM_INFO_DIR"
 
   print_color "green" "\n✅ Reset complete. All PayRam data and configurations have been removed."
 }
 
 # Function to update the container using saved settings
 update_container() {
-  local config_file="/home/ubuntu/.payraminfo/config.env"
+  local config_file="$PAYRAM_INFO_DIR/config.env"
   print_color "blue" "Starting PayRam update process..."
 
   if ! test -f "$config_file"; then
@@ -248,6 +253,8 @@ update_container() {
         ;;
       "${options[1]}")
         IMAGE_TAG="$current_tag"
+        # Flag to indicate we're using the existing tag
+        local using_existing_tag=true
         break
         ;;
       "${options[2]}")
@@ -279,7 +286,27 @@ update_container() {
 
   read -p "Press [Enter] to proceed with the update..."
 
+  # Check if we're using the existing tag (no changes)
+  if [[ "${using_existing_tag:-false}" == true ]]; then
+    # Check if container is already running with the same tag
+    if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
+      print_color "green" "\n✅ Container is already running with tag '$IMAGE_TAG'."
+      print_color "yellow" "No changes needed. Exiting..."
+      exit 0
+    fi
+  fi
+
   print_color "yellow" "\nUpdating to image: buddhasource/payram-core:$IMAGE_TAG..."
+  
+  # Stop and remove existing container if running
+  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
+    print_color "yellow" "Stopping and removing existing 'payram' container..."
+    docker stop payram &>/dev/null || true
+    docker rm -v payram &>/dev/null || true
+  elif docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
+    print_color "yellow" "Removing existing stopped 'payram' container..."
+    docker rm -v payram &>/dev/null || true
+  fi
   
   # Call the run function with the selected settings
   run_docker_container
@@ -301,17 +328,38 @@ validate_docker_tag() {
 
 # Function to run the Docker container
 run_docker_container() {
+  # Track if we're in update mode
+  local is_update=false
+  # Check if this function was called from update_container
+  local caller_function=${FUNCNAME[1]:-}
+  if [[ "$caller_function" == "update_container" ]]; then
+    is_update=true
+  fi
+
   # Validate the Docker tag before proceeding
   if ! validate_docker_tag "$IMAGE_TAG"; then
     exit 1
   fi
 
-  print_color "yellow" "\nStopping and removing existing 'payram' container..."
-  docker stop payram &>/dev/null || true
-  docker rm payram &>/dev/null || true
+  # Check if a payram container is already running (skip this check if we're updating)
+  if [[ "$is_update" == false ]] && docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
+    print_color "red" "Error: A 'payram' container is already running."
+    print_color "yellow" "If you want to update it, use the '--update' flag."
+    print_color "yellow" "If you want to start over, use the '--reset' flag first."
+    exit 1
+  fi
 
-  print_color "yellow" "Removing all 'buddhasource/payram-core' Docker images..."
-  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+  # Check if a stopped container exists and remove it
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
+    print_color "yellow" "\nRemoving existing stopped 'payram' container..."
+    docker rm -v payram &>/dev/null || true
+  fi
+
+  # Check if any payram images exist
+  if docker images --filter=reference='buddhasource/payram-core' -q | grep -q .; then
+    print_color "yellow" "Removing existing 'buddhasource/payram-core' Docker images..."
+    docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+  fi
 
   print_color "yellow" "Pulling the Docker image: buddhasource/payram-core:$IMAGE_TAG..."
   if ! docker pull "buddhasource/payram-core:$IMAGE_TAG"; then
@@ -345,9 +393,9 @@ run_docker_container() {
     -e POSTGRES_USERNAME="$DB_USER" \
     -e POSTGRES_PASSWORD="$DB_PASSWORD" \
     -e SSL_CERT_PATH="$SSL_CERT_PATH" \
-    -v /home/ubuntu/.payram-core:/root/payram \
-    -v /home/ubuntu/.payram-core/log/supervisord:/var/log \
-    -v /home/ubuntu/.payram-core/db/postgres:/var/lib/payram/db/postgres \
+    -v "$PAYRAM_CORE_DIR":/root/payram \
+    -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
+    -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt \
     "buddhasource/payram-core:$IMAGE_TAG"
 
