@@ -1,374 +1,326 @@
 #!/bin/bash
 set -euo pipefail
 
-####################################
-# OS Detection and Dependency Installation
-####################################
-
-reset_dependencies() {
-  local CONTAINER_NAME="payram"
-  local IMAGE_NAME="buddhasource/payram-core:main"
-
-  # Stop the container if it's running.
-  if docker ps --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    echo "Stopping running container: ${CONTAINER_NAME}..."
-    docker stop "${CONTAINER_NAME}"
-  else
-    echo "Container ${CONTAINER_NAME} is not running."
+# Check if script is run as root
+check_root() {
+  if [ "$(id -u)" -ne 0 ]; then
+    echo -e "\033[0;31mError: This script must be run as root (or with sudo).\033[0m"
+    echo -e "\033[0;33mPlease run: sudo su\033[0m"
+    echo -e "\033[0;33mThen try again.\033[0m"
+    exit 1
   fi
-
-  # Remove the container along with its volumes.
-  if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-    echo "Removing container and its volumes: ${CONTAINER_NAME}..."
-    docker rm -v "${CONTAINER_NAME}"
-  else
-    echo "Container ${CONTAINER_NAME} does not exist."
-  fi
-
-  # Remove the Docker image.
-  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^${IMAGE_NAME}$"; then
-    echo "Removing Docker image: ${IMAGE_NAME}..."
-    docker rmi "${IMAGE_NAME}"
-  else
-    echo "Docker image ${IMAGE_NAME} not found."
-  fi
-
-  # Remove associated files/directories (.payram-core and .payram)
-  echo "Searching and deleting .payram-core and .payram files/directories..."
-  sudo find / -type d \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -rf {} \; 2>/dev/null || true
-  sudo find / -type f \( -name ".payram-core" -o -name ".payram" \) -prune -exec rm -f {} \; 2>/dev/null || true
-
-  echo "Container, image, volumes, and associated files have been permanently removed."
 }
 
+# Execute root check immediately
+check_root
+
+# --- Default Configuration ---
+DEFAULT_IMAGE_TAG="develop"
+NETWORK_TYPE="mainnet"
+SERVER="PRODUCTION"
+IMAGE_TAG=""
+POSTGRES_SSLMODE="prefer"
+SSL_CERT_PATH=""
+AES_KEY=""
+
+# --- Helper Functions ---
+
+# Function to display usage information
+usage() {
+  echo "Usage: $0 [OPTIONS]"
+  echo ""
+  echo "A script to manage the PayRam Docker container setup."
+  echo ""
+  echo "Options:"
+  echo "  --update                 Update the container to the latest image version using existing settings."
+  echo "  --reset                  Permanently delete the container, images, data, and configuration."
+  echo "  --testnet                Set up a testnet environment (SERVER=DEVELOPMENT)."
+  echo "  --tag=<tag>, -T=<tag>    Specify the Docker image tag to use. Defaults to release version."
+  echo "  -h, --help               Show this help message."
+}
+
+# Function to print colored text
+print_color() {
+  case "$1" in
+    "green") echo -e "\033[0;32m$2\033[0m" ;;
+    "red") echo -e "\033[0;31m$2\033[0m" ;;
+    "yellow") echo -e "\033[0;33m$2\033[0m" ;;
+    "blue") echo -e "\033[0;34m$2\033[0m" ;;
+    *)
+      echo "$2"
+      ;;
+  esac
+}
+
+# Function to check and install dependencies for Ubuntu
+check_and_install_dependencies() {
+  print_color "blue" "Checking for required dependencies..."
+  local dependencies=("docker" "psql")
+  local missing_deps=()
+
+  for dep in "${dependencies[@]}"; do
+    if ! command -v "$dep" &> /dev/null; then
+      print_color "yellow" "Dependency '$dep' not found."
+      missing_deps+=("$dep")
+    else
+      print_color "green" "✅ Dependency '$dep' is already installed."
+    fi
+  done
+
+  if [ ${#missing_deps[@]} -gt 0 ]; then
+    print_color "yellow" "Installing missing dependencies for Ubuntu..."
+    
+    if ! command -v sudo &> /dev/null; then
+        print_color "red" "Error: 'sudo' command not found. Please install it or run this script as root."
+        exit 1
+    fi
+    
+    print_color "yellow" "Sudo privileges are required to install packages."
+    sudo -v
+    
+    print_color "yellow" "Updating package lists..."
+    sudo apt-get update -y > /dev/null 2>&1
+
+    for dep in "${missing_deps[@]}"; do
+      print_color "yellow" "Installing '$dep'..."
+      case "$dep" in
+        "docker")
+          sudo apt-get install -y docker.io > /dev/null 2>&1
+          sudo systemctl enable --now docker > /dev/null 2>&1
+          sudo usermod -aG docker "$USER" > /dev/null 2>&1
+          print_color "green" "✅ Docker installed successfully."
+          print_color "yellow" "Note: You may need to log out and log back in for Docker group changes to take effect."
+          ;;
+        "psql")
+          sudo apt-get install -y postgresql-client > /dev/null 2>&1
+          print_color "green" "✅ PostgreSQL client installed successfully."
+          ;;
+      esac
+    done
+    print_color "green" "✅ All missing dependencies have been installed."
+  else
+    print_color "green" "All required dependencies are already installed."
+  fi
+  echo
+}
+
+# Function to test PostgreSQL connection
+test_postgres_connection() {
+  print_color "yellow" "\nAttempting to connect to the database..."
+  export PGPASSWORD="$DB_PASSWORD"
+  if psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "\q" &>/dev/null; then
+    unset PGPASSWORD
+    return 0 # Success
+  else
+    unset PGPASSWORD
+    return 1 # Failure
+  fi
+}
+
+# Function to generate a secure AES key
+generate_aes_key() {
+  print_color "yellow" "Generating a new secure AES key..."
+  AES_KEY=$(openssl rand -hex 32)
+  
+  # Also save the key to /home/ubuntu/.payraminfo/aes/ for legacy compatibility
+  local aes_dir="/home/ubuntu/.payraminfo/aes"
+  print_color "yellow" "Saving AES key to $aes_dir for legacy compatibility..."
+  
+  mkdir -p "$aes_dir"
+  echo "AES_KEY=$AES_KEY" > "$aes_dir/$AES_KEY"
+  print_color "green" "✅ AES key generated and saved."
+}
+
+# Function to save the configuration to a file
+save_configuration() {
+  local config_dir="/home/ubuntu/.payraminfo"
+  local config_file="$config_dir/config.env"
+
+  print_color "yellow" "\nSaving configuration to $config_file..."
+  
+  mkdir -p "$config_dir"
+
+  # Write all relevant variables to the config file
+  cat > "$config_file" << EOL
+# PayRam Configuration - Do not edit manually unless you know what you are doing.
+IMAGE_TAG="${IMAGE_TAG:-}"
+NETWORK_TYPE="${NETWORK_TYPE:-}"
+SERVER="${SERVER:-}"
+AES_KEY="${AES_KEY:-}"
+DB_HOST="${DB_HOST:-}"
+DB_PORT="${DB_PORT:-}"
+DB_NAME="${DB_NAME:-}"
+DB_USER="${DB_USER:-}"
+DB_PASSWORD="${DB_PASSWORD:-}"
+POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-}"
+SSL_CERT_PATH="${SSL_CERT_PATH:-}"
+EOL
+
+  print_color "green" "✅ Configuration saved."
+}
+
+# Function to perform a full reset
+reset_environment() {
+  print_color "red" "WARNING: This will permanently delete the PayRam container, all associated Docker images, data volumes, and configuration."
+  read -p "Are you sure you want to proceed? (y/N) " -n 1 -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    print_color "yellow" "Reset cancelled."
+    exit 1
+  fi
+
+  print_color "yellow" "\nStopping and removing 'payram' container..."
+  docker stop payram &>/dev/null || true
+  docker rm -v payram &>/dev/null || true
+
+  print_color "yellow" "Removing all 'buddhasource/payram-core' Docker images..."
+  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+
+  print_color "yellow" "Deleting PayRam data and configuration directories..."
+  # Use specific rm commands for safety and precision
+  sudo rm -rf /home/ubuntu/.payram-core
+  rm -rf /home/ubuntu/.payraminfo
+
+  print_color "green" "\n✅ Reset complete. All PayRam data and configurations have been removed."
+}
+
+# Function to update the container using saved settings
 update_container() {
-  local CONTAINER_NAME="payram"
-  local IMAGE_NAME="buddhasource/payram-core:main"
-  local CONFIG_FILE="config.yaml"
-  local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD aes_key
+  local config_file="/home/ubuntu/.payraminfo/config.env"
+  print_color "blue" "Starting PayRam update process..."
 
-  # Load flat-key database values from config.yaml
-  DB_HOST=$(yq e  '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
-  DB_PORT=$(yq e  '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
-  DB_NAME=$(yq e  '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
-  DB_USER=$(yq e  '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
-  DB_PASSWORD=$(yq e  '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
+  if ! test -f "$config_file"; then
+    print_color "red" "Error: Configuration file not found at '$config_file'."
+    print_color "yellow" "Please run the initial setup first (without the --update flag)."
+    exit 1
+  fi
 
-  CONFIG_FILE="config.yaml"
+  print_color "yellow" "Loading existing configuration from $config_file..."
+  # Store the user-provided tag BEFORE loading config
+  local user_provided_tag="$IMAGE_TAG"
   
-  SERVER=$(yq e '.server' "$CONFIG_FILE" | xargs)
-  if [[ "$SERVER" == "PRODUCTION" ]]; then
-    NETWORK_TYPE="mainnet"
-    echo "Running in production mode."
-  elif [[ "$SERVER" == "DEVELOPMENT" ]]; then
-    NETWORK_TYPE="testnet"
-    echo "Running in development mode."
+  # Load the config but save IMAGE_TAG separately first
+  source "$config_file"
+  local current_tag="$IMAGE_TAG"
+  
+  # Set target tag based on user input or default
+  local target_tag
+  if [[ -n "$user_provided_tag" ]]; then
+    target_tag="$user_provided_tag"
   else
-    echo "❌ Unknown server type: $SERVER"
-    exit 1
+    target_tag="$DEFAULT_IMAGE_TAG"
   fi
 
-  # Validate
-  if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
-    echo "Error: Database details are missing or invalid in config.yaml."
-    exit 1
+  print_color "green" "✅ Configuration loaded."
+  echo
+  
+  # # Check if current and target versions are the same
+  # if [[ "$current_tag" == "$target_tag" ]]; then
+  #   print_color "blue" "--- Version Check ---"
+  #   print_color "yellow" "Current installed version: $current_tag"
+  #   print_color "yellow" "Target version: $target_tag"
+  #   print_color "green" "\n✅ You are already using the latest version ($current_tag)."
+  #   print_color "yellow" "No update needed. Exiting..."
+  #   exit 0
+  # fi
+  
+  print_color "blue" "--- Tag Selection ---"
+  print_color "yellow" "Current installed version: $current_tag"
+  print_color "yellow" "Target version: $target_tag"
+  echo
+  
+  # Always show selection menu
+  PS3='Please choose which tag to use for the update: '
+  options=("Use target tag: $target_tag (new version)" "Use existing tag: $current_tag (current version)" "Don't update (cancel)")
+  select opt in "${options[@]}"
+  do
+    case $opt in
+      "${options[0]}")
+        IMAGE_TAG="$target_tag"
+        break
+        ;;
+      "${options[1]}")
+        IMAGE_TAG="$current_tag"
+        break
+        ;;
+      "${options[2]}")
+        print_color "yellow" "\nUpdate cancelled by user."
+        exit 0
+        ;;
+      *)
+        print_color "red" "Invalid option $REPLY"
+        ;;
+    esac
+  done
+
+  # Show configuration summary
+  echo
+  print_color "blue" "--- Update Configuration Summary ---"
+  print_color "yellow" "Docker Image Tag: $IMAGE_TAG"
+  print_color "yellow" "Network Type: $NETWORK_TYPE"
+  print_color "yellow" "Server Mode: $SERVER"
+  print_color "yellow" "Database Host: $DB_HOST"
+  print_color "yellow" "Database Port: $DB_PORT"
+  print_color "yellow" "Database Name: $DB_NAME"
+  if [[ -n "$SSL_CERT_PATH" ]]; then
+    print_color "yellow" "SSL Certificate Path: $SSL_CERT_PATH"
+  else
+    print_color "yellow" "SSL Certificate Path: Not configured"
   fi
+  print_color "blue" "--------------------------------"
+  echo
 
+  read -p "Press [Enter] to proceed with the update..."
 
-
-  echo "🚀 Stopping and removing existing container..."
-  docker stop "${CONTAINER_NAME}"   2>/dev/null || true
-  docker rm   "${CONTAINER_NAME}"   2>/dev/null || true
-
-  echo "🗑️ Removing existing image..."
-  docker rmi -f "${IMAGE_NAME}"     2>/dev/null || true
-
-  echo "📥 Pulling the latest image..."
-  docker pull "${IMAGE_NAME}"
-
-  # Generate a new AES key and save it
-  aes_key=$(openssl rand -hex 32)
-  echo "Generated AES key: $aes_key"
-  sudo bash -c "echo \"AES_KEY=$aes_key\" > /.payram/aes/$aes_key"
-  echo "AES key saved to /.payram/aes/$aes_key"
-
-  echo "🔄 Running a new container..."
-  docker run -d \
-    --name "${CONTAINER_NAME}" \
-    --publish 8080:8080 \
-    --publish 8443:8443 \
-    --publish 80:80 \
-    --publish 443:443 \
-    --publish 5432:5432 \
-    -e AES_KEY="$aes_key" \
-    -e BLOCKCHAIN_NETWORK_TYPE=mainnet \
-    -e SERVER=PRODUCTION \
-    -e POSTGRES_HOST="$DB_HOST" \
-    -e POSTGRES_PORT="$DB_PORT" \
-    -e POSTGRES_DATABASE="$DB_NAME" \
-    -e POSTGRES_USERNAME="$DB_USER" \
-    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
-    -v /home/ubuntu/.payram-core:/root/payram \
-    -v /home/ubuntu/.payram-core/log/supervisord:/var/log \
-    -v /home/ubuntu/.payram-core/db/postgres:/var/lib/payram/db/postgres \
-    -v /etc/letsencrypt:/etc/letsencrypt \
-    "${IMAGE_NAME}"
-
-  echo "✅ Update complete! Payram is now running with the latest version."
-}
-
-
-# Execute the appropriate function based on command-line arguments.
-if [[ "${1:-}" == "--reset" ]]; then
-  reset_dependencies
+  print_color "yellow" "\nUpdating to image: buddhasource/payram-core:$IMAGE_TAG..."
+  
+  # Call the run function with the selected settings
+  run_docker_container
   exit 0
-fi
-
-if [[ "${1:-}" == "--update" ]]; then
-  update_container
-  exit 0
-fi
-
-
-if [[ -f /etc/os-release ]]; then
-  source /etc/os-release
-  OS=$ID
-  VERSION=$VERSION_ID
-elif [[ -f /etc/centos-release ]]; then
-  OS="centos"
-  VERSION=$(awk '{print $4}' /etc/centos-release)
-elif [[ -f /etc/redhat-release ]]; then
-  OS="rhel"
-  VERSION=$(awk '{print $7}' /etc/redhat-release)
-elif [[ "$(uname)" == "Darwin" ]]; then
-  OS="macos"
-  VERSION=$(sw_vers -productVersion)
-else
-  OS="unknown"
-  VERSION="unknown"
-fi
-
-echo "Detected OS: $OS"
-echo "Version: $VERSION"
-echo ""
-
-############################
-# Utility Function: Check if a command is installed
-############################
-is_installed() {
-  command -v "$1" &>/dev/null
 }
 
-############################
-# Dependency Installation Functions
-############################
-install_docker() {
-  if is_installed docker; then
-    echo "✅ Docker is already installed."
+# Function to validate a Docker image tag
+validate_docker_tag() {
+  local tag_to_check=$1
+  print_color "yellow" "\nValidating Docker tag: $tag_to_check..."
+  if docker manifest inspect "buddhasource/payram-core:$tag_to_check" >/dev/null 2>&1; then
+    print_color "green" "✅ Tag '$tag_to_check' is valid."
+    return 0
   else
-    echo "🚀 Installing Docker..."
-    case "$OS" in
-      ubuntu|debian)
-        sudo apt update && sudo apt install -y docker.io
-        ;;
-      amzn|centos|rhel)
-        sudo yum update -y && sudo yum install -y docker
-        ;;
-      macos)
-        brew install --cask docker
-        ;;
-      *)
-        echo "❌ OS not supported for Docker installation."
-        exit 1
-        ;;
-    esac
-    sudo systemctl enable docker
-    sudo systemctl start docker
-    echo "✅ Docker installed successfully."
+    print_color "red" "❌ Error: Docker tag '$tag_to_check' not found in the repository. Please provide a valid tag."
+    return 1
   fi
 }
 
-install_sqlite() {
-  if is_installed sqlite3; then
-    echo "✅ SQLite is already installed."
-  else
-    echo "🚀 Installing SQLite..."
-    case "$OS" in
-      ubuntu|debian)
-        sudo apt update && sudo apt install -y sqlite3
-        ;;
-      amzn|centos|rhel)
-        sudo yum update -y && sudo yum install -y sqlite
-        ;;
-      macos)
-        brew install sqlite
-        ;;
-      *)
-        echo "❌ OS not supported for SQLite installation."
-        exit 1
-        ;;
-    esac
-    echo "✅ SQLite installed successfully."
-  fi
-}
-
-install_jq() {
-  if is_installed jq; then
-    echo "✅ jq is already installed."
-  else
-    echo "🚀 Installing jq..."
-    case "$OS" in
-      ubuntu|debian)
-        sudo apt update && sudo apt install -y jq
-        ;;
-      amzn|centos|rhel)
-        sudo yum update -y && sudo yum install -y jq
-        ;;
-      macos)
-        brew install jq
-        ;;
-      *)
-        echo "❌ OS not supported for jq installation."
-        exit 1
-        ;;
-    esac
-    echo "✅ jq installed successfully."
-  fi
-}
-
-install_yq() {
-  if is_installed yq; then
-    echo "✅ yq is already installed."
-  else
-    echo "🚀 Installing yq..."
-    case "$OS" in
-      ubuntu|debian)
-        # Installing yq manually if snap is not available
-        if ! is_installed snap; then
-          curl -Lo /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.15.1/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-        else
-          sudo snap install yq
-        fi
-        ;;
-      amzn|centos|rhel)
-        # Use the manual method for RHEL/CentOS if yq is not in the repos
-        curl -Lo /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.15.1/yq_linux_amd64
-        sudo chmod +x /usr/local/bin/yq
-        ;;
-      macos)
-        brew install yq
-        ;;
-      *)
-        echo "❌ OS not supported for yq installation."
-        exit 1
-        ;;
-    esac
-    echo "✅ yq installed"
-  fi
-}
-
-############################
-# Setup Hidden State File (/.payram/state.txt)
-############################
-check_STATE_FILE() {
-  local dir="/.payram"
-  local file="$dir/state.txt"
-
-  if [[ ! -d "$dir" ]]; then
-    echo "Hidden directory $dir does not exist. Creating now..."
-    sudo mkdir -p "$dir"
-  else
-    echo "Hidden directory $dir already exists."
-  fi
-
-  if [[ ! -f "$file" ]]; then
-    echo "File $file does not exist. Creating now..."
-    sudo touch "$file"
-  else
-    echo "File $file already exists."
-  fi
-}
-
-############################
-# Install Dependencies if Not Already Done
-############################
-install_dependencies() {
-  local STATE_FILE="/.payram/state.txt"
-
-  if grep -q "dependencies_installed" "$STATE_FILE"; then
-    echo "Dependencies have already been installed (flag found in $STATE_FILE)."
-    return
-  fi
-
-  install_docker
-  install_sqlite
-  install_jq
-  install_yq
-
-  echo "dependencies_installed" | sudo tee -a "$STATE_FILE" >/dev/null
-  echo "State updated: dependencies have been installed."
-}
-
-############################
-# Pull and Run Docker Container if Not Already Runningconfig
-############################
-
-
+# Function to run the Docker container
 run_docker_container() {
-  if docker ps --format '{{.Names}}' | grep -wq '^payram$'; then
-    echo "Docker container 'payram' is already running."
-    return
-  fi
-  CONFIG_FILE="config.yaml"
-  
-  SERVER=$(yq e '.server' "$CONFIG_FILE" | xargs)
-
-  echo "You will be running the server in the  $SERVER"
-
-  # Generate an AES key (32 bytes for AES-256)
-  aes_key=$(openssl rand -hex 32)
-  echo "Generated AES key: $aes_key"
-
-  # Create the directory for storing the AES key if it doesn't exist
-  if [[ ! -d "/.payram/aes" ]]; then
-    sudo mkdir -p "/.payram/aes"
-  fi
-
-  # Save the AES key to a file
-  sudo bash -c "echo \"AES_KEY=$aes_key\" > /.payram/aes/$aes_key"
-  echo "AES key saved to /.payram/aes/$aes_key"
-
-
-  # Declare DB vars
-  local DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
-
-  # Import the database details from flat-key config.yaml
-  DB_HOST=$(yq e  '.database["postgres.host"]'     "$CONFIG_FILE" | xargs)
-  DB_PORT=$(yq e  '.database["postgres.port"]'     "$CONFIG_FILE" | xargs)
-  DB_NAME=$(yq e  '.database["postgres.database"]' "$CONFIG_FILE" | xargs)
-  DB_USER=$(yq e  '.database["postgres.username"]' "$CONFIG_FILE" | xargs)
-  DB_PASSWORD=$(yq e  '.database["postgres.password"]' "$CONFIG_FILE" | xargs)
-
-
-  # Validate
-  if [[ -z "$DB_HOST" || -z "$DB_PORT" || -z "$DB_NAME" || -z "$DB_USER" || -z "$DB_PASSWORD" ]]; then
-    echo "Error: Database details are missing in config.yaml."
+  # Validate the Docker tag before proceeding
+  if ! validate_docker_tag "$IMAGE_TAG"; then
     exit 1
   fi
-  
-  if [[ "$SERVER" == "PRODUCTION" ]]; then
-    NETWORK_TYPE="mainnet"
-    echo "Running in production mode."
-  elif [[ "$SERVER" == "DEVELOPMENT" ]]; then
-    NETWORK_TYPE="testnet"
-    echo "Running in development mode."
+
+  print_color "yellow" "\nStopping and removing existing 'payram' container..."
+  docker stop payram &>/dev/null || true
+  docker rm payram &>/dev/null || true
+
+  print_color "yellow" "Removing all 'buddhasource/payram-core' Docker images..."
+  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+
+  print_color "yellow" "Pulling the Docker image: buddhasource/payram-core:$IMAGE_TAG..."
+  if ! docker pull "buddhasource/payram-core:$IMAGE_TAG"; then
+    print_color "red" "\n❌ Failed to pull the Docker image. Please check the image tag and your internet connection."
+    exit 1
+  fi
+
+  # Generate AES key and save configuration AFTER successful image pull
+  if [[ -z "$AES_KEY" ]]; then
+    generate_aes_key
   else
-    echo "❌ Unknown server type: $SERVER"
-    exit 1
+    print_color "yellow" "Using existing AES key from configuration."
   fi
+  save_configuration
 
-  # Run the Docker container
+  print_color "yellow" "Starting the PayRam container..."
   docker run -d \
     --name payram \
     --publish 8080:8080 \
@@ -376,1351 +328,272 @@ run_docker_container() {
     --publish 80:80 \
     --publish 443:443 \
     --publish 5432:5432 \
-    -e AES_KEY="$aes_key" \
-    -e BLOCKCHAIN_NETWORK_TYPE=$NETWORK_TYPE \
-    -e SERVER=$SERVER \
+    -e AES_KEY="$AES_KEY" \
+    -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
+    -e SERVER="$SERVER" \
+    -e POSTGRES_SSLMODE="$POSTGRES_SSLMODE" \
     -e POSTGRES_HOST="$DB_HOST" \
     -e POSTGRES_PORT="$DB_PORT" \
     -e POSTGRES_DATABASE="$DB_NAME" \
     -e POSTGRES_USERNAME="$DB_USER" \
     -e POSTGRES_PASSWORD="$DB_PASSWORD" \
+    -e SSL_CERT_PATH="$SSL_CERT_PATH" \
     -v /home/ubuntu/.payram-core:/root/payram \
     -v /home/ubuntu/.payram-core/log/supervisord:/var/log \
     -v /home/ubuntu/.payram-core/db/postgres:/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt \
-    buddhasource/payram-core:main
+    "buddhasource/payram-core:$IMAGE_TAG"
 
+  # --- Confirmation ---
+  sleep 5 # Give the container a moment to start
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
-    echo "Docker container 'payram' is now running."
-    sudo bash -c "echo 'docker_container_running' >> /.payram/state.txt"
+    print_color "green" "\n✅ PayRam container is now running successfully!"
   else
-    echo "Failed to start docker container 'payram'."
+    print_color "red" "\n❌ Failed to start the PayRam container. Please check the Docker logs for more information."
+    exit 1
   fi
 }
 
+# Function to configure the database
+configure_database() {
+  PS3='Please enter your choice: '
+  options=("Use my own external PostgreSQL database (recommended)" "Use the default PayRam database")
+  select opt in "${options[@]}"
+  do
+      case $opt in
+          "${options[0]}")
+              while true; do
+                echo
+                read -p "Enter Database Host: " DB_HOST
+                read -p "Enter Database Port [5432]: " DB_PORT
+                DB_PORT=${DB_PORT:-5432}
+                read -p "Enter Database Name: " DB_NAME
+                read -p "Enter Database Username: " DB_USER
+                read -s -p "Enter Database Password: " DB_PASSWORD
+                echo
 
-
-
-############################
-# Main Execution for OS/Dependency/Docker Setup
-############################
-check_STATE_FILE
-install_dependencies
-run_docker_container
-
-echo ""
-echo "🔍 Verifying installations..."
-docker --version && sqlite3 --version && jq --version && yq --version
-echo "🎉 Setup complete!"
-
-
-process_projects() {
-    CONFIG_FILE="config.yaml"
-    STATE_FILE="/.payram/state.txt"  
-    API_URL="http://localhost:8080/api/v1/external-platform"
-    
-  perform_request() {
-    description="$1"
-    shift
-    # perform curl and capture body+status
-    response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
-    body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-    http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-
-    >&2 echo "$description Response:"
-
-    # print in the requested format
-    echo "---------------------"
-    echo "$http_code"
-    echo
-    echo "$body"
-    echo "---------------------"
-  }
-
-  perform_request_http() {
-      description="$1"
-      shift
-      # perform curl and capture body+status
-      response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
-      body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-      http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-
-      >&2 echo "$description Response:"
-
-      # print in the requested format
-      echo "---------------------"
-      echo "$http_code"
-      echo
-      echo "$body"
-      echo "---------------------"
-  }
-
-
-    # Function to update the state file
-    update_state() {
-        flag="$1"
-        echo "Updating state with flag: $flag"  # Debug output
-        sudo bash -c "echo '$flag' >> $STATE_FILE"
-    }
-
-    project_keys=$(yq eval '.projects | keys' "$CONFIG_FILE" | sed 's/- //g')
-    
-    # Iterate over each project key (like project1, project2)
-    for project_key in $project_keys; do
-        # Check if this project has already been processed by looking for the flag (e.g., project1_done)
-        flag="${project_key}_done"
-        echo "Checking if $project_key has already been processed"
-        if grep -q "$flag" "$STATE_FILE"; then
-            echo "Skipping $project_key (already processed)"
-            continue
-        fi
-
-        echo "Preparing data for $project_key"
-
-        # Fetch project details under each project (e.g., name, website, etc.)
-        project_name=$(yq eval ".projects.${project_key}.name" "$CONFIG_FILE")
-        project_website=$(yq eval ".projects.${project_key}.website" "$CONFIG_FILE")
-        success_endpoint=$(yq eval ".projects.${project_key}.successEndpoint" "$CONFIG_FILE")
-        webhook_endpoint=$(yq eval ".projects.${project_key}.webhookEndpoint" "$CONFIG_FILE")
-
-        # Build the JSON body
-        json_data=$(cat <<EOF
-{
-    "name": "$project_name",
-    "website": "$project_website",
-    "successEndpoint": "$success_endpoint",
-    "webhookEndpoint": "$webhook_endpoint"
-}
-EOF
-)
-
-        # Send the first request using perform_request with --data-raw
-        echo "Sending request for $project_key"
-        response=$(perform_request "Sending data for $project_key" \
-            --header "API-Key: $API_KEY" \
-            --header "Content-Type: application/json" \
-            --data-raw "$json_data" \
-            "$API_URL")
-
-        # Check if the response is valid JSON and contains the "id" field
-        if echo "$response" | jq empty >/dev/null 2>&1; then
-            platform_id=$(echo "$response" | jq -r '.id')
-
-            # Check if platform_id is a valid integer
-            if [[ "$platform_id" =~ ^[0-9]+$ ]]; then
-                echo "Request successful for $project_key"
-                echo "Extracted platform ID: $platform_id"
-                echo "Updating state for $project_key."
-                update_state "$flag"  # This should update the state file
-            else
-                echo "Error: platform_id is not a valid integer. Response: $response"
-            fi
-        else
-            echo "Error: Response is not valid JSON. Response: $response"
-        fi
-
-        echo -e "\nFinished processing $project_key\n"
-    done
+                if test_postgres_connection; then
+                  print_color "green" "\n✅ Database connection successful!"
+                  break
+                else
+                  print_color "red" "\n❌ Connection failed. Please check your details and try again."
+                fi
+              done
+              break
+              ;;
+          "${options[1]}")
+              print_color "green" "\nUsing default database configuration."
+              DB_HOST="localhost"
+              DB_PORT="5432"
+              DB_NAME="payram"
+              DB_USER="payram"
+              DB_PASSWORD="payram123"
+              break
+              ;;
+          *)
+            print_color "red" "Invalid option $REPLY"
+            ;;
+      esac
+  done
 }
 
-####################################
-# API Requests Section (wrapped in a function)
-####################################
+# Function to configure SSL certificate path
+configure_ssl_path() {
+  echo
+  PS3='Please enter your choice: '
+  options=("Configure SSL certificates (Let's Encrypt, etc.)" "Skip SSL or use cloud services (Cloudflare, AWS, GoDaddy)")
+  select opt in "${options[@]}"
+  do
+      case $opt in
+          "${options[0]}")
+              print_color "green" "\nSSL certificate configuration selected."
+              print_color "yellow" "Please provide the path where your SSL certificate files are located."
+              print_color "yellow" "Expected files: fullchain.pem and privkey.pem"
+              while true; do
+                echo
+                read -p "Enter SSL certificate directory path: " SSL_CERT_PATH
+                
+                # Check if path exists
+                if [[ ! -d "$SSL_CERT_PATH" ]]; then
+                  print_color "red" "❌ Directory '$SSL_CERT_PATH' does not exist."
+                  read -p "Do you want to try again? (y/N) " -n 1 -r
+                  echo
+                  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    SSL_CERT_PATH=""
+                    break
+                  fi
+                  continue
+                fi
+                
+                # Check if directory is readable
+                if [[ ! -r "$SSL_CERT_PATH" ]]; then
+                  print_color "red" "❌ Directory '$SSL_CERT_PATH' is not readable."
+                  read -p "Do you want to try again? (y/N) " -n 1 -r
+                  echo
+                  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    SSL_CERT_PATH=""
+                    break
+                  fi
+                  continue
+                fi
+                
+                # Check for required SSL certificate files
+                print_color "yellow" "\nChecking for SSL certificate files in '$SSL_CERT_PATH'..."
+                local found_files=()
+                local required_files=("fullchain.pem" "privkey.pem")
+                local missing_required=()
+                
+                for file in "${required_files[@]}"; do
+                  if [[ -f "$SSL_CERT_PATH/$file" ]]; then
+                    if [[ -r "$SSL_CERT_PATH/$file" ]]; then
+                      found_files+=("$file")
+                      print_color "green" "✅ Found: $file"
+                    else
+                      print_color "red" "❌ Found but not readable: $file"
+                      missing_required+=("$file")
+                    fi
+                  else
+                    print_color "red" "❌ Missing required file: $file"
+                    missing_required+=("$file")
+                  fi
+                done
+                
+                # Check for additional SSL files (optional)
+                local additional_files=("cert.pem" "certificate.pem" "key.pem" "private.key" "chain.pem" "ca.pem")
+                for file in "${additional_files[@]}"; do
+                  if [[ -f "$SSL_CERT_PATH/$file" ]]; then
+                    if [[ -r "$SSL_CERT_PATH/$file" ]]; then
+                      found_files+=("$file")
+                      print_color "green" "✅ Found additional: $file"
+                    else
+                      print_color "yellow" "⚠️  Found but not readable: $file"
+                    fi
+                  fi
+                done
+                
+                if [[ ${#missing_required[@]} -gt 0 ]]; then
+                  print_color "red" "\n❌ Missing required SSL files: ${missing_required[*]}"
+                  print_color "yellow" "Please ensure fullchain.pem and privkey.pem are present in the directory."
+                  read -p "Do you want to try again? (y/N) " -n 1 -r
+                  echo
+                  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    SSL_CERT_PATH=""
+                    break
+                  fi
+                  continue
+                fi
+                
+                print_color "green" "\n✅ SSL certificate path validated successfully!"
+                print_color "yellow" "Found ${#found_files[@]} SSL file(s) in '$SSL_CERT_PATH'"
+                print_color "green" "Required files (fullchain.pem, privkey.pem) are present."
+                break
+              done
+              break
+              ;;
+          "${options[1]}")
+              print_color "yellow" "\nSkipping SSL configuration."
+              print_color "blue" "Note: You can configure SSL later using cloud services like:"
+              print_color "blue" "  • Cloudflare SSL/TLS"
+              print_color "blue" "  • AWS Certificate Manager"
+              print_color "blue" "  • GoDaddy SSL Certificates"
+              print_color "blue" "  • Other SSL providers"
+              SSL_CERT_PATH=""
+              break
+              ;;
+          *)
+            print_color "red" "Invalid option $REPLY"
+            ;;
+      esac
+  done
+}
 
-validate_config() {
-  local CONFIG_FILE="${1:-config.yaml}"
+# --- Main Logic ---
 
-  check_top_level_key() {
-    local key="$1"
-    local line
-    line=$(grep -E "^[[:space:]]*$key:[[:space:]]*" "$CONFIG_FILE" 2>/dev/null)
-    if [ -z "$line" ]; then
-      echo "Error: '$key' not found or missing in $CONFIG_FILE"
-      exit 1
-    fi
-    local value="${line#*:}"
-    value=$(echo "$value" | xargs)
-    if [ -z "$value" ] || [ "$value" = "\"\"" ]; then
-      echo "Error: '$key' is empty in $CONFIG_FILE"
-      exit 1
-    fi
-  }
+main() {
+  check_and_install_dependencies
 
-  check_top_level_key "payram.backend"
-  check_top_level_key "payram.frontend"
-  check_top_level_key "postal.endpoint"
-  check_top_level_key "postal.apikey"
-  check_top_level_key "ssl"
-  check_top_level_key "wallet_connect_id"
+  # --- Argument Parsing ---
+  local UPDATE_FLAG=false
 
-  local projects_block
-  projects_block=$(
-    awk '
-      /^projects:/ { flag=1; next }
-      /^[^[:space:]]/ { flag=0 }
-      flag { print }
-    ' "$CONFIG_FILE"
-  )
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --update)
+        UPDATE_FLAG=true
+        shift # past argument
+        ;;
+      --reset)
+        reset_environment
+        exit 0
+        ;;
+      --testnet)
+        NETWORK_TYPE="testnet"
+        SERVER="DEVELOPMENT"
+        shift # past argument
+        ;;
+      --tag=*|-T=*)
+        IMAGE_TAG="${1#*=}"
+        shift # past argument
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        print_color "red" "Error: Unknown option '$1'"
+        usage
+        exit 1
+        ;;
+    esac
+  done
+  
+  # Process update after all arguments are parsed
+  if [[ "$UPDATE_FLAG" = true ]]; then
+    update_container
+  fi
 
-  if [ -z "$projects_block" ]; then
-    echo "Error: No 'projects:' block found or it is empty in $CONFIG_FILE"
+  # --- Pre-flight Check for Interactive Mode ---
+  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
+    print_color "red" "Error: A 'payram' container is already running."
+    print_color "yellow" "If you want to update it, use the '--update' flag."
+    print_color "yellow" "If you want to start over, use the '--reset' flag first."
     exit 1
   fi
 
-  check_project_block() {
-    local pblock="$1"
-    for required_key in name website successEndpoint webhookEndpoint; do
-      local line
-      line=$(echo "$pblock" | grep -E "^[[:space:]]*$required_key:[[:space:]]*")
-      if [ -z "$line" ]; then
-        echo "Error: '$required_key' is missing in this project block:"
-        echo "$pblock"
-        exit 1
-      fi
-      local value="${line#*:}"
-      value=$(echo "$value" | xargs)
-      if [ -z "$value" ] || [ "$value" = "\"\"" ]; then
-        echo "Error: '$required_key' is empty in this project block:"
-        echo "$pblock"
-        exit 1
-      fi
-    done
-  }
-
-  local current_project=""
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^[[:space:]]*project[0-9]+: ]]; then
-      if [ -n "$current_project" ]; then
-        check_project_block "$current_project"
-      fi
-      current_project="$line"
-    else
-      if [ -n "$current_project" ]; then
-        current_project="$current_project
-$line"
-      fi
-    fi
-  done <<< "$projects_block"
-
-  if [ -n "$current_project" ]; then
-    check_project_block "$current_project"
+  # --- Finalize and Validate Configuration ---
+  if [[ -z "$IMAGE_TAG" ]]; then
+    IMAGE_TAG=$DEFAULT_IMAGE_TAG # Default to 1.5.1 if no tag is specified
   fi
 
-  
+  # --- Interactive Setup ---
+  print_color "blue" "======================================"
+  print_color "blue" " Welcome to the PayRam Setup Utility"
+  print_color "blue" "======================================"
+  echo
+
+  configure_database
+  configure_ssl_path
+
+  # --- Pre-run Summary ---
+  echo
+  print_color "blue" "--- Configuration Summary ---"
+  print_color "yellow" "Docker Image: buddhasource/payram-core:$IMAGE_TAG"
+  print_color "yellow" "Network Mode: $NETWORK_TYPE"
+  print_color "yellow" "Database Host: $DB_HOST"
+  print_color "yellow" "Server: $SERVER"
+  if [[ -n "$SSL_CERT_PATH" ]]; then
+    print_color "yellow" "SSL Certificate Path: $SSL_CERT_PATH"
+  else
+    print_color "yellow" "SSL Certificate Path: Not configured"
+  fi
+  print_color "blue" "---------------------------"
+  echo
+
+  read -p "Press [Enter] to continue with the setup..."
+
+  # --- Run Docker ---
+  run_docker_container
 }
 
+# Execute the main function
+main "$@"
 
-run_api_requests() {
-
-  CONFIG_FILE="config.yaml"
-  STATE_FILE="/.payram/state.txt"  # using the same hidden state file
-
-  validate_config $CONFIG_FILE
-  # Load configuration values from config.yaml
-  update_blockchain_eth_client=$(yq e '.blockchain.ETH.client' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_eth_server=$(yq e '.blockchain.ETH.server' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_eth_server_api_key=$(yq e '.blockchain.ETH.server_api_key' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_eth_explorer_address=$(yq e '.blockchain.ETH.explorer_address' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_eth_explorer_transaction=$(yq e '.blockchain.ETH.explorer_transaction' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_eth_min_confirmations=$(yq e '.blockchain.ETH.min_confirmations' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  
-  update_blockchain_btc_client=$(yq e '.blockchain.BTC.client' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_btc_server=$(yq e '.blockchain.BTC.server' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_btc_server_username=$(yq e '.blockchain.BTC.server_username' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_btc_server_password=$(yq e '.blockchain.BTC.server_password' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  
-  update_blockchain_trx_client=$(yq e '.blockchain.TRX.client' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_trx_server=$(yq e '.blockchain.TRX.server' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_trx_server_api_key=$(yq e '.blockchain.TRX.server_api_key' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  update_blockchain_trx_height=$(yq e '.blockchain.TRX.height' "$CONFIG_FILE" | tr -d '\n' | xargs)
-
-  # List of required variables
-  required_vars=(
-    "$update_blockchain_eth_client"
-    "$update_blockchain_eth_server"
-    "$update_blockchain_eth_explorer_address"
-    "$update_blockchain_eth_explorer_transaction"
-    "$update_blockchain_eth_min_confirmations"
-    "$update_blockchain_btc_client"
-    "$update_blockchain_btc_server"
-    "$update_blockchain_btc_server_username"
-    "$update_blockchain_btc_server_password"
-    "$update_blockchain_trx_client"
-    "$update_blockchain_trx_server"
-    "$update_blockchain_trx_server_api_key"
-    "$update_blockchain_trx_height"
-  )
-
-
-
-  # Loop through and exit if any are empty
-  for var in "${required_vars[@]}"; do
-    if [ -z "$var" ]; then
-      
-      echo "Error: Missing required configuration. Exiting." >&2
-
-      echo "Please fill all the details in the conig.yaml file"
-      exit 1
-    fi
-  done
-
-  echo "Loading API variables from config.yaml (for non-credential values)"
-  
-  read -p "Enter your email: " USER_EMAIL
-  read -s -p "Enter your password: " USER_PASSWORD
-  echo ""
-  read -s -p "Confirm your password: " CONFIRM_PASSWORD
-  echo ""
-  echo ""
-
-# Check if the entered passwords match
-if [ "$USER_PASSWORD" != "$CONFIRM_PASSWORD" ]; then
-  echo "Passwords do not match. Exiting."
-  exit 1
-fi
-  
-  # Override email and password with user input
-  EMAIL="$USER_EMAIL"
-  PASSWORD="$USER_PASSWORD"
-  
-  # Load remaining configuration values from config file
-  BASE_URL="http://localhost:8080"
-
-  
-
-  
-  # update_blockchain_eth_server_api_key=$(yq e '.blockchain.ETH.server_api_key' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  # update_blockchain_eth_height=$(yq e '.blockchain.ETH.height' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  # update_blockchain_btc_height=$(yq e '.blockchain.BTC.height' "$CONFIG_FILE" | tr -d '\n' | xargs)
-
-  
- 
-  
-  x_pub_Ethereum=$(yq e '.wallets.Ethereum.xpub' "$CONFIG_FILE" | xargs)
-  x_pub_Bitcoin=$(yq e '.wallets.Bitcoin.xpub' "$CONFIG_FILE" | xargs)
-  x_pub_TRX=$(yq e '.wallets.Trx.xpub' "$CONFIG_FILE" | xargs)
-
-  x_pub_Ethereum_address=$(yq e '.wallets.Ethereum.deposit_addresses_count' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  x_pub_Bitcoin_address=$(yq e '.wallets.Bitcoin.deposit_addresses_count' "$CONFIG_FILE" | tr -d '\n' | xargs)
-  x_pub_Trx_address=$(yq e '.wallets.Trx.deposit_addresses_count' "$CONFIG_FILE" | tr -d '\n' | xargs)
-
-  
-  echo 
-  
-  echo "All API variables loaded successfully"
-  echo ""
-  echo "Starting the API requests"
-  echo ""
-  
-  #########################
-  # Helper function to update the state
-  #########################
-  update_state() {
-      flag="$1"
-      sudo bash -c "echo '$flag' >> $STATE_FILE"
-  }
-  
-  #########################
-  # Helper function to perform a request and print response
-  # All details are printed to stderr so that command substitution
-  # returns only the numeric HTTP status code.
-  #########################
-  perform_request() {
-      description="$1"
-      shift
-      response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
-      body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-      http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-      >&2 echo "$description Response:"
-      >&2 echo "$body"
-      >&2 echo "HTTP Status: $http_code"
-      echo "$http_code"
-  }
-  
-  #########################
-  # Helper function to check required parameters.
-  # Expects pairs: fieldName value ...
-  #########################
-  check_params() {
-      local missing=0
-      while [ "$#" -gt 0 ]; do
-          local field="$1"
-          local value="$2"
-          if [ -z "$value" ]; then
-              echo "Error: Required parameter '$field' is missing." >&2
-              missing=1
-          fi
-          shift 2
-      done
-      return $missing
-  }
-  
-  echo "Email set to: $EMAIL"
-  echo "Password set to: [hidden]"
-  
-  #########################
-  # Signup
-  #########################
- if ! grep -q "signup_done" "$STATE_FILE"; then
-    if check_params "email" "$EMAIL" "password" "$PASSWORD"; then
-        echo "Signing up"
-        
-        # Perform the signup request
-        signup_response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" 'http://localhost:8080/api/v1/signup' \
-               --header 'Content-Type: application/json' \
-               --data-raw "{
-                  \"email\": \"$EMAIL\",
-                  \"password\": \"$PASSWORD\"
-               }")
-        
-        # Extract response body and HTTP status code
-        signup_body=$(echo "$signup_response" | sed -e 's/HTTPSTATUS\:.*//g')
-        signup_code=$(echo "$signup_response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-        
-        # Output the signup response and status code
-        echo "Signup Response:"
-        echo "$signup_body"
-        echo "HTTP Status: $signup_code"
-        echo ""
-        
-        # If status code is 400, forcefully exit the script
-        if [ "$signup_code" -eq 400 ]; then
-            echo "Bad Request: Invalid data format or missing parameters. Forcefully exiting the script."
-            exit 1
-        fi
-        
-        # Update the state if signup is successful
-        update_state "signup_done"
-    else
-        echo "Skipping signup because required parameters are missing."
-    fi
-else
-    echo "Signup already done; skipping."
-    echo ""
-fi
-
-  
-  #########################
-  # Signin & Extract API Key (for this session)
-  #########################
-if check_params "email" "$EMAIL" "password" "$PASSWORD"; then
-    echo "Signing in"
-    
-    # Perform the sign-in request
-    signin_response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" 'http://localhost:8080/api/v1/signin' \
-               --header 'Content-Type: application/json' \
-               --data-raw "{
-                  \"email\": \"$EMAIL\",
-                  \"password\": \"$PASSWORD\"
-               }")
-    
-    # Extract response body and HTTP status code
-    signin_body=$(echo "$signin_response" | sed -e 's/HTTPSTATUS\:.*//g')
-    signin_code=$(echo "$signin_response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-    
-    # Output the sign-in response and status code
-    echo "Signin Response:"
-    echo "$signin_body"
-    echo "HTTP Status: $signin_code"
-    echo ""
-    
-    # If status code is 401, forcefully exit the script
-    if [ "$signin_code" -eq 401 ] || [ "$signin_code" -eq 400 ]; then
-        echo "Unauthorized or Bad Request: Invalid credentials or request format. Forcefully exiting the script."
-        exit 1
-    fi
-    
-    # Extract API key if signin is successful
-    API_KEY=$(echo "$signin_body" | jq -r '.key')
-    echo "Extracted API key: $API_KEY"
-    echo ""
-else
-    echo "Skipping signin because required parameters are missing."
-fi
-
-  
-  yq eval '.configuration | to_entries | .[] | "\(.key)=\(.value)"' $CONFIG_FILE | while read -r line; do
-      # Parse the key-value pair
-      key=$(echo "$line" | cut -d '=' -f 1)
-      value=$(echo "$line" | cut -d '=' -f 2-)
-
-      # Clean up any leading/trailing spaces
-      key=$(echo "$key" | xargs)
-      value=$(echo "$value" | xargs | sed 's/^"\(.*\)"$/\1/')  # Remove quotes from value
-      
-      # Output for debugging
-      echo "Key: $key, Value: $value"
-
-      # Check for the relevant configuration step and proceed
-      case "$key" in
-        "payram.backend")
-          if ! grep -q "configuration_backend_done" "$STATE_FILE"; then
-              echo "Configuring backend"
-              code=$(perform_request "Configuration Backend" "$BASE_URL/api/v1/configuration" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                  \"key\": \"$key\",
-                  \"value\": \"$value\"
-                }")
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  update_state "configuration_backend_done"
-              fi
-          else
-              echo "Configuration backend already done; skipping."
-          fi
-          ;;
-        "payram.frontend")
-          if ! grep -q "configuration_frontend_done" "$STATE_FILE"; then
-              echo "Configuring frontend"
-              code=$(perform_request "Configuration Frontend" "$BASE_URL/api/v1/configuration" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                  \"key\": \"$key\",
-                  \"value\": \"$value\"
-                }")
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  update_state "configuration_frontend_done"
-              fi
-          else
-              echo "Configuration frontend already done; skipping."
-          fi
-          ;;
-        "wallet_connect_id")
-          if ! grep -q "configuration_wallet_connect_id_done" "$STATE_FILE"; then
-              echo "Configuring WalletConnect ID"
-              code=$(perform_request "Configuration WalletConnect ID" "$BASE_URL/api/v1/configuration" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                  \"key\": \"$key\",
-                  \"value\": \"$value\"
-                }")
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  update_state "configuration_wallet_connect_id_done"
-              fi
-          else
-              echo "Configuration WalletConnect ID already done; skipping."
-          fi
-          ;;
-        "ssl")
-          if ! grep -q "configuration_ssl_done" "$STATE_FILE"; then
-              echo "Configuring SSL"
-              code=$(perform_request "Configuration SSL" "$BASE_URL/api/v1/configuration" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                  \"key\": \"$key\",
-                  \"value\": \"$value\"
-                }")
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  update_state "configuration_ssl_done"
-              fi
-          else
-              echo "Configuration SSL already done or not required; skipping."
-          fi
-          ;;
-        "postal.endpoint")
-          if ! grep -q "configuration_postal_endpoint_done" "$STATE_FILE"; then
-              echo "Configuring postal endpoint"
-              code=$(perform_request "Configuration Postal Endpoint" "$BASE_URL/api/v1/configuration" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                  \"key\": \"$key\",
-                  \"value\": \"$value\"
-                }")
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  update_state "configuration_postal_endpoint_done"
-              fi
-          else
-              echo "Configuration postal endpoint already done; skipping."
-          fi
-          ;;
-        "postal.apikey")
-          if ! grep -q "configuration_postal_apikey_done" "$STATE_FILE"; then
-              echo "Configuring postal API key"
-              code=$(perform_request "Configuration Postal API Key" "$BASE_URL/api/v1/configuration" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                  \"key\": \"$key\",
-                  \"value\": \"$value\"
-                }")
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  update_state "configuration_postal_apikey_done"
-              fi
-          else
-              echo "Configuration postal API key already done; skipping."
-          fi
-          ;;
-        *)
-          echo "Unknown key: $key, skipping configuration."
-          ;;
-      esac
-  done
-  
-
-  
-  #########################
-  # projects created
-  #########################
- 
-
-  process_projects
-
-  
-
-  perform_request_http() {
-        description="$1"
-        shift
-        response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$@")
-        body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-        http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-        >&2 echo "$description Response:"
-        # >&2 echo "$body"
-        >&2 echo "the respose is $response"
-        echo "$http_code"  # Return the http_code so it can be processed
-    }
-
-  
-  #########################
-  # Blockchain Ethereum
-  #########################
-  # "server_api_key" "$update_blockchain_eth_server_api_key" \
-  # "height" "$update_blockchain_eth_height" \
-  if ! grep -q "blockchain_ethereum_done" "$STATE_FILE"; then
-      if check_params "explorer_address" "$update_blockchain_eth_explorer_address" \
-                      "explorer_transaction" "$update_blockchain_eth_explorer_transaction" \
-                      "min_confirmations" "$update_blockchain_eth_min_confirmations"; then
-          echo "Updating blockchain Ethereum"
-          code=$(perform_request_http "Blockchain Ethereum" "$BASE_URL/api/v1/blockchain/ETH" \
-            --header "API-Key: $API_KEY" \
-            --header "Content-Type: application/json" \
-            --request PUT \
-            --data-raw "{
-               \"name\": \"Ethereum\",
-               \"client\": \"$update_blockchain_eth_client\",
-               \"server\": \"$update_blockchain_eth_server\",
-               \"server_api_key\": \"$update_blockchain_eth_server_api_key\",
-               \"height\": 0,
-               \"explorer_address\": \"$update_blockchain_eth_explorer_address\",
-               \"explorer_transaction\": \"$update_blockchain_eth_explorer_transaction\",
-               \"min_confirmations\": $update_blockchain_eth_min_confirmations
-            }")
-            echo "t---------------------------------------------------------------------------------------- is $code"
-          if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              update_state "blockchain_ethereum_done"
-          fi
-      else
-          echo "Skipping blockchain Ethereum update because required parameters are missing."
-      fi
-  else
-      echo "Blockchain Ethereum already updated; skipping."
-      echo ""
-  fi
-  
-  #########################
-  # Blockchain Bitcoin
-  #########################
-  # "height" "$update_blockchain_btc_height"
-  if ! grep -q "blockchain_bitcoin_done" "$STATE_FILE"; then
-      if check_params "blockchain BTC client" "$update_blockchain_btc_client" \
-                      "server" "$update_blockchain_btc_server" \
-                      "server_username" "$update_blockchain_btc_server_username" \
-                      "server_password" "$update_blockchain_btc_server_password"; then
-          echo "Updating blockchain Bitcoin"
-          code=$(perform_request_http "Blockchain Bitcoin" "$BASE_URL/api/v1/blockchain/BTC" \
-            --header "API-Key: $API_KEY" \
-            --header "Content-Type: application/json" \
-            --request PUT \
-            --data-raw "{
-               \"client\": \"$update_blockchain_btc_client\",
-               \"server\": \"$update_blockchain_btc_server\",
-               \"server_username\": \"$update_blockchain_btc_server_username\",
-               \"server_password\": \"$update_blockchain_btc_server_password\",
-               \"height\": 0
-            }")
-
-          echo "the status code is $code"
-          if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              update_state "blockchain_bitcoin_done"
-          fi
-      else
-          echo "Skipping blockchain Bitcoin update because required parameters are missing."
-      fi
-  else
-      echo "Blockchain Bitcoin already updated; skipping."
-      echo ""
-  fi
-  
-  #########################
-  # Blockchain TRX
-  #########################
-  # "height" "$update_blockchain_trx_height"
-  if ! grep -q "blockchain_trx_done" "$STATE_FILE"; then
-      if check_params "blockchain TRX client" "$update_blockchain_trx_client" \
-                      "server" "$update_blockchain_trx_server" \
-                      "server_api_key" "$update_blockchain_trx_server_api_key"; then
-          echo "Updating blockchain TRX"
-          code=$(perform_request_http "Blockchain TRX" "$BASE_URL/api/v1/blockchain/TRX" \
-            --header "API-Key: $API_KEY" \
-            --header "Content-Type: application/json" \
-            --request PUT \
-            --data-raw "{
-               \"client\": \"$update_blockchain_trx_client\",
-               \"server\": \"$update_blockchain_trx_server\",
-               \"server_api_key\": \"$update_blockchain_trx_server_api_key\",
-               \"height\": 0
-            }")
-          if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              update_state "blockchain_trx_done"
-          fi
-      else
-          echo "Skipping blockchain TRX update because required parameters are missing."
-      fi
-  else
-      echo "Blockchain TRX already updated; skipping."
-      echo ""
-  fi
-
-  configure_with_json() {
-    local description="$1"
-    local state_flag="$2"
-    local json_payload="$3"
-
-    # Check if the state flag is already present.
-    if [ -f "$STATE_FILE" ] && grep -q "$state_flag" "$STATE_FILE"; then
-        echo "$description: already configured (state flag '$state_flag' found), skipping."
-        return
-    fi
-
-    # Otherwise, proceed to perform the request.
-    code=$(perform_request "$description" "$BASE_URL/api/v1/configuration" \
-      --header "API-Key: $API_KEY" \
-      --header "Content-Type: application/json" \
-      --data-raw "$json_payload")
-
-    if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-        update_state "$state_flag"
-    else
-        >&2 echo "Error in $description. HTTP status: $code"
-    fi
-  }
-
-  
-  #########################
-  # Xpub Ethereum and generate addresses
-  #########################
-  if ! grep -q "xpub_ethereum_done" "$STATE_FILE" && [ -n "$x_pub_Ethereum" ]; then
-      if check_params "xpub Ethereum" "$x_pub_Ethereum" "Ethereum address count" "$x_pub_Ethereum_address"; then
-          echo "Processing xpub Ethereum"
-          code=$(perform_request_http "Xpub Ethereum" "$BASE_URL/api/v1/blockchain-family/ETH_Family/xpub" \
-            --header "API-Key: $API_KEY" \
-            --header "Content-Type: application/json" \
-            --data-raw "{
-               \"xpub\": \"$x_pub_Ethereum\"
-            }")
-          if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              code=$(perform_request_http "Generate Ethereum Addresses" "$BASE_URL/api/v1/blockchain-family/ETH_Family/create-pool" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                   \"count\": $x_pub_Ethereum_address
-                }")
-
-                echo "the status code is after trying to generate the xpub addresses is $code"
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  echo "trying to update the state of the xpub_ethereum"
-                  update_state "xpub_ethereum_done"
-              fi
-          fi
-      else
-          echo "Skipping xpub Ethereum processing because required parameters are missing."
-      fi
-  else
-      echo "Xpub Ethereum already processed; skipping."
-      echo ""
-  fi
-  
-  #########################
-  # Xpub Bitcoin and create pool
-  #########################
-  if ! grep -q "xpub_bitcoin_done" "$STATE_FILE" && [ -n "$x_pub_Bitcoin" ]; then
-      if check_params "xpub Bitcoin" "$x_pub_Bitcoin" "Bitcoin address count" "$x_pub_Bitcoin_address"; then
-          echo "Processing xpub Bitcoin"
-          echo "this is on the bitcpin"
-          echo $x_pub_Bitcoin
-          echo $x_pub_Bitcoin_address
-
-          echo "this is on the bitcpin"
-          code=$(perform_request_http "Xpub Bitcoin" "$BASE_URL/api/v1/blockchain-family/BTC_Family/xpub" \
-            --header "API-Key: $API_KEY" \
-            --header "Content-Type: application/json" \
-            --data-raw "{
-               \"xpub\": \"$x_pub_Bitcoin\"
-            }")
-            echo "the status code is asdadad $code"
-          if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              code=$(perform_request_http "Create Bitcoin Pool" "$BASE_URL/api/v1/blockchain-family/BTC_Family/create-pool" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                   \"count\": $x_pub_Bitcoin_address
-                }")
-                echo "the status code is after trying to generate the xpub addresses is $code"
-
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  echo "trying to update the state of the xpub_bitcoin"
-                  update_state "xpub_bitcoin_done"
-              fi
-          fi
-      else
-          echo "Skipping xpub Bitcoin processing because required parameters are missing."
-      fi
-  else
-      echo "Xpub Bitcoin already processed; skipping."
-      echo ""
-  fi
-  
-  #########################
-  # Xpub TRX and generate addresses
-  #########################
-  if ! grep -q "xpub_trx_done" "$STATE_FILE" && [ -n "$x_pub_TRX" ]; then
-      if check_params "xpub TRX" "$x_pub_TRX" "TRX address count" "$x_pub_Trx_address"; then
-          echo "Processing xpub TRX"
-          echo "this is the trx thing"
-          echo $x_pub_TRX
-          echo $x_pub_Trx_address
-
-          echo "this the trx thing"
-          code=$(perform_request_http "Xpub TRX" "$BASE_URL/api/v1/blockchain-family/TRX_Family/xpub" \
-            --header "API-Key: $API_KEY" \
-            --header "Content-Type: application/json" \
-            --data-raw "{
-               \"xpub\": \"$x_pub_TRX\"
-            }")
-          if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-              code=$(perform_request_http "Generate TRX Addresses" "$BASE_URL/api/v1/blockchain-family/TRX_Family/create-pool" \
-                --header "API-Key: $API_KEY" \
-                --header "Content-Type: application/json" \
-                --data-raw "{
-                   \"count\": $x_pub_Trx_address
-                }")
-                echo "the status code is after trying to generate the xpub addresses is $code"
-              if [ "$code" -eq 200 ] || [ "$code" -eq 201 ]; then
-                  echo "trying to update the state of the xpub_trx"
-                  update_state "xpub_trx_done"
-              fi
-          fi
-      else
-          echo "Skipping xpub TRX processing because required parameters are missing."
-      fi
-  else
-      echo "Xpub TRX already processed; skipping."
-  fi
-
-  if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Consumer Action Config: already configured, skipping."
-else
-  # JSON payload for consumer.action.config
-  json_payload='{
-    "key": "consumer.action.config",
-    "value": "[{\"QueryBuilder\":{\"EventNames\":[\"payment_request\"],\"CreatedAtRelativeStart\":-10800000000000,\"CreatedAtRelativeEnd\":-180000000000,\"JoinWhereClause\":{\"json_extract(attribute, '\''$.ReferenceID'\'')\":{\"Exclude\":true,\"Clause\":\"json_extract(attribute, '\''$.ReferenceID'\'')\"}},\"SubQueryBuilder\":{\"EventNames\":[\"payment_request-email-sent\",\"payment_request-email-failed\",\"payment_request-cancelled\",\"payment-request-cancelled\",\"deposit-received\"],\"CreatedAtRelativeStart\":-10800000000000,\"CreatedAtRelativeEnd\":0}},\"EmailTemplateName\":\"payram.templates.email.master\",\"EmmitEventsOnSuccess\":[{\"EventName\":\"payment_request-email-sent\",\"CopyProfileID\":true,\"CopyFullAttribute\":false,\"AttributeSpec\":{\"Amount\":true,\"AmountInUsd\":true,\"Currency\":true,\"CustomerID\":true,\"InvoiceID\":true,\"MemberID\":true,\"PaymentRequestID\":true,\"PostalMessageID\":true,\"ReferenceID\":true,\"ToAddresses\":true}}],\"EmmitEventsOnError\":[{\"EventName\":\"payment_request-email-failed\",\"CopyProfileID\":true,\"CopyFullAttribute\":true}],\"SendRequest\":{\"from\":\"Payram App <support@resuefas.vip>\",\"reply_to\":\"support@resuefas.vip\",\"subject\":\"We are waiting for your payment!\"}}]"
-  }'
-
-  # Make the curl request
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-
-  # Separate body and HTTP status
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-
-  echo "Configure Consumer Action Config Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-
-  # Check for success and update state
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Consumer Action Config. HTTP Status: $http_code" >&2
-  fi
-fi
-
-
-
-# 1. Configure consumer.action.config
-flag="configuration_consumer_action_config_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Consumer Action Config: already configured, skipping."
-else
-  json_payload='{
-    "key": "consumer.action.config",
-    "value": "[{\"QueryBuilder\":{\"EventNames\":[\"payment_request\"],\"CreatedAtRelativeStart\":-10800000000000,\"CreatedAtRelativeEnd\":-180000000000,\"JoinWhereClause\":{\"json_extract(attribute, '\''$.ReferenceID'\'')\":{\"Exclude\":true,\"Clause\":\"json_extract(attribute, '\''$.ReferenceID'\'')\"}},\"SubQueryBuilder\":{\"EventNames\":[\"payment_request-email-sent\",\"payment_request-email-failed\",\"payment_request-cancelled\",\"payment-request-cancelled\",\"deposit-received\"],\"CreatedAtRelativeStart\":-10800000000000,\"CreatedAtRelativeEnd\":0}},\"EmailTemplateName\":\"payram.templates.email.master\",\"EmmitEventsOnSuccess\":[{\"EventName\":\"payment_request-email-sent\",\"CopyProfileID\":true,\"CopyFullAttribute\":false,\"AttributeSpec\":{\"Amount\":true,\"AmountInUsd\":true,\"Currency\":true,\"CustomerID\":true,\"InvoiceID\":true,\"MemberID\":true,\"PaymentRequestID\":true,\"PostalMessageID\":true,\"ReferenceID\":true,\"ToAddresses\":true}}],\"EmmitEventsOnError\":[{\"EventName\":\"payment_request-email-failed\",\"CopyProfileID\":true,\"CopyFullAttribute\":true}],\"SendRequest\":{\"from\":\"Payram App <support@resuefas.vip>\",\"reply_to\":\"support@resuefas.vip\",\"subject\":\"We are waiting for your payment!\"}}]"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Consumer Action Config Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Consumer Action Config. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 2. Configure payram.templates.email.deposit.received.master
-flag="configuration_email_deposit_received_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Email Deposit Received Master Template: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.templates.email.deposit.received.master",
-    "value": "{{ template \"payram.templates.email.header\" . }} {{ template \"payram.templates.email.deposit.received.body\" . }} {{ template \"payram.templates.email.footer\" . }}"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Email Deposit Received Master Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Email Deposit Received Master Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 3. Configure payram.websocket.server.url
-flag="configuration_websocket_url_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Websocket Server URL: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.websocket.server.url",
-    "value": "wss://payram.resuefas.vip:8443"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Websocket Server URL Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Websocket Server URL. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 4. Configure payram.templates.email.default.otp.master
-flag="configuration_otp_master_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Default OTP Master Template: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.templates.email.default.otp.master",
-    "value": "{{ template \"payram.templates.email.default.header\" . }} {{ template \"payram.templates.email.default.otp.body\" . }} {{ template \"payram.templates.email.default.footer\" . }}"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Default OTP Master Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Default OTP Master Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 5. Configure payram.templates.email.default.otp.subject
-flag="configuration_otp_subject_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Default OTP Subject Template: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.templates.email.default.otp.subject",
-    "value": "Withdrawal OTP Code - {{.ProjectName}}"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Default OTP Subject Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Default OTP Subject Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 6. Configure payram.templates.email.default.header
-flag="configuration_default_header_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Default Email Header Template: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.templates.email.default.header",
-    "value": "<!DOCTYPE html> <html> <head> <meta charset=\"UTF-8\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> <title>Email Template</title> </head><body style=\"font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f4;\"><table role=\"presentation\" width=\"100%\" style=\"background-color: #5A2CD2; padding: 20px; text-align: center;\"><tr><td><img src=\\\"{{.ProjectLogoURL}}\\\" alt=\\\"{{.ProjectName}}\\\" style=\\\"height: 50px;\\\"></td></tr></table>Withdrawal OTP Code - {{.ProjectName}}"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Default Email Header Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Default Email Header Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 7. Configure payram.templates.email.default.footer
-flag="configuration_default_footer_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Default Email Footer Template: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.templates.email.default.footer",
-    "value": "<table role=\"presentation\" width=\"100%\" style=\"background-color: #ffffff; padding: 20px; text-align: center; border-top: 1px solid #dddddd;\"> <tr> <td> <p style=\"font-size: 14px; color: #666666;\"> Powered By <strong style=\"color: #000;\">PAYRAM</strong> </p> <p style=\"font-size: 12px; color: #999999;\"> If you didn’t initiate this request, please ignore this email or contact our support team immediately. </p> </td> </tr> </table>"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Default Email Footer Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Default Email Footer Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 8. Configure payram.templates.email.default.otp.body
-flag="configuration_otp_body_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Default OTP Body Template: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.templates.email.default.otp.body",
-    "value": "<table role=\"presentation\" width=\"100%\" style=\"background-color: #ffffff; padding: 30px; max-width: 600px; margin: 0 auto; border-radius: 10px;\"> <tr> <td> <h2 style=\"font-size: 22px; color: #000000; font-weight: bold; text-align: center;\">Verify Your Withdrawal Request</h2> <p style=\"font-size: 16px; color: #333333; text-align: center;\"> We’ve received your <strong>request to withdraw your rewards.</strong> To ensure the security of your account and funds, please verify this transaction using the one-time password (OTP) below: </p> <div style=\"background-color: #f4f4f4; padding: 15px; text-align: center; font-size: 24px; font-weight: bold; letter-spacing: 5px; border-radius: 8px; width: fit-content; margin: 20px auto;\"> {{.OTP}} </div> <p style=\"font-size: 14px; color: #666666; text-align: center;\"> This OTP is valid for the next <strong>{{.ValidityPeriod}}</strong>. Please enter it on the verification page to complete your request. </p> <p style=\"font-size: 14px; color: #333333; text-align: center;\"> Best regards,<br/> <strong>{{.ProjectName}} Team</strong> </p> </td> </tr> </table>"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Default OTP Body Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Default OTP Body Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 9. Configure payram.templates.email.body
-flag="configuration_email_body_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Email Body Template: already configured, skipping."
-else
-  # Use a here-document to assign the long HTML payload safely.
-  json_payload=$(cat <<'EOF'
-{
-  "key": "payram.templates.email.body",
-  "value": "<table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"heading_block block-2\" role=\"presentation\" style=\"mso-table-lspace: 0pt; mso-table-rspace: 0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <h1 style=\"margin: 0; color: #1e0e4b; direction: ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 38px; font-weight: 700; letter-spacing: normal; line-height: 120%; text-align: left; margin-top: 0; margin-bottom: 0; mso-line-height-alt: 45.6px;\"><span class=\"tinyMce-placeholder\">Let me help you with payments</span></h1> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"paragraph_block block-3\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt; word-break:break-word;\" width=\"100%\"> <tr> <td class=\"pad\"> <div style=\"color:#444a5b; direction:ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size: 16px; font-weight: 400; letter-spacing: 0px; line-height: 120%; text-align: left; mso-line-height-alt: 19.2px;\"> <p style=\"margin:0; margin-bottom:16px;\">Payram has helped millions with lead generation and grow their business by 30-40% in just 90 days.</p> <p style=\"margin:0; margin-bottom:16px;\">Let's get you more client.</p> <p style=\"margin:0;\"></p> </div> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"button_block block-4\" role=\"presentation\" style=\"mso-table-lspace: 0pt; mso-table-rspace: 0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <div align=\"center\" class=\"alignment\"><a href=\"{{ .PaymentURL }}\" target=\"_blank\" style=\"text-decoration:none; display:inline-block; color:#ffffff; background-color:#4d9aff; border-radius:4px; width:auto; border-top:0px solid transparent; font-weight:400; border-right:0px solid transparent; border-bottom:0px solid transparent; border-left:0px solid transparent; padding-top:5px; padding-bottom:5px; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size:16px; text-align:center; mso-border-alt:none; word-break:keep-all;\"><span style=\"padding-left:20px; padding-right:20px; font-size:16px; display:inline-block; letter-spacing:normal;\"><span style=\"word-break:break-word; line-height:32px;\">Pay</span></span></a></div> </td> </tr> </table> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"divider_block block-5\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt;\" width=\"100%\"> <tr> <td class=\"pad\"> <div align=\"center\" class=\"alignment\"> <table border=\"0\" cellpadding=\"0\" cellspacing=\"0\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt;\" width=\"100%\"> <tr> <td class=\"divider_inner\" style=\"font-size:1px; line-height:1px; border-top:1px solid #dddddd;\"><span> </span></td> </tr> </table> </div> </td> </tr> </table> <div class=\"spacer_block block-6\" style=\"height:60px; line-height:60px; font-size:1px;\"> </div> <table border=\"0\" cellpadding=\"10\" cellspacing=\"0\" class=\"paragraph_block block-7\" role=\"presentation\" style=\"mso-table-lspace:0pt; mso-table-rspace:0pt; word-break:break-word;\" width=\"100%\"> <tr> <td class=\"pad\"> <div style=\"color:#444a5b; direction:ltr; font-family: Arial, 'Helvetica Neue', Helvetica, sans-serif; font-size:16px; font-weight:400; letter-spacing:0px; line-height:120%; text-align:left; mso-line-height-alt:19.2px;\"> <p style=\"margin:0; margin-bottom:16px;\">\"Since I started using Payram, I've seen a 30-40% increase in my lead generation. The platform's reach is incredible!\" - <em><strong>Tom, NY</strong></em></p> <p style=\"margin:0;\">\"Payram has been a game-changer for my business. It's an investment that pays for itself.\" <em><strong>- Adam, LA</strong></em></p> </div> </td> </tr> </table><!-- End --> </body>"
-}
-EOF
-)
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Email Body Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Email Body Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 10. Configure payram.templates.email.header
-flag="configuration_email_header_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Email Header Template: already configured, skipping."
-else
-  json_payload='{
-    "key": "payram.templates.email.header",
-    "value": "<!DOCTYPE html> <html> <head> <meta charset=\"UTF-8\"> <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"> <title>Email Template</title> </head><body style=\"font-family: Arial, sans-serif; margin: 0; padding: 0; background-color: #f4f4f4;\"><table role=\"presentation\" width=\"100%\" style=\"background-color: #5A2CD2; padding: 20px; text-align: center;\"><tr><td><img src=\\\"{{.ProjectLogoURL}}\\\" alt=\\\"{{.ProjectName}}\\\" style=\\\"height: 50px;\\\"></td></tr></table>Withdrawal OTP Code - {{.ProjectName}}"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Email Header Template Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Email Header Template. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# 11. Configure merchant.webhook.apikey
-flag="configuration_merchant_webhook_apikey_done"
-if [ -f "$STATE_FILE" ] && grep -q "$flag" "$STATE_FILE"; then
-  echo "Configure Merchant Webhook API Key: already configured, skipping."
-else
-  json_payload='{
-    "key": "merchant.webhook.apikey",
-    "value": "39b11799f7cf9abadb300e5dc85r6660"
-  }'
-  response=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" "$BASE_URL/api/v1/configuration" \
-    --header "API-Key: $API_KEY" \
-    --header "Content-Type: application/json" \
-    --data-raw "$json_payload")
-  body=$(echo "$response" | sed -e 's/HTTPSTATUS\:.*//g')
-  http_code=$(echo "$response" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-  echo "Configure Merchant Webhook API Key Response:"
-  echo "$body"
-  echo "HTTP Status: $http_code"
-  if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ]; then
-    sudo bash -c "echo '$flag' >> $STATE_FILE"
-  else
-    echo "Error in Configure Merchant Webhook API Key. HTTP Status: $http_code" >&2
-  fi
-fi
-
-# Function to create a platform admin API key
-create_platform_admin_api_key() {
-    local ext_pid=$1 project_key=$2
-    local url="http://localhost:8080/api/v1/api-key"
-    local flag="pa_api_key_${project_key}_${ext_pid}_done"
-
-    # Check if already processed
-    if [ -f "$STATE_FILE" ] && grep -qF "$flag" "$STATE_FILE"; then
-        echo "INFO: API Key for $project_key (ID: $ext_pid) already exists. Skipping."
-        return 0
-    fi
-
-    echo "INFO: Creating API Key for project '$project_key' (ID: $ext_pid)..."
-    local payload
-    payload=$(cat <<EOF
-{
-    "externalPlatformID": ${ext_pid},
-    "roleName": "platform_admin"
-}
-EOF
-)
-    local resp body code key
-
-    resp=$(curl --location --silent --write-out "\nHTTPSTATUS:%{http_code}" \
-        --request POST \
-        --header "API-Key: $API_KEY" \
-        --header "Content-Type: application/json" \
-        --data-raw "$payload" \
-        "$url")
-
-    body=$(echo "$resp" | sed -e 's/HTTPSTATUS\:.*//g')
-    code=$(echo "$resp" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
-
-    if [[ "$code" -eq 200 || "$code" -eq 201 ]]; then
-        key=$(echo "$body" | jq -r '.key // empty')
-        if [[ -n "$key" ]]; then
-            echo "SUCCESS: API Key for $project_key (ID: $ext_pid) created: $key"
-            # Update state file
-            if sudo bash -c "echo '$flag' >> \"$STATE_FILE\""; then
-                echo "INFO: State file updated for $project_key (ID: $ext_pid)."
-            else
-                echo "ERROR: Failed to write flag '$flag' to state file '$STATE_FILE' for $project_key (ID: $ext_pid)." >&2
-            fi
-        else
-            echo "ERROR: API Key for $project_key (ID: $ext_pid) request OK (HTTP $code), but 'key' field missing/empty in response. Body: $body" >&2
-        fi
-    else
-        echo "ERROR: Failed to create API Key for $project_key (ID: $ext_pid). HTTP Status: $code. Body: $body" >&2
-    fi
-}
-
-
-setup_container() {
-  
-  required_states=(
-    "dependencies_installed"
-    "docker_container_running"
-    "signup_done"
-    "configuration_backend_done"
-    "configuration_frontend_done"
-    "configuration_postal_endpoint_done"
-    "configuration_postal_apikey_done"
-    "configuration_wallet_connect_id_done"
-    "blockchain_ethereum_done"
-    "blockchain_bitcoin_done"
-    "blockchain_trx_done"
-    "xpub_ethereum_done"
-    "xpub_bitcoin_done"
-    "xpub_trx_done"
-    "configuration_consumer_action_config_done"
-    "configuration_email_deposit_received_done"
-    "configuration_websocket_url_done"
-    "configuration_otp_master_done"
-    "configuration_otp_subject_done"
-    "configuration_default_header_done"
-    "configuration_default_footer_done"
-    "configuration_otp_body_done"
-    "configuration_email_body_done"
-    "configuration_email_header_done"
-    "configuration_merchant_webhook_apikey_done"
-  )
-
- 
-  if [ ! -f "$STATE_FILE" ]; then
-    echo "State file '$STATE_FILE' not found. Exiting."
-    return 1
-  fi
-
- 
-  missing_state=0
-  for state in "${required_states[@]}"; do
-    if ! grep -q "^${state}$" "$STATE_FILE"; then
-      echo "Required state '$state' is missing."
-      missing_state=1
-    fi
-  done
-
-  if [ $missing_state -ne 0 ]; then
-    echo "Not all required states are present. Skipping container restart."
-    return 1
-  fi
-
-  # At this point, all required states are present.
-  # Check if a container named 'payram' is running.
-  running_container=$(docker ps --filter "name=payram" --filter "status=running" -q)
-  if [ -z "$running_container" ]; then
-    echo "No running container named 'payram' found."
-    return 1
-  fi
-
-  container_restarted_flag="container_restarted"
-  # If the container has already been restarted, skip the restart.
-  if grep -q "^${container_restarted_flag}$" "$STATE_FILE"; then
-    echo "Container restart already performed. Skipping restart."
-    return 0
-  fi
-
-  echo -e "\n✨ Please wait... we're generating the addresses for you!"
-  sleep 30
-  echo -e "✅ Addresses have been generated.\n"
-
-  # Restart the container since required states are met and restart has not been done.
-  echo "Container 'payram' is running. Restarting the container..."
-  docker restart payram
-
-  max_attempts=3
-  wait_time=20
-  CONFIG_FILE="config.yaml"
-  FRONTEND_URL=$(yq e '.configuration["payram.frontend"]' "$CONFIG_FILE" | xargs)
-
-
-  # Try to hit the endpoint until a 200 status code is received or max attempts reached.
-  for (( attempt=1; attempt<=max_attempts; attempt++ )); do
-      echo "Attempt ${attempt}: Waiting for ${wait_time} seconds..."
-      sleep $wait_time
-
-      # Hit the endpoint and capture the HTTP status code.
-      status_code=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL")
-      echo "Received status code: $status_code"
-
-       if [ "$status_code" -eq 200 ]; then
-          echo "Your setup is successful!"
-          echo -e "\nINFO: --- Starting Project-specific Platform Admin API Key Creation ---"
-
-          if [ ! -f "$CONFIG_FILE" ]; then
-              echo "ERROR: Configuration file '$CONFIG_FILE' not found. Skipping platform admin API key creation for projects." >&2
-          else
-              project_keys=$(yq eval '.projects | keys | .[]' "$CONFIG_FILE" 2>/dev/null)
-
-              if [ -z "$project_keys" ]; then
-                  echo "INFO: No projects found under '.projects' in '$CONFIG_FILE' or yq error. Skipping project API key creation loop."
-              else
-                  echo "INFO: Processing projects for API key creation: $project_keys"
-                  for project_key_name in $project_keys; do
-                      # Extract numeric ID from project_key_name (e.g., project1 -> 1)
-                      project_numeric_id=$(echo "$project_key_name" | sed -n 's/^project\([0-9]\+\)$/\1/p')
-
-                      if [[ -n "$project_numeric_id" ]]; then
-                          create_platform_admin_api_key "$project_numeric_id" "$project_key_name"
-                      else
-                          echo "WARN: Project key '$project_key_name' does not match 'project<number>' format. Skipping API key creation for this project."
-                      fi
-                  done
-                  echo "INFO: --- Finished Project-specific Platform Admin API Key Creation ---"
-              fi
-          fi
-
-          echo -e "\n\e[1m\e[33mIMPORTANT:\e[0m The API keys displayed during this setup are generated ONLY ONCE."
-          echo -e "\e[1m\e[33mPlease make sure to COPY and STORE them securely NOW.\e[0m"
-          echo -e "\e[1m\e[33mThese keys are required for interacting with your PayRam server.\e[0m\n"
-          # Append the container_restarted flag if it is not already present.
-          update_state "$container_restarted_flag"
-          echo "🚀 Go to this link to login with your credentials:"
-          echo "$FRONTEND_URL/login"
-          return 0
-      fi
-  done
-
-  echo "Something went wrong while setting up the server."
-  return 1
-}
-
-
-setup_container
-
-  echo "Script execution finished."
-}
-
-
-# Call the API requests function
-run_api_requests
