@@ -107,12 +107,18 @@ check_and_install_dependencies() {
 # Function to test PostgreSQL connection
 test_postgres_connection() {
   print_color "yellow" "\nAttempting to connect to the database..."
-  export PGPASSWORD="$DB_PASSWORD"
-  if psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "\q" &>/dev/null; then
-    unset PGPASSWORD
+  
+  # Use .pgpass file for secure password handling
+  local pgpass_file=$(mktemp)
+  echo "$DB_HOST:$DB_PORT:$DB_NAME:$DB_USER:$DB_PASSWORD" > "$pgpass_file"
+  chmod 600 "$pgpass_file"
+  
+  # Use PGPASSFILE instead of PGPASSWORD
+  if PGPASSFILE="$pgpass_file" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "\q" &>/dev/null; then
+    rm -f "$pgpass_file"
     return 0 # Success
   else
-    unset PGPASSWORD
+    rm -f "$pgpass_file"
     return 1 # Failure
   fi
 }
