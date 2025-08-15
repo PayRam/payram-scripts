@@ -1,383 +1,1531 @@
 #!/bin/bash
 set -euo pipefail
 
-# Check if script is run as root
-check_root() {
+# =============================================================================
+# PayRam Universal Setup Script v3
+# =============================================================================
+# A universal, cross-platform setup script for PayRam crypto payment gateway
+# Supports: Ubuntu, Debian, CentOS, RHEL, Fedora, Arch, Alpine, macOS
+# =============================================================================
+
+# --- GLOBAL SYSTEM INFORMATION ---
+declare -g OS_FAMILY=""
+declare -g OS_DISTRO=""
+declare -g OS_VERSION=""
+declare -g PACKAGE_MANAGER=""
+declare -g SERVICE_MANAGER=""
+declare -g INSTALL_METHOD=""
+declare -g SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+declare -g LOG_FILE="/tmp/payram-setup.log"
+
+# --- CORE UTILITY FUNCTIONS ---
+
+# Enhanced logging with timestamps
+log() {
+  local level="$1"
+  shift
+  local message="$*"
+  local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+  
+  case "$level" in
+    ERROR) print_color "red" "❌ $message" ;;
+    WARN) print_color "yellow" "⚠️  $message" ;;
+    INFO) print_color "blue" "ℹ️  $message" ;;
+    SUCCESS) print_color "green" "✅ $message" ;;
+    DEBUG) [[ "${DEBUG:-0}" == "1" ]] && print_color "gray" "🔍 $message" ;;
+    *) echo "$message" ;;
+  esac
+}
+
+# Progress indicator
+show_progress() {
+  local current=$1
+  local total=$2
+  local description="$3"
+  local percent=$((current * 100 / total))
+  local completed=$((current * 50 / total))
+  local remaining=$((50 - completed))
+  
+  printf "\r🚀 [%s%s] %d%% - %s" \
+    "$(printf "%${completed}s" | tr ' ' '=')" \
+    "$(printf "%${remaining}s" | tr ' ' '-')" \
+    "$percent" \
+    "$description"
+    
+  [[ $current -eq $total ]] && echo ""
+}
+
+# Check if script is run as root (with better UX)
+check_privileges() {
   if [ "$(id -u)" -ne 0 ]; then
-    echo -e "\033[0;31mError: This script must be run as root.\033[0m"
-    echo -e "\033[0;33mPlease run: sudo ./$(basename "$0")\033[0m"
+    log "ERROR" "This script requires root privileges for system modifications"
+    echo
+    print_color "yellow" "Please run one of the following:"
+    print_color "blue" "  sudo $0 $*"
+    print_color "blue" "  su -c '$0 $*'"
+    echo
     exit 1
   fi
+  
+  # Store original user info
+  if [[ -n "${SUDO_USER:-}" ]]; then
+    ORIGINAL_USER="$SUDO_USER"
+    ORIGINAL_HOME=$(eval echo "~$SUDO_USER")
+  else
+    ORIGINAL_USER="root"
+    ORIGINAL_HOME="/root"
+  fi
+  
+  log "INFO" "Running as root, original user: $ORIGINAL_USER"
 }
 
-# --- Default Configuration ---
-DEFAULT_IMAGE_TAG="develop"
-NETWORK_TYPE="mainnet"
-SERVER="PRODUCTION"
-IMAGE_TAG=""
-POSTGRES_SSLMODE="prefer"
-SSL_CERT_PATH=""
-AES_KEY=""
+# --- SYSTEM DETECTION MODULE ---
 
-# PayRam directories
-PAYRAM_HOME="/home/ubuntu"
-PAYRAM_INFO_DIR="$PAYRAM_HOME/.payraminfo"
-PAYRAM_CORE_DIR="$PAYRAM_HOME/.payram-core"
-
-# --- Helper Functions ---
-
-# Function to display usage information
-usage() {
-  echo "Usage: $0 [OPTIONS]"
-  echo ""
-  echo "A script to manage the PayRam Docker container setup."
-  echo ""
-  echo "Options:"
-  echo "  --update                 Update the container to the latest image version using existing settings."
-  echo "  --reset                  Permanently delete the container, images, data, and configuration."
-  echo "  --testnet                Set up a testnet environment (SERVER=DEVELOPMENT)."
-  echo "  --tag=<tag>, -T=<tag>    Specify the Docker image tag to use. Defaults to release version."
-  echo "  -h, --help               Show this help message."
+# Comprehensive OS detection
+detect_system_info() {
+  log "INFO" "Detecting system information..."
+  show_progress 1 10 "Analyzing operating system..."
+  
+  # Initialize variables
+  OS_FAMILY=""
+  OS_DISTRO=""
+  OS_VERSION=""
+  PACKAGE_MANAGER=""
+  SERVICE_MANAGER=""
+  INSTALL_METHOD=""
+  
+  # Detect OS type
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    OS_FAMILY="macos"
+    OS_DISTRO="macos"
+    OS_VERSION=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+    PACKAGE_MANAGER="brew"
+    SERVICE_MANAGER="launchctl"
+    INSTALL_METHOD="homebrew"
+    
+  elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+    OS_FAMILY="windows"
+    OS_DISTRO="windows"
+    PACKAGE_MANAGER="none"
+    SERVICE_MANAGER="none"
+    INSTALL_METHOD="manual"
+    
+  elif [[ -f /etc/os-release ]]; then
+    source /etc/os-release
+    OS_DISTRO="${ID:-unknown}"
+    OS_VERSION="${VERSION_ID:-unknown}"
+    
+    # Determine OS family and capabilities
+    case "$OS_DISTRO" in
+      ubuntu|debian|mint|pop|elementary|kali)
+        OS_FAMILY="debian"
+        PACKAGE_MANAGER="apt"
+        INSTALL_METHOD="official"
+        ;;
+      centos|rhel|rocky|almalinux|ol|amzn)
+        OS_FAMILY="rhel"
+        PACKAGE_MANAGER="yum"
+        [[ -x "$(command -v dnf)" ]] && PACKAGE_MANAGER="dnf"
+        INSTALL_METHOD="official"
+        ;;
+      fedora)
+        OS_FAMILY="fedora"
+        PACKAGE_MANAGER="dnf"
+        INSTALL_METHOD="official"
+        ;;
+      opensuse*|sles)
+        OS_FAMILY="opensuse"
+        PACKAGE_MANAGER="zypper"
+        INSTALL_METHOD="official"
+        ;;
+      arch|manjaro|endeavouros|artix)
+        OS_FAMILY="arch"
+        PACKAGE_MANAGER="pacman"
+        INSTALL_METHOD="official"
+        ;;
+      alpine)
+        OS_FAMILY="alpine"
+        PACKAGE_MANAGER="apk"
+        INSTALL_METHOD="official"
+        ;;
+      void)
+        OS_FAMILY="void"
+        PACKAGE_MANAGER="xbps"
+        INSTALL_METHOD="fallback"
+        ;;
+      *)
+        OS_FAMILY="linux"
+        PACKAGE_MANAGER="unknown"
+        INSTALL_METHOD="fallback"
+        ;;
+    esac
+    
+    # Detect service manager
+    if [[ -x "$(command -v systemctl)" ]] && systemctl --version &>/dev/null; then
+      SERVICE_MANAGER="systemd"
+    elif [[ -x "$(command -v service)" ]]; then
+      SERVICE_MANAGER="sysvinit"
+    elif [[ -x "$(command -v rc-service)" ]]; then
+      SERVICE_MANAGER="openrc"
+    else
+      SERVICE_MANAGER="unknown"
+    fi
+    
+  else
+    # Fallback detection
+    if command -v uname &>/dev/null; then
+      local uname_s=$(uname -s)
+      case "$uname_s" in
+        Linux) OS_FAMILY="linux"; INSTALL_METHOD="fallback" ;;
+        Darwin) OS_FAMILY="macos"; INSTALL_METHOD="homebrew" ;;
+        *) OS_FAMILY="unknown"; INSTALL_METHOD="manual" ;;
+      esac
+    else
+      OS_FAMILY="unknown"
+      INSTALL_METHOD="manual"
+    fi
+  fi
+  
+  show_progress 3 10 "System detection complete"
+  
+  # Display results
+  log "SUCCESS" "System Detection Results:"
+  log "INFO" "  OS Family: $OS_FAMILY"
+  log "INFO" "  Distribution: $OS_DISTRO"
+  log "INFO" "  Version: $OS_VERSION"
+  log "INFO" "  Package Manager: $PACKAGE_MANAGER"
+  log "INFO" "  Service Manager: $SERVICE_MANAGER"
+  log "INFO" "  Install Method: $INSTALL_METHOD"
+  
+  # Validate compatibility
+  validate_system_compatibility
 }
 
-# Function to print colored text
-print_color() {
-  case "$1" in
-    "green") echo -e "\033[0;32m$2\033[0m" ;;
-    "red") echo -e "\033[0;31m$2\033[0m" ;;
-    "yellow") echo -e "\033[0;33m$2\033[0m" ;;
-    "blue") echo -e "\033[0;34m$2\033[0m" ;;
-    *)
-      echo "$2"
+validate_system_compatibility() {
+  show_progress 4 10 "Validating system compatibility..."
+  
+  case "$OS_FAMILY" in
+    macos|debian|rhel|fedora|arch|alpine)
+      log "SUCCESS" "System is fully supported"
+      ;;
+    linux)
+      log "WARN" "Limited support - will attempt fallback installation"
+      ;;
+    windows)
+      log "ERROR" "Windows is not directly supported. Please use WSL2 or Docker Desktop"
+      print_color "yellow" "Setup instructions:"
+      print_color "blue" "  1. Install WSL2: https://docs.microsoft.com/en-us/windows/wsl/install"
+      print_color "blue" "  2. Install Ubuntu in WSL2"
+      print_color "blue" "  3. Run this script inside WSL2"
+      exit 1
+      ;;
+    unknown)
+      log "ERROR" "Unsupported operating system detected"
+      print_color "yellow" "Please install Docker and PostgreSQL manually, then run:"
+      print_color "blue" "  curl -fsSL https://get.docker.com | sh"
+      exit 1
       ;;
   esac
 }
 
-# Function to check and install dependencies for Ubuntu
-check_and_install_dependencies() {
-  print_color "blue" "Checking for required dependencies..."
-  local dependencies=("docker" "psql")
-  local missing_deps=()
+# --- UNIVERSAL PACKAGE MANAGEMENT MODULE ---
 
-  for dep in "${dependencies[@]}"; do
-    if ! command -v "$dep" &> /dev/null; then
-      print_color "yellow" "Dependency '$dep' not found."
-      missing_deps+=("$dep")
-    else
-      print_color "green" "✅ Dependency '$dep' is already installed."
+# Universal package manager wrapper
+pkg_update() {
+  log "INFO" "Updating package lists for $PACKAGE_MANAGER..."
+  
+  case "$PACKAGE_MANAGER" in
+    apt)
+      DEBIAN_FRONTEND=noninteractive apt update -qq
+      ;;
+    yum)
+      yum check-update || true
+      ;;
+    dnf)
+      dnf check-update || true
+      ;;
+    zypper)
+      zypper refresh -q
+      ;;
+    pacman)
+      pacman -Sy --noconfirm
+      ;;
+    apk)
+      apk update -q
+      ;;
+    xbps)
+      xbps-install -S
+      ;;
+    brew)
+      su - "$ORIGINAL_USER" -c "brew update" || true
+      ;;
+    *)
+      log "ERROR" "Unknown package manager: $PACKAGE_MANAGER"
+      return 1
+      ;;
+  esac
+}
+
+pkg_install() {
+  local packages=("$@")
+  log "INFO" "Installing packages: ${packages[*]}"
+  
+  case "$PACKAGE_MANAGER" in
+    apt)
+      DEBIAN_FRONTEND=noninteractive apt install -y "${packages[@]}"
+      ;;
+    yum)
+      yum install -y "${packages[@]}"
+      ;;
+    dnf)
+      dnf install -y "${packages[@]}"
+      ;;
+    zypper)
+      zypper install -y "${packages[@]}"
+      ;;
+    pacman)
+      pacman -S --noconfirm "${packages[@]}"
+      ;;
+    apk)
+      apk add "${packages[@]}"
+      ;;
+    xbps)
+      xbps-install -y "${packages[@]}"
+      ;;
+    brew)
+      for package in "${packages[@]}"; do
+        su - "$ORIGINAL_USER" -c "brew install $package" || true
+      done
+      ;;
+    *)
+      log "ERROR" "Cannot install packages with $PACKAGE_MANAGER"
+      return 1
+      ;;
+  esac
+}
+
+# Universal service management
+service_start() {
+  local service="$1"
+  log "INFO" "Starting service: $service"
+  
+  case "$SERVICE_MANAGER" in
+    systemd)
+      systemctl start "$service"
+      ;;
+    sysvinit)
+      service "$service" start
+      ;;
+    openrc)
+      rc-service "$service" start
+      ;;
+    launchctl)
+      log "INFO" "Service management on macOS is automatic"
+      ;;
+    *)
+      log "WARN" "Cannot start service $service with $SERVICE_MANAGER"
+      ;;
+  esac
+}
+
+service_enable() {
+  local service="$1"
+  log "INFO" "Enabling service: $service"
+  
+  case "$SERVICE_MANAGER" in
+    systemd)
+      systemctl enable "$service"
+      ;;
+    openrc)
+      rc-update add "$service" boot
+      ;;
+    sysvinit|launchctl)
+      log "INFO" "Service auto-enable not required for $SERVICE_MANAGER"
+      ;;
+    *)
+      log "WARN" "Cannot enable service $service with $SERVICE_MANAGER"
+      ;;
+  esac
+}
+
+service_is_running() {
+  local service="$1"
+  case "$SERVICE_MANAGER" in
+    systemd)
+      systemctl is-active --quiet "$service"
+      ;;
+    sysvinit)
+      service "$service" status &>/dev/null
+      ;;
+    openrc)
+      rc-service "$service" status &>/dev/null
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Get appropriate package names for different systems
+get_docker_prerequisites() {
+  case "$OS_FAMILY" in
+    debian)
+      echo "ca-certificates curl gnupg lsb-release apt-transport-https"
+      ;;
+    rhel|fedora)
+      echo "yum-utils device-mapper-persistent-data lvm2"
+      ;;
+    arch)
+      echo ""  # No prerequisites needed
+      ;;
+    alpine)
+      echo ""  # No prerequisites needed
+      ;;
+    macos)
+      echo ""  # Homebrew handles dependencies
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+get_postgresql_client_package() {
+  case "$OS_FAMILY" in
+    debian) echo "postgresql-client" ;;
+    rhel|fedora) echo "postgresql" ;;
+    arch) echo "postgresql-libs" ;;
+    alpine) echo "postgresql-client" ;;
+    macos) echo "postgresql" ;;
+    *) echo "postgresql-client" ;;
+  esac
+}
+
+# --- DEPENDENCY MANAGEMENT MODULE ---
+
+# Universal Docker installation
+install_docker() {
+  log "INFO" "Installing Docker using $INSTALL_METHOD method..."
+  show_progress 5 10 "Installing Docker..."
+  
+  # Check if Docker is already installed and working
+  if command -v docker &>/dev/null && docker info &>/dev/null; then
+    log "SUCCESS" "Docker is already installed and running"
+    docker --version
+    return 0
+  fi
+  
+  case "$INSTALL_METHOD" in
+    official)
+      install_docker_official_repo
+      ;;
+    homebrew)
+      install_docker_homebrew
+      ;;
+    fallback)
+      install_docker_distribution_packages
+      ;;
+    manual)
+      log "ERROR" "Manual Docker installation required for $OS_FAMILY"
+      print_color "yellow" "Please visit: https://docs.docker.com/get-docker/"
+      return 1
+      ;;
+  esac
+  
+  configure_docker_post_install
+  verify_docker_installation
+}
+
+install_docker_official_repo() {
+  local prereq_packages
+  prereq_packages=$(get_docker_prerequisites)
+  
+  # Install prerequisites
+  if [[ -n "$prereq_packages" ]]; then
+    pkg_install $prereq_packages
+  fi
+  
+  case "$OS_FAMILY" in
+    debian)
+      # Add Docker's official GPG key
+      curl -fsSL "https://download.docker.com/linux/$OS_DISTRO/gpg" | \
+        gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+      
+      # Add repository
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/$OS_DISTRO $(lsb_release -cs) stable" | \
+        tee /etc/apt/sources.list.d/docker.list > /dev/null
+      
+      pkg_update
+      pkg_install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+      ;;
+      
+    rhel|fedora)
+      # Add Docker repository
+      local repo_url="https://download.docker.com/linux/centos/docker-ce.repo"
+      [[ "$OS_FAMILY" == "fedora" ]] && repo_url="https://download.docker.com/linux/fedora/docker-ce.repo"
+      
+      $PACKAGE_MANAGER config-manager --add-repo "$repo_url"
+      pkg_install docker-ce docker-ce-cli containerd.io docker-compose-plugin
+      ;;
+      
+    arch)
+      pkg_install docker docker-compose
+      ;;
+      
+    alpine)
+      pkg_install docker docker-compose
+      ;;
+  esac
+}
+
+install_docker_homebrew() {
+  # Check if Homebrew is installed
+  if ! su - "$ORIGINAL_USER" -c "command -v brew" &>/dev/null; then
+    log "INFO" "Installing Homebrew first..."
+    su - "$ORIGINAL_USER" -c '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+  fi
+  
+  su - "$ORIGINAL_USER" -c "brew install --cask docker"
+  
+  log "INFO" "Please start Docker Desktop and wait for it to be ready..."
+  wait_for_docker_macos
+}
+
+install_docker_distribution_packages() {
+  log "WARN" "Falling back to distribution packages..."
+  
+  case "$OS_FAMILY" in
+    debian) 
+      pkg_install docker.io docker-compose
+      ;;
+    rhel|fedora) 
+      pkg_install docker docker-compose
+      ;;
+    *) 
+      log "ERROR" "No fallback package available for $OS_FAMILY"
+      return 1
+      ;;
+  esac
+}
+
+configure_docker_post_install() {
+  log "INFO" "Configuring Docker post-installation..."
+  
+  # Skip service management for macOS
+  if [[ "$OS_FAMILY" != "macos" ]]; then
+    service_start docker
+    service_enable docker
+    
+    # Add original user to docker group
+    if [[ "$ORIGINAL_USER" != "root" ]]; then
+      usermod -aG docker "$ORIGINAL_USER"
+      log "SUCCESS" "User $ORIGINAL_USER added to docker group"
+      log "WARN" "Please log out and back in for group changes to take effect"
     fi
+  fi
+}
+
+wait_for_docker_macos() {
+  local max_attempts=30
+  local attempt=0
+  
+  log "INFO" "Waiting for Docker Desktop to start..."
+  while ! docker info &>/dev/null; do
+    if [ $attempt -ge $max_attempts ]; then
+      log "ERROR" "Docker Desktop did not start within 5 minutes"
+      return 1
+    fi
+    sleep 10
+    ((attempt++))
+    echo -n "."
   done
-
-  if [ ${#missing_deps[@]} -gt 0 ]; then
-    print_color "yellow" "Installing missing dependencies for Ubuntu..."
-    
-    if ! command -v sudo &> /dev/null; then
-        print_color "red" "Error: 'sudo' command not found. Please install it or run this script as root."
-        exit 1
-    fi
-    
-    print_color "yellow" "Sudo privileges are required to install packages."
-    sudo -v
-    
-    print_color "yellow" "Updating package lists..."
-    sudo apt-get update -y > /dev/null 2>&1
-
-    for dep in "${missing_deps[@]}"; do
-      print_color "yellow" "Installing '$dep'..."
-      case "$dep" in
-        "docker")
-          sudo apt-get install -y docker.io > /dev/null 2>&1
-          sudo systemctl enable --now docker > /dev/null 2>&1
-          sudo usermod -aG docker "$USER" > /dev/null 2>&1
-          print_color "green" "✅ Docker installed successfully."
-          print_color "yellow" "Note: You may need to log out and log back in for Docker group changes to take effect."
-          ;;
-        "psql")
-          sudo apt-get install -y postgresql-client > /dev/null 2>&1
-          print_color "green" "✅ PostgreSQL client installed successfully."
-          ;;
-      esac
-    done
-    print_color "green" "✅ All missing dependencies have been installed."
-  else
-    print_color "green" "All required dependencies are already installed."
-  fi
   echo
+  log "SUCCESS" "Docker Desktop is ready"
 }
 
-# Function to test PostgreSQL connection
-test_postgres_connection() {
-  print_color "yellow" "\nAttempting to connect to the database..."
+verify_docker_installation() {
+  log "INFO" "Verifying Docker installation..."
   
-  # Use .pgpass file for secure password handling
-  local pgpass_file=$(mktemp)
-  echo "$DB_HOST:$DB_PORT:$DB_NAME:$DB_USER:$DB_PASSWORD" > "$pgpass_file"
-  chmod 600 "$pgpass_file"
-  
-  # Use PGPASSFILE instead of PGPASSWORD
-  if PGPASSFILE="$pgpass_file" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "\q" &>/dev/null; then
-    rm -f "$pgpass_file"
-    return 0 # Success
-  else
-    rm -f "$pgpass_file"
-    return 1 # Failure
-  fi
-}
-
-# Function to generate a secure AES key
-generate_aes_key() {
-  print_color "yellow" "Generating a new secure AES key..."
-  AES_KEY=$(openssl rand -hex 32)
-  
-  # Also save the key to the aes directory for legacy compatibility
-  local aes_dir="$PAYRAM_INFO_DIR/aes"
-  print_color "yellow" "Saving AES key to $aes_dir for legacy compatibility..."
-  
-  mkdir -p "$aes_dir"
-  echo "AES_KEY=$AES_KEY" > "$aes_dir/$AES_KEY"
-  print_color "green" "✅ AES key generated and saved."
-}
-
-# Function to save the configuration to a file
-save_configuration() {
-  local config_dir="$PAYRAM_INFO_DIR"
-  local config_file="$config_dir/config.env"
-
-  print_color "yellow" "\nSaving configuration to $config_file..."
-  
-  mkdir -p "$config_dir"
-
-  # Set restrictive umask before creating the file
-  umask 077
-
-  # Write all relevant variables to the config file
-  cat > "$config_file" << EOL
-# PayRam Configuration - Do not edit manually unless you know what you are doing.
-IMAGE_TAG="${IMAGE_TAG:-}"
-NETWORK_TYPE="${NETWORK_TYPE:-}"
-SERVER="${SERVER:-}"
-AES_KEY="${AES_KEY:-}"
-DB_HOST="${DB_HOST:-}"
-DB_PORT="${DB_PORT:-}"
-DB_NAME="${DB_NAME:-}"
-DB_USER="${DB_USER:-}"
-DB_PASSWORD="${DB_PASSWORD:-}"
-POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-}"
-SSL_CERT_PATH="${SSL_CERT_PATH:-}"
-EOL
-
-  # Double-check permissions are set correctly
-  chmod 600 "$config_file" || true
-  print_color "green" "✅ Configuration saved (permissions 600)."
-}
-
-# Function to perform a full reset
-reset_environment() {
-  print_color "red" "WARNING: This will permanently delete the PayRam container, all associated Docker images, data volumes, and configuration."
-  read -p "Are you sure you want to proceed? (y/N) " -n 1 -r
-  echo
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    print_color "yellow" "Reset cancelled."
-    exit 1
-  fi
-
-  print_color "yellow" "\nStopping and removing 'payram' container..."
-  docker stop payram &>/dev/null || true
-  docker rm -v payram &>/dev/null || true
-
-  print_color "yellow" "Removing all 'buddhasource/payram-core' Docker images..."
-  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
-
-  print_color "yellow" "Deleting PayRam data and configuration directories..."
-  # Use specific rm commands for safety and precision
-  sudo rm -rf "$PAYRAM_CORE_DIR"
-  rm -rf "$PAYRAM_INFO_DIR"
-
-  print_color "green" "\n✅ Reset complete. All PayRam data and configurations have been removed."
-}
-
-# Function to update the container using saved settings
-update_container() {
-  local config_file="$PAYRAM_INFO_DIR/config.env"
-  print_color "blue" "Starting PayRam update process..."
-
-  if ! test -f "$config_file"; then
-    print_color "red" "Error: Configuration file not found at '$config_file'."
-    print_color "yellow" "Please run the initial setup first (without the --update flag)."
-    exit 1
-  fi
-
-  print_color "yellow" "Loading existing configuration from $config_file..."
-  # Store the user-provided tag BEFORE loading config
-  local user_provided_tag="$IMAGE_TAG"
-  
-  # Load the config but save IMAGE_TAG separately first
-  source "$config_file"
-  local current_tag="$IMAGE_TAG"
-  
-  # Set target tag based on user input or default
-  local target_tag
-  if [[ -n "$user_provided_tag" ]]; then
-    target_tag="$user_provided_tag"
-  else
-    target_tag="$DEFAULT_IMAGE_TAG"
-  fi
-
-  print_color "green" "✅ Configuration loaded."
-  echo
-  
-  # # Check if current and target versions are the same
-  # if [[ "$current_tag" == "$target_tag" ]]; then
-  #   print_color "blue" "--- Version Check ---"
-  #   print_color "yellow" "Current installed version: $current_tag"
-  #   print_color "yellow" "Target version: $target_tag"
-  #   print_color "green" "\n✅ You are already using the latest version ($current_tag)."
-  #   print_color "yellow" "No update needed. Exiting..."
-  #   exit 0
-  # fi
-  
-  print_color "blue" "--- Tag Selection ---"
-  print_color "yellow" "Current installed version: $current_tag"
-  print_color "yellow" "Target version: $target_tag"
-  echo
-  
-  # Always show selection menu
-  PS3='Please choose which tag to use for the update: '
-  options=("Use target tag: $target_tag (new version)" "Use existing tag: $current_tag (current version)" "Don't update (cancel)")
-  select opt in "${options[@]}"
-  do
-    case $opt in
-      "${options[0]}")
-        IMAGE_TAG="$target_tag"
-        break
-        ;;
-      "${options[1]}")
-        IMAGE_TAG="$current_tag"
-        # Flag to indicate we're using the existing tag
-        local using_existing_tag=true
-        break
-        ;;
-      "${options[2]}")
-        print_color "yellow" "\nUpdate cancelled by user."
-        exit 0
-        ;;
-      *)
-        print_color "red" "Invalid option $REPLY"
-        ;;
-    esac
-  done
-
-  # Show configuration summary
-  echo
-  print_color "blue" "--- Update Configuration Summary ---"
-  print_color "yellow" "Docker Image Tag: $IMAGE_TAG"
-  print_color "yellow" "Network Type: $NETWORK_TYPE"
-  print_color "yellow" "Server Mode: $SERVER"
-  print_color "yellow" "Database Host: $DB_HOST"
-  print_color "yellow" "Database Port: $DB_PORT"
-  print_color "yellow" "Database Name: $DB_NAME"
-  if [[ -n "$SSL_CERT_PATH" ]]; then
-    print_color "yellow" "SSL Certificate Path: $SSL_CERT_PATH"
-  else
-    print_color "yellow" "SSL Certificate Path: Not configured"
-  fi
-  print_color "blue" "--------------------------------"
-  echo
-
-  read -p "Press [Enter] to proceed with the update..."
-
-  # Check if we're using the existing tag (no changes)
-  if [[ "${using_existing_tag:-false}" == true ]]; then
-    # Check if container is already running with the same tag
-    if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
-      print_color "green" "\n✅ Container is already running with tag '$IMAGE_TAG'."
-      print_color "yellow" "No changes needed. Exiting..."
-      exit 0
-    fi
-  fi
-
-  print_color "yellow" "\nUpdating to image: buddhasource/payram-core:$IMAGE_TAG..."
-  
-  # Stop and remove existing container if running
-  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
-    print_color "yellow" "Stopping and removing existing 'payram' container..."
-    docker stop payram &>/dev/null || true
-    docker rm -v payram &>/dev/null || true
-  elif docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
-    print_color "yellow" "Removing existing stopped 'payram' container..."
-    docker rm -v payram &>/dev/null || true
+  # Test Docker daemon
+  if ! docker info &>/dev/null; then
+    log "ERROR" "Docker is not running or not accessible"
+    return 1
   fi
   
-  # Call the run function with the selected settings
-  run_docker_container
-  exit 0
-}
-
-# Function to validate a Docker image tag
-validate_docker_tag() {
-  local tag_to_check=$1
-  print_color "yellow" "\nValidating Docker tag: $tag_to_check..."
-  if docker manifest inspect "buddhasource/payram-core:$tag_to_check" >/dev/null 2>&1; then
-    print_color "green" "✅ Tag '$tag_to_check' is valid."
+  # Test with hello-world
+  if docker run --rm hello-world &>/dev/null; then
+    log "SUCCESS" "Docker is working correctly"
+    docker --version
     return 0
   else
-    print_color "red" "❌ Error: Docker tag '$tag_to_check' not found in the repository. Please provide a valid tag."
+    log "ERROR" "Docker test failed"
     return 1
   fi
 }
 
-# Function to run the Docker container
-run_docker_container() {
-  # Track if we're in update mode
-  local is_update=false
-  # Check if this function was called from update_container
-  local caller_function=${FUNCNAME[1]:-}
-  if [[ "$caller_function" == "update_container" ]]; then
-    is_update=true
+# PostgreSQL client installation
+install_postgresql_client() {
+  show_progress 6 10 "Installing PostgreSQL client..."
+  
+  local pg_package
+  pg_package=$(get_postgresql_client_package)
+  
+  if command -v psql &>/dev/null; then
+    log "SUCCESS" "PostgreSQL client is already installed"
+    psql --version
+  else
+    log "INFO" "Installing PostgreSQL client..."
+    pkg_install "$pg_package"
+    
+    if command -v psql &>/dev/null; then
+      log "SUCCESS" "PostgreSQL client installed successfully"
+      psql --version
+    else
+      log "ERROR" "PostgreSQL client installation failed"
+      return 1
+    fi
   fi
+}
 
-  # Validate the Docker tag before proceeding
-  if ! validate_docker_tag "$IMAGE_TAG"; then
-    exit 1
+# Main dependency installation orchestrator
+install_all_dependencies() {
+  log "INFO" "Installing system dependencies..."
+  show_progress 4 10 "Preparing dependency installation..."
+  
+  # Update package lists
+  pkg_update
+  
+  # Install Docker
+  install_docker
+  
+  # Install PostgreSQL client
+  install_postgresql_client
+  
+  show_progress 7 10 "All dependencies installed successfully"
+  log "SUCCESS" "All system dependencies are ready"
+}
+
+# --- CONFIGURATION MANAGEMENT MODULE ---
+
+# Configuration defaults
+set_configuration_defaults() {
+  DEFAULT_IMAGE_TAG="develop"
+  NETWORK_TYPE="mainnet"
+  SERVER="PRODUCTION"
+  IMAGE_TAG=""
+  POSTGRES_SSLMODE="prefer"
+  SSL_CERT_PATH=""
+  AES_KEY=""
+}
+
+# Initialize defaults early
+set_configuration_defaults
+
+# Dynamic directory paths based on original user
+get_payram_directories() {
+  if [[ "$ORIGINAL_USER" == "root" ]]; then
+    PAYRAM_HOME="/root"
+  else
+    PAYRAM_HOME="$ORIGINAL_HOME"
   fi
+  
+  PAYRAM_INFO_DIR="$PAYRAM_HOME/.payraminfo"
+  PAYRAM_CORE_DIR="$PAYRAM_HOME/.payram-core"
+  
+  log "INFO" "PayRam directories:"
+  log "INFO" "  Home: $PAYRAM_HOME"
+  log "INFO" "  Config: $PAYRAM_INFO_DIR"  
+  log "INFO" "  Data: $PAYRAM_CORE_DIR"
+  
+  # Check disk space availability
+  check_disk_space_requirements
+}
 
-  # Check if a payram container is already running (skip this check if we're updating)
-  if [[ "$is_update" == false ]] && docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
-    print_color "red" "Error: A 'payram' container is already running."
-    print_color "yellow" "If you want to update it, use the '--update' flag."
-    print_color "yellow" "If you want to start over, use the '--reset' flag first."
-    exit 1
+# Check disk space requirements
+check_disk_space_requirements() {
+  local required_space_gb=10
+  local required_space_kb=$((required_space_gb * 1024 * 1024))
+  
+  log "INFO" "Checking disk space requirements..."
+  
+  # Get available space in KB for the target directory
+  local available_space_kb
+  if command -v df >/dev/null 2>&1; then
+    available_space_kb=$(df "$PAYRAM_HOME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+    local available_space_gb=$((available_space_kb / 1024 / 1024))
+    
+    echo
+    print_color "blue" "💾 Disk Space Requirements:"
+    print_color "gray" "  • Required: ${required_space_gb}GB minimum"
+    print_color "gray" "  • Available: ${available_space_gb}GB"
+    
+    if [[ $available_space_kb -lt $required_space_kb ]]; then
+      print_color "red" "  ❌ Insufficient disk space!"
+      print_color "yellow" "  Please free up space or choose a different location"
+      echo
+      return 1
+    else
+      print_color "green" "  ✅ Sufficient disk space available"
+    fi
+    echo
+  else
+    print_color "yellow" "⚠️  Could not check disk space. Ensure ${required_space_gb}GB available"
+    echo
   fi
+  
+  return 0
+}
 
-  # Check if a stopped container exists and remove it
-  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
-    print_color "yellow" "\nRemoving existing stopped 'payram' container..."
-    docker rm -v payram &>/dev/null || true
+# Enhanced database configuration with better UX
+configure_database() {
+  show_progress 8 10 "Configuring database connection..."
+  
+  echo
+  print_color "bold" "📊 Database Configuration"
+  echo
+  print_color "yellow" "PayRam stores business data in PostgreSQL:"
+  print_color "gray" "  • 📈 Transaction history and status"
+  print_color "gray" "  • ⚙️  System configurations and settings"
+  print_color "gray" "  • 👥 Merchant accounts and API credentials"
+  print_color "gray" "  • 📊 Analytics and reporting data"
+  echo
+  print_color "green" "� Security: Private keys are NOT stored in database"
+  print_color "gray" "  • Cold wallet keys: Never on server"
+  print_color "gray" "  • Deposit keys: Not stored, smart sweep used"
+  print_color "gray" "  • Hot wallet keys: Encrypted separately with AES-256"
+  echo
+  
+  print_color "blue" "1) External PostgreSQL Database (Recommended for Production)"
+  print_color "gray" "   • Your database runs on a separate server or cloud service"
+  print_color "gray" "   • Better uptime, professional backups, and easy scaling"
+  print_color "gray" "   • Ideal for live businesses and production environments"
+  print_color "gray" "   • Requires: Existing PostgreSQL server with credentials"
+  echo
+  
+  print_color "blue" "2) Containerized PostgreSQL (Quick Setup for Development)"
+  print_color "gray" "   • Database runs inside a Docker container on this server"
+  print_color "gray" "   • Fast setup with automatic configuration"
+  print_color "gray" "   • ⚠️  Risk: Container loss = data loss (backup regularly!)"
+  print_color "gray" "   • Best for: Testing, development, and small-scale usage"
+  echo
+  
+  while true; do
+    read -p "Select option (1-2): " choice
+    case $choice in
+      1)
+        configure_external_database
+        break
+        ;;
+      2)
+        configure_internal_database
+        break
+        ;;
+      *)
+        print_color "red" "Invalid option. Please select 1 or 2."
+        ;;
+    esac
+  done
+}
+
+configure_external_database() {
+  echo
+  print_color "bold" "🔗 External PostgreSQL Configuration"
+  print_color "yellow" "You'll need an existing PostgreSQL database with:"
+  print_color "gray" "  • Database server accessible from this machine"
+  print_color "gray" "  • Database user with CREATE, INSERT, UPDATE, DELETE permissions"
+  print_color "gray" "  • Network connectivity (check firewalls if connection fails)"
+  echo
+  
+  while true; do
+    read -p "Database Host [localhost]: " DB_HOST
+    DB_HOST=${DB_HOST:-localhost}
+    
+    read -p "Database Port [5432]: " DB_PORT
+    DB_PORT=${DB_PORT:-5432}
+    
+    read -p "Database Name: " DB_NAME
+    while [[ -z "$DB_NAME" ]]; do
+      print_color "red" "Database name cannot be empty"
+      read -p "Database Name: " DB_NAME
+    done
+    
+    read -p "Database Username: " DB_USER
+    while [[ -z "$DB_USER" ]]; do
+      print_color "red" "Database username cannot be empty"
+      read -p "Database Username: " DB_USER
+    done
+    
+    read -s -p "Database Password: " DB_PASSWORD
+    echo
+    while [[ -z "$DB_PASSWORD" ]]; do
+      print_color "red" "Database password cannot be empty"
+      read -s -p "Database Password: " DB_PASSWORD
+      echo
+    done
+    
+    print_color "blue" "🔍 Testing database connection..."
+    if test_postgres_connection; then
+      print_color "green" "✅ Database connection successful!"
+      print_color "gray" "PayRam will be able to connect to your database"
+      break
+    else
+      print_color "red" "❌ Database connection failed"
+      print_color "yellow" "Common issues:"
+      print_color "gray" "  • Check if PostgreSQL is running on the host"
+      print_color "gray" "  • Verify database name exists"
+      print_color "gray" "  • Confirm username/password are correct"
+      print_color "gray" "  • Check firewall settings (port $DB_PORT)"
+      echo
+      read -p "Would you like to try again? (y/N): " retry
+      [[ ! "$retry" =~ ^[Yy]$ ]] && exit 1
+    fi
+  done
+}
+
+configure_internal_database() {
+  echo
+  print_color "bold" "🐳 Containerized PostgreSQL Setup"
+  print_color "green" "✅ Quick automatic configuration selected"
+  echo
+  print_color "blue" "📊 Storage Configuration:"
+  print_color "gray" "  • PostgreSQL runs in Docker container"
+  print_color "gray" "  • Data stored in: $PAYRAM_HOME/.payram-core/db/postgres/"
+  print_color "gray" "  • Initial size: ~500MB, grows with transaction volume"
+  print_color "gray" "  • Logs stored in: $PAYRAM_HOME/.payram-core/log/"
+  print_color "gray" "  • Default credentials: payram/payram123"
+  print_color "gray" "  • Container name: payram (includes database)"
+  echo
+  
+  print_color "yellow" "🔐 Hot Wallet Key Storage:"
+  print_color "gray" "  • Hot wallet private keys stored in database (encrypted)"
+  print_color "gray" "  • Encryption: AES-256 with key stored separately"
+  print_color "gray" "  • Database backup + AES key backup both required"
+  echo
+  
+  print_color "yellow" "⚠️  Important for Production:"
+  print_color "red" "  • Regular backups are YOUR responsibility"
+  print_color "red" "  • Container removal = complete data loss"
+  print_color "red" "  • Backup BOTH database AND AES encryption key"
+  print_color "red" "  • Consider external database for critical operations"
+  echo
+  
+  print_color "blue" "💾 Complete Backup Strategy:"
+  print_color "gray" "  # 1. Database backup"
+  print_color "gray" "  docker exec payram pg_dump -U payram payram > backup.sql"
+  print_color "gray" "  # 2. AES key backup (CRITICAL)"
+  print_color "gray" "  tar -czf payram-keys-backup.tar.gz ~/.payraminfo/aes"
+  print_color "gray" "  # 3. Configuration backup"
+  print_color "gray" "  cp ~/.payraminfo/config.env config-backup.env"
+  echo
+  
+  DB_HOST="localhost"
+  DB_PORT="5432"
+  DB_NAME="payram"
+  DB_USER="payram"
+  DB_PASSWORD="payram123"
+  
+  print_color "green" "✅ Internal database configured successfully"
+}
+
+# Enhanced SSL configuration
+configure_ssl() {
+  show_progress 9 10 "Configuring SSL certificates..."
+  
+  echo
+  print_color "bold" "🔒 SSL Certificate Setup"
+  print_color "yellow" "HTTPS is essential for PayRam's security - it protects:"
+  print_color "gray" "  • API communications and payment data"
+  print_color "gray" "  • Dashboard access and authentication"
+  print_color "gray" "  • Customer payment pages and transactions"
+  echo
+  
+  print_color "blue" "1) Let's Encrypt - Auto-Generate Free SSL (2 minutes)"
+  print_color "gray" "   • Automatic certificate generation and installation"
+  print_color "gray" "   • Free SSL certificates trusted by all browsers"
+  print_color "gray" "   • Auto-renewal every 90 days (with cron job)"
+  print_color "gray" "   • ✅ Perfect for production and development"
+  print_color "gray" "   • Requires: Domain name pointing to this server"
+  echo
+  
+  print_color "blue" "2) Custom Certificates - Upload Your Own SSL"
+  print_color "gray" "   • Upload your own commercial or internal certificates"
+  print_color "gray" "   • Supports: Wildcard, EV, custom CA certificates"
+  print_color "gray" "   • Files needed: fullchain.pem + privkey.pem"
+  print_color "gray" "   • ✅ Ideal for enterprise and scaled production"
+  echo
+  
+  print_color "blue" "3) External SSL - Use Cloud/Proxy Services (Often Easiest!)"
+  print_color "gray" "   • Cloudflare SSL (5-min setup, free tier available)"
+  print_color "gray" "   • AWS ALB, Google LB, Azure Gateway, Nginx, Apache"
+  print_color "gray" "   • PayRam runs HTTP behind your SSL termination"
+  print_color "gray" "   • ✅ Great for cloud deployments and existing infrastructure"
+  echo
+  
+  while true; do
+    read -p "Select option (1-3): " choice
+    case $choice in
+      1)
+        configure_ssl_letsencrypt
+        break
+        ;;
+      2)
+        configure_ssl_custom
+        break
+        ;;
+      3)
+        configure_ssl_external
+        break
+        ;;
+      *)
+        print_color "red" "Invalid option. Please select 1, 2, or 3."
+        ;;
+    esac
+  done
+}
+
+configure_ssl_letsencrypt() {
+  echo
+  print_color "bold" "🆓 Let's Encrypt SSL Setup"
+  print_color "yellow" "This will install Certbot and generate free SSL certificates."
+  echo
+  print_color "blue" "Requirements:"
+  print_color "gray" "  • Domain name must point to this server's public IP"
+  print_color "gray" "  • Ports 80 and 443 must be accessible from internet"
+  print_color "gray" "  • No other web server using these ports"
+  echo
+  
+  # Domain input with validation
+  while true; do
+    read -p "Enter your domain name (e.g., payram.example.com): " DOMAIN_NAME
+    
+    if [[ -z "$DOMAIN_NAME" ]]; then
+      print_color "red" "Domain name cannot be empty"
+      continue
+    fi
+    
+    # Basic domain validation
+    if [[ ! "$DOMAIN_NAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+      print_color "red" "Invalid domain format. Please use format: payram.example.com"
+      continue
+    fi
+    
+    break
+  done
+  
+  # Email for Let's Encrypt notifications
+  while true; do
+    read -p "Enter email for SSL notifications (certificate expiry alerts): " LE_EMAIL
+    
+    if [[ -z "$LE_EMAIL" ]]; then
+      print_color "red" "Email cannot be empty"
+      continue
+    fi
+    
+    # Basic email validation
+    if [[ ! "$LE_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+      print_color "red" "Invalid email format"
+      continue
+    fi
+    
+    break
+  done
+  
+  echo
+  print_color "yellow" "⚠️  Before proceeding:"
+  print_color "gray" "  • Ensure $DOMAIN_NAME points to this server"
+  print_color "gray" "  • Stop any web servers on ports 80/443"
+  print_color "gray" "  • This process takes 1-3 minutes"
+  echo
+  
+  read -p "Ready to generate SSL certificate? (y/N): " confirm
+  if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    print_color "yellow" "SSL setup cancelled. Continuing without SSL..."
+    SSL_CERT_PATH=""
+    return 0
   fi
-
-  # Check if any payram images exist
-  if docker images --filter=reference='buddhasource/payram-core' -q | grep -q .; then
-    print_color "yellow" "Removing existing 'buddhasource/payram-core' Docker images..."
-    docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+  
+  # Install Certbot
+  print_color "blue" "📦 Installing Certbot (Let's Encrypt client)..."
+  if ! install_certbot; then
+    print_color "red" "Failed to install Certbot. Continuing without SSL..."
+    SSL_CERT_PATH=""
+    return 1
   fi
-
-  print_color "yellow" "Pulling the Docker image: buddhasource/payram-core:$IMAGE_TAG..."
-  if ! docker pull "buddhasource/payram-core:$IMAGE_TAG"; then
-    print_color "red" "\n❌ Failed to pull the Docker image. Please check the image tag and your internet connection."
-    exit 1
+  
+  # Generate certificate
+  print_color "blue" "🔐 Generating SSL certificate for $DOMAIN_NAME..."
+  if generate_letsencrypt_cert "$DOMAIN_NAME" "$LE_EMAIL"; then
+    SSL_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_NAME"
+    
+    print_color "green" "✅ SSL certificate generated successfully!"
+    print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
+    print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
+    print_color "gray" "  Expires: 90 days (auto-renewal recommended)"
+    echo
+    
+    # Setup auto-renewal
+    setup_certbot_renewal "$DOMAIN_NAME"
+    
+  else
+    print_color "red" "❌ Failed to generate SSL certificate"
+    print_color "yellow" "Common issues:"
+    print_color "gray" "  • Domain doesn't point to this server"
+    print_color "gray" "  • Firewall blocking ports 80/443"
+    print_color "gray" "  • Another web server is running"
+    echo
+    
+    read -p "Continue without SSL? (y/N): " continue_without_ssl
+    if [[ "$continue_without_ssl" =~ ^[Yy]$ ]]; then
+      SSL_CERT_PATH=""
+    else
+      print_color "yellow" "Please fix the issues and run the script again"
+      exit 1
+    fi
   fi
+}
 
-  # Generate AES key and save configuration AFTER successful image pull
+configure_ssl_custom() {
+  echo
+  print_color "bold" "📁 Custom SSL Certificate Setup"
+  print_color "yellow" "Upload your own SSL certificates (commercial, wildcard, or internal CA)."
+  echo
+  print_color "blue" "Required files in certificate directory:"
+  print_color "gray" "  • fullchain.pem - Complete certificate chain"
+  print_color "gray" "  • privkey.pem - Private key file"
+  echo
+  print_color "blue" "Common certificate locations:"
+  print_color "gray" "  • Let's Encrypt: /etc/letsencrypt/live/yourdomain.com/"
+  print_color "gray" "  • Custom location: /etc/ssl/certs/payram/"
+  print_color "gray" "  • Uploaded files: /opt/ssl-certificates/"
+  echo
+  
+  while true; do
+    read -p "SSL certificate directory path: " SSL_CERT_PATH
+    
+    if [[ -z "$SSL_CERT_PATH" ]]; then
+      print_color "red" "SSL certificate path cannot be empty"
+      continue
+    fi
+    
+    # Expand tilde to home directory
+    SSL_CERT_PATH="${SSL_CERT_PATH/#\~/$HOME}"
+    
+    if [[ ! -d "$SSL_CERT_PATH" ]]; then
+      print_color "red" "Directory '$SSL_CERT_PATH' does not exist"
+      print_color "yellow" "Create the directory first and copy your certificate files there"
+      continue
+    fi
+    
+    if [[ ! -r "$SSL_CERT_PATH" ]]; then
+      print_color "red" "Directory '$SSL_CERT_PATH' is not readable"
+      continue
+    fi
+    
+    # Check for required certificate files
+    local required_files=("fullchain.pem" "privkey.pem")
+    local missing_files=()
+    
+    for file in "${required_files[@]}"; do
+      if [[ ! -f "$SSL_CERT_PATH/$file" ]]; then
+        missing_files+=("$file")
+      elif [[ ! -r "$SSL_CERT_PATH/$file" ]]; then
+        missing_files+=("$file (not readable)")
+      fi
+    done
+    
+    if [[ ${#missing_files[@]} -gt 0 ]]; then
+      print_color "red" "Missing or unreadable certificate files: ${missing_files[*]}"
+      echo
+      print_color "yellow" "How to fix:"
+      print_color "gray" "  1. Copy your certificate files to: $SSL_CERT_PATH"
+      print_color "gray" "  2. Rename certificate to: fullchain.pem"
+      print_color "gray" "  3. Rename private key to: privkey.pem"
+      print_color "gray" "  4. Set proper permissions: chmod 644 fullchain.pem && chmod 600 privkey.pem"
+      echo
+      
+      read -p "Would you like to try a different path? (y/N): " retry
+      if [[ ! "$retry" =~ ^[Yy]$ ]]; then
+        SSL_CERT_PATH=""
+        print_color "yellow" "Continuing without SSL certificates..."
+        return 0
+      fi
+      continue
+    fi
+    
+    # Validate certificate
+    if validate_ssl_certificate "$SSL_CERT_PATH"; then
+      print_color "green" "✅ SSL certificates validated successfully!"
+      print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
+      print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
+      break
+    else
+      print_color "red" "❌ Certificate validation failed"
+      read -p "Continue anyway? (y/N): " force_continue
+      if [[ "$force_continue" =~ ^[Yy]$ ]]; then
+        print_color "yellow" "⚠️  Using certificates without validation"
+        break
+      fi
+    fi
+  done
+}
+
+configure_ssl_external() {
+  echo
+  print_color "bold" "🌐 External SSL Management"
+  print_color "yellow" "Configure SSL outside PayRam - often the easiest option for cloud deployments!"
+  echo
+  print_color "green" "🚀 EASIEST OPTION - Cloudflare (5-minute setup):"
+  print_color "gray" "  1. Sign up at cloudflare.com (free tier available)"
+  print_color "gray" "  2. Add your domain and change nameservers"
+  print_color "gray" "  3. Enable 'Flexible' or 'Full' SSL mode"
+  print_color "gray" "  4. Create A record: yourdomain.com → your-server-ip"
+  print_color "gray" "  5. Done! Cloudflare handles SSL automatically"
+  echo
+  
+  print_color "blue" "☁️  Other Cloud SSL Services:"
+  print_color "gray" "  • AWS Application Load Balancer + Certificate Manager"
+  print_color "gray" "  • Google Cloud Load Balancer + SSL certificates"
+  print_color "gray" "  • Azure Application Gateway + Key Vault"
+  echo
+  
+  print_color "yellow" "🔄 Self-Hosted Reverse Proxy Solutions:"
+  print_color "gray" "  • Nginx with SSL termination"
+  print_color "gray" "  • Apache HTTP Server with mod_ssl"
+  print_color "gray" "  • Traefik with automatic Let's Encrypt"
+  print_color "gray" "  • HAProxy with SSL offloading"
+  echo
+  
+  print_color "yellow" "🛡️  Premium Security Services:"
+  print_color "gray" "  • Sucuri Website Firewall"
+  print_color "gray" "  • Incapsula DDoS Protection"
+  print_color "gray" "  • AWS WAF with CloudFront"
+  echo
+  
+  print_color "blue" "Setup Configuration:"
+  print_color "gray" "  • PayRam will run HTTP-only (no SSL certificates needed)"
+  print_color "gray" "  • Your external service handles HTTPS and forwards to PayRam"
+  print_color "gray" "  • PayRam API accessible at: http://localhost:8080"
+  print_color "gray" "  • PayRam Dashboard at: http://localhost"
+  echo
+  
+  print_color "yellow" "⚠️  Important Notes:"
+  print_color "red" "  • Ensure your proxy forwards real client IPs"
+  print_color "red" "  • Configure proper headers: X-Forwarded-For, X-Real-IP"
+  print_color "red" "  • Set X-Forwarded-Proto: https for HTTPS detection"
+  print_color "red" "  • Restrict direct access to PayRam ports (firewall rules)"
+  echo
+  
+  read -p "Do you want to continue with external SSL management? (y/N): " confirm_external
+  if [[ "$confirm_external" =~ ^[Yy]$ ]]; then
+    SSL_CERT_PATH=""
+    print_color "green" "✅ External SSL management selected"
+    print_color "blue" "Next steps after PayRam installation:"
+    print_color "gray" "  1. Configure your reverse proxy to forward to:"
+    print_color "gray" "     - API: http://this-server:8080"
+    print_color "gray" "     - Dashboard: http://this-server:80"
+    print_color "gray" "  2. Test HTTPS connectivity through your proxy"
+    print_color "gray" "  3. Configure firewall to block direct access"
+    echo
+  else
+    print_color "yellow" "Returning to SSL configuration menu..."
+    configure_ssl
+  fi
+}
+
+# Supporting functions for SSL configuration
+
+# Install Certbot based on OS
+install_certbot() {
+  log "INFO" "Installing Certbot for Let's Encrypt..."
+  
+  case "$OS_FAMILY" in
+    debian)
+      pkg_install snapd
+      snap install --classic certbot
+      ln -sf /snap/bin/certbot /usr/bin/certbot 2>/dev/null || true
+      ;;
+    rhel|fedora)
+      pkg_install certbot
+      ;;
+    arch)
+      pkg_install certbot
+      ;;
+    alpine)
+      pkg_install certbot
+      ;;
+    macos)
+      su - "$ORIGINAL_USER" -c "brew install certbot"
+      ;;
+    *)
+      print_color "red" "Certbot installation not supported on $OS_FAMILY"
+      return 1
+      ;;
+  esac
+  
+  # Verify installation
+  if command -v certbot &>/dev/null; then
+    log "SUCCESS" "Certbot installed successfully"
+    certbot --version
+    return 0
+  else
+    log "ERROR" "Certbot installation failed"
+    return 1
+  fi
+}
+
+# Generate Let's Encrypt certificate
+generate_letsencrypt_cert() {
+  local domain="$1"
+  local email="$2"
+  
+  log "INFO" "Generating Let's Encrypt certificate for $domain..."
+  
+  # Stop any services that might be using port 80
+  if command -v systemctl &>/dev/null; then
+    systemctl stop apache2 2>/dev/null || true
+    systemctl stop nginx 2>/dev/null || true
+    systemctl stop httpd 2>/dev/null || true
+  fi
+  
+  # Generate certificate using standalone mode
+  if certbot certonly \
+    --standalone \
+    --non-interactive \
+    --agree-tos \
+    --email "$email" \
+    --domains "$domain" \
+    --expand \
+    --keep-until-expiring; then
+    
+    log "SUCCESS" "Certificate generated for $domain"
+    return 0
+  else
+    log "ERROR" "Failed to generate certificate for $domain"
+    return 1
+  fi
+}
+
+# Setup automatic renewal
+setup_certbot_renewal() {
+  local domain="$1"
+  
+  log "INFO" "Setting up automatic certificate renewal..."
+  
+  # Create renewal script
+  cat > /etc/cron.d/payram-certbot-renewal << EOF
+# PayRam Let's Encrypt Certificate Renewal
+# Runs twice daily at random minutes to avoid load spikes
+$(shuf -i 0-59 -n 1) $(shuf -i 0-23 -n 1) * * * root certbot renew --quiet --deploy-hook "docker restart payram 2>/dev/null || true"
+EOF
+  
+  chmod 644 /etc/cron.d/payram-certbot-renewal
+  
+  # Test renewal (dry run)
+  if certbot renew --dry-run --quiet; then
+    print_color "green" "✅ Auto-renewal configured and tested successfully"
+    print_color "gray" "  • Renewal runs twice daily automatically"
+    print_color "gray" "  • PayRam will restart after certificate updates"
+    print_color "gray" "  • Check renewal status: certbot certificates"
+  else
+    print_color "yellow" "⚠️  Auto-renewal configured but test failed"
+    print_color "gray" "  • Manual renewal: certbot renew"
+  fi
+}
+
+# Validate SSL certificate
+validate_ssl_certificate() {
+  local cert_path="$1"
+  local cert_file="$cert_path/fullchain.pem"
+  local key_file="$cert_path/privkey.pem"
+  
+  log "INFO" "Validating SSL certificate..."
+  
+  # Check if openssl is available
+  if ! command -v openssl &>/dev/null; then
+    log "WARN" "OpenSSL not available for certificate validation"
+    return 1
+  fi
+  
+  # Validate certificate format
+  if ! openssl x509 -in "$cert_file" -noout -text &>/dev/null; then
+    log "ERROR" "Invalid certificate format"
+    return 1
+  fi
+  
+  # Validate private key format
+  if ! openssl rsa -in "$key_file" -check -noout &>/dev/null 2>&1; then
+    if ! openssl ec -in "$key_file" -check -noout &>/dev/null 2>&1; then
+      log "ERROR" "Invalid private key format"
+      return 1
+    fi
+  fi
+  
+  # Check if certificate and private key match
+  local cert_modulus=$(openssl x509 -noout -modulus -in "$cert_file" 2>/dev/null | openssl md5)
+  local key_modulus=$(openssl rsa -noout -modulus -in "$key_file" 2>/dev/null | openssl md5)
+  
+  if [[ "$cert_modulus" != "$key_modulus" ]]; then
+    # Try EC key
+    key_modulus=$(openssl ec -noout -pubout -in "$key_file" 2>/dev/null | openssl md5)
+    if [[ "$cert_modulus" != "$key_modulus" ]]; then
+      log "ERROR" "Certificate and private key do not match"
+      return 1
+    fi
+  fi
+  
+  # Check certificate expiration
+  local exp_date=$(openssl x509 -noout -enddate -in "$cert_file" | cut -d= -f2)
+  local exp_epoch=$(date -d "$exp_date" +%s 2>/dev/null || echo "0")
+  local now_epoch=$(date +%s)
+  local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+  
+  if [[ $days_left -lt 1 ]]; then
+    log "ERROR" "Certificate has expired"
+    return 1
+  elif [[ $days_left -lt 30 ]]; then
+    print_color "yellow" "⚠️  Certificate expires in $days_left days"
+  else
+    print_color "green" "✅ Certificate is valid for $days_left days"
+  fi
+  
+  log "SUCCESS" "SSL certificate validation passed"
+  return 0
+}
+
+test_postgres_connection() {
+  log "INFO" "Testing database connection..."
+  
+  # Create temporary .pgpass file for secure authentication
+  local pgpass_file=$(mktemp)
+  echo "$DB_HOST:$DB_PORT:$DB_NAME:$DB_USER:$DB_PASSWORD" > "$pgpass_file"
+  chmod 600 "$pgpass_file"
+  
+  # Test connection
+  if PGPASSFILE="$pgpass_file" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -c "\q" &>/dev/null; then
+    rm -f "$pgpass_file"
+    return 0
+  else
+    rm -f "$pgpass_file"
+    return 1
+  fi
+}
+
+# AES key generation for hot wallet encryption
+generate_aes_key() {
+  echo
+  print_color "bold" "🔐 Hot Wallet Encryption Setup"
+  print_color "yellow" "PayRam follows a 'minimal key storage' security philosophy:"
+  print_color "gray" "  • 🔒 Cold wallets: Keys NEVER stored on server (maximum security)"
+  print_color "gray" "  • 💰 Deposit wallets: Keys NOT stored, uses smart sweep technology"
+  print_color "gray" "  • 🔥 Hot wallet: ONLY wallet with keys on server (for withdrawals)"
+  echo
+  
+  print_color "blue" "Hot Wallet Purpose & Security:"
+  print_color "gray" "  • Enables automatic withdrawals and operations"
+  print_color "gray" "  • Private keys encrypted with AES-256 (military-grade)"
+  print_color "gray" "  • Keys stored locally, never transmitted"
+  echo
+  
+  print_color "yellow" "⚠️  Hot Wallet Security Guidelines:"
+  print_color "red" "  • Store MINIMAL funds only (recommended: <$1,000 equivalent)"
+  print_color "red" "  • Hot wallet = convenient but higher risk"
+  print_color "red" "  • Most funds should stay in cold storage"
+  print_color "red" "  • Regular withdrawal of excess funds to cold wallet"
+  echo
+  
+  read -p "Press [Enter] to generate AES-256 encryption key for hot wallet..."
+  
+  print_color "cyan" "🔮 Summoning cryptographic magic..."
+  print_color "yellow" "⚡ Generating quantum-secure randomness..."
+  print_color "blue" "🔐 Forging your AES-256 encryption key..."
+  
+  log "INFO" "Generating secure AES-256 encryption key for hot wallet protection..."
+  AES_KEY=$(openssl rand -hex 32)
+  
+  # Save key for legacy compatibility
+  local aes_dir="$PAYRAM_INFO_DIR/aes"
+  mkdir -p "$aes_dir"
+  local key_file="$aes_dir/$AES_KEY"
+  echo "AES_KEY=$AES_KEY" > "$key_file"
+  chmod 600 "$key_file"
+  
+  # Change ownership to original user
+  if [[ "$ORIGINAL_USER" != "root" ]]; then
+    chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_INFO_DIR"
+  fi
+  
+  print_color "green" "✅ Hot wallet encryption key generated successfully!"
+  print_color "blue" "   📁 Key location: $PAYRAM_INFO_DIR/aes/ (permissions: 600)"
+  print_color "blue" "   🔐 Key strength: 256-bit AES encryption"
+  echo
+  
+  print_color "yellow" "� Critical Information:"
+  print_color "gray" "  • Hot wallet private keys are stored in database (encrypted)"
+  print_color "gray" "  • This AES key decrypts those hot wallet keys"
+  print_color "gray" "  • Without this key: hot wallet becomes permanently inaccessible"
+  print_color "gray" "  • Database backup alone is insufficient - AES key required"
+  echo
+  
+  print_color "red" "🚨 CRITICAL BACKUP REQUIREMENT:"
+  print_color "red" "  • IMMEDIATELY backup this AES key to secure offline storage"
+  print_color "red" "  • Store in multiple secure locations (encrypted USB, safe, etc.)"
+  print_color "red" "  • Never store only on this server - hardware failure = key loss"
+  print_color "red" "  • Test backup restoration before processing real transactions"
+  echo
+  
+  print_color "blue" "💾 Backup Commands:"
+  print_color "gray" "  # Copy AES key directory to secure location"
+  print_color "gray" "  cp -r $PAYRAM_INFO_DIR/aes /path/to/secure/backup/"
+  print_color "gray" "  # Or backup entire config directory"
+  print_color "gray" "  tar -czf payram-config-backup.tar.gz $PAYRAM_INFO_DIR"
+  echo
+  
+  print_color "green" "📈 Best Practices:"
+  print_color "gray" "  • Keep hot wallet balance under $1,000"
+  print_color "gray" "  • Monitor hot wallet activity regularly"
+  print_color "gray" "  • Set up automatic cold storage transfers"
+  print_color "gray" "  • Test key backup/restore procedures quarterly"
+}
+
+# Configuration file management
+save_configuration() {
+  local config_file="$PAYRAM_INFO_DIR/config.env"
+  
+  log "INFO" "Saving configuration to $config_file..."
+  
+  # Create directory with proper permissions
+  mkdir -p "$PAYRAM_INFO_DIR"
+  
+  # Write configuration with restrictive permissions
+  umask 077
+  cat > "$config_file" << EOL
+# PayRam Configuration - Generated $(date)
+# Do not edit manually unless you know what you are doing
+
+# Container Configuration
+IMAGE_TAG="${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+NETWORK_TYPE="${NETWORK_TYPE:-mainnet}"
+SERVER="${SERVER:-PRODUCTION}"
+AES_KEY="${AES_KEY:-}"
+
+# Database Configuration
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-5432}"
+DB_NAME="${DB_NAME:-payram}"
+DB_USER="${DB_USER:-payram}"
+DB_PASSWORD="${DB_PASSWORD:-}"
+POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-prefer}"
+
+# SSL Configuration
+SSL_CERT_PATH="${SSL_CERT_PATH:-}"
+
+# System Information
+OS_FAMILY="$OS_FAMILY"
+OS_DISTRO="$OS_DISTRO"
+ORIGINAL_USER="$ORIGINAL_USER"
+PAYRAM_HOME="$PAYRAM_HOME"
+EOL
+  
+  # Set proper ownership and permissions
+  chmod 600 "$config_file"
+  if [[ "$ORIGINAL_USER" != "root" ]]; then
+    chown "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$config_file"
+  fi
+  
+  log "SUCCESS" "Configuration saved with secure permissions (600)"
+}
+
+load_configuration() {
+  local config_file="$PAYRAM_INFO_DIR/config.env"
+  
+  if [[ ! -f "$config_file" ]]; then
+    log "ERROR" "Configuration file not found: $config_file"
+    return 1
+  fi
+  
+  log "INFO" "Loading configuration from $config_file..."
+  source "$config_file"
+  
+  # Validate required variables
+  local required_vars=("IMAGE_TAG" "DB_HOST" "DB_PORT" "DB_NAME" "DB_USER" "DB_PASSWORD")
+  for var in "${required_vars[@]}"; do
+    if [[ -z "${!var}" ]]; then
+      log "ERROR" "Required configuration variable $var is missing or empty"
+      return 1
+    fi
+  done
+  
+  log "SUCCESS" "Configuration loaded successfully"
+  return 0
+}
+
+# --- CONTAINER LIFECYCLE MANAGEMENT ---
+
+# Docker image validation
+validate_docker_tag() {
+  local tag_to_check="$1"
+  log "INFO" "Validating Docker tag: $tag_to_check..."
+  
+  if docker manifest inspect "buddhasource/payram-core:$tag_to_check" >/dev/null 2>&1; then
+    log "SUCCESS" "Docker tag '$tag_to_check' is valid"
+    return 0
+  else
+    log "ERROR" "Docker tag '$tag_to_check' not found in repository"
+    return 1
+  fi
+}
+
+# Container deployment
+deploy_payram_container() {
+  show_progress 10 10 "Deploying PayRam container..."
+  
+  # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
     generate_aes_key
-  else
-    print_color "yellow" "Using existing AES key from configuration."
   fi
-  save_configuration
-
-  print_color "yellow" "Starting the PayRam container..."
+  
+  # Validate Docker tag
+  if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
+    log "ERROR" "Cannot proceed with invalid Docker tag"
+    return 1
+  fi
+  
+  # Check for existing container
+  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
+    log "WARN" "PayRam container is already running"
+    docker ps --filter "name=payram"
+    return 0
+  fi
+  
+  # Remove stopped container if exists
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
+    log "INFO" "Removing existing stopped PayRam container..."
+    docker rm -v payram &>/dev/null || true
+  fi
+  
+  # Clean up old images
+  log "INFO" "Cleaning up old PayRam images..."
+  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f &>/dev/null || true
+  
+  # Pull latest image
+  log "INFO" "Pulling PayRam image: buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
+  if ! docker pull "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
+    log "ERROR" "Failed to pull Docker image"
+    return 1
+  fi
+  
+  # Create data directories
+  mkdir -p "$PAYRAM_CORE_DIR"/{log/supervisord,db/postgres}
+  if [[ "$ORIGINAL_USER" != "root" ]]; then
+    chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"
+  fi
+  
+  # Deploy container
+  log "INFO" "Starting PayRam container..."
   docker run -d \
     --name payram \
+    --restart unless-stopped \
     --publish 8080:8080 \
     --publish 8443:8443 \
     --publish 80:80 \
@@ -396,273 +1544,410 @@ run_docker_container() {
     -v "$PAYRAM_CORE_DIR":/root/payram \
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
-    -v /etc/letsencrypt:/etc/letsencrypt \
-    "buddhasource/payram-core:$IMAGE_TAG"
-
-  # --- Confirmation ---
-  sleep 5 # Give the container a moment to start
+    -v /etc/letsencrypt:/etc/letsencrypt:ro \
+    "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  
+  # Verify deployment
+  sleep 5
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
-    print_color "green" "\n✅ PayRam container is now running successfully!"
+    log "SUCCESS" "PayRam container deployed successfully!"
+    
+    # Save configuration after successful deployment
+    save_configuration
+    
+    # Show container info
+    docker ps --filter name=payram
+    log "INFO" "Container logs: docker logs payram"
+    log "INFO" "Container shell: docker exec -it payram bash"
+    
+    return 0
   else
-    print_color "red" "\n❌ Failed to start the PayRam container. Please check the Docker logs for more information."
-    exit 1
+    log "ERROR" "PayRam container failed to start"
+    log "INFO" "Check logs with: docker logs payram"
+    return 1
   fi
 }
 
-# Function to configure the database
-configure_database() {
-  PS3='Please enter your choice: '
-  options=("Use my own external PostgreSQL database (recommended)" "Use the default PayRam database")
-  select opt in "${options[@]}"
-  do
-      case $opt in
-          "${options[0]}")
-              while true; do
-                echo
-                read -p "Enter Database Host: " DB_HOST
-                read -p "Enter Database Port [5432]: " DB_PORT
-                DB_PORT=${DB_PORT:-5432}
-                read -p "Enter Database Name: " DB_NAME
-                read -p "Enter Database Username: " DB_USER
-                read -s -p "Enter Database Password: " DB_PASSWORD
-                echo
-
-                if test_postgres_connection; then
-                  print_color "green" "\n✅ Database connection successful!"
-                  break
-                else
-                  print_color "red" "\n❌ Connection failed. Please check your details and try again."
-                fi
-              done
-              break
-              ;;
-          "${options[1]}")
-              print_color "green" "\nUsing default database configuration."
-              DB_HOST="localhost"
-              DB_PORT="5432"
-              DB_NAME="payram"
-              DB_USER="payram"
-              DB_PASSWORD="payram123"
-              break
-              ;;
-          *)
-            print_color "red" "Invalid option $REPLY"
-            ;;
-      esac
+# Container update workflow
+update_payram_container() {
+  log "INFO" "Starting PayRam update process..."
+  
+  # Load existing configuration
+  get_payram_directories
+  if ! load_configuration; then
+    log "ERROR" "Cannot update - no existing configuration found"
+    log "INFO" "Please run initial setup first (without --update flag)"
+    return 1
+  fi
+  
+  local current_tag="$IMAGE_TAG"
+  local target_tag="${NEW_IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  
+  log "INFO" "Update Configuration:"
+  log "INFO" "  Current version: $current_tag"
+  log "INFO" "  Target version: $target_tag"
+  
+  # Version selection menu
+  print_color "blue" "Update Options:"
+  print_color "yellow" "1) Update to target version: $target_tag"
+  print_color "yellow" "2) Keep current version: $current_tag"
+  print_color "yellow" "3) Cancel update"
+  
+  while true; do
+    read -p "Select option (1-3): " choice
+    case $choice in
+      1)
+        IMAGE_TAG="$target_tag"
+        break
+        ;;
+      2)
+        IMAGE_TAG="$current_tag"
+        log "INFO" "Keeping current version"
+        break
+        ;;
+      3)
+        log "INFO" "Update cancelled by user"
+        return 0
+        ;;
+      *)
+        print_color "red" "Invalid option. Please select 1-3."
+        ;;
+    esac
   done
+  
+  # Show final configuration
+  log "INFO" "Final Update Configuration:"
+  log "INFO" "  Image: buddhasource/payram-core:$IMAGE_TAG"
+  log "INFO" "  Network: $NETWORK_TYPE"
+  log "INFO" "  Server: $SERVER"
+  log "INFO" "  Database: $DB_HOST:$DB_PORT/$DB_NAME"
+  
+  read -p "Press [Enter] to proceed with update..."
+  
+  # Stop existing container
+  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
+    log "INFO" "Stopping existing PayRam container..."
+    docker stop payram || true
+  fi
+  
+  # Deploy updated container
+  deploy_payram_container
 }
 
-# Function to configure SSL certificate path
-configure_ssl_path() {
+# Environment reset
+reset_payram_environment() {
+  print_color "red" "🚨 CRITICAL WARNING: This will permanently delete:"
+  print_color "yellow" "  💀 PayRam container and ALL persistent data"
+  print_color "yellow" "  🔑 AES encryption keys (hot wallet access lost forever)"
+  print_color "yellow" "  🗄️  Database data (transaction history, configurations)"
+  print_color "yellow" "  📄 Configuration files and SSL certificates"
+  print_color "yellow" "  🐳 All PayRam Docker images"
   echo
-  PS3='Please enter your choice: '
-  options=("Configure SSL certificates (Let's Encrypt, etc.)" "Skip SSL or use cloud services (Cloudflare, AWS, GoDaddy)")
-  select opt in "${options[@]}"
-  do
-      case $opt in
-          "${options[0]}")
-              print_color "green" "\nSSL certificate configuration selected."
-              print_color "yellow" "Please provide the path where your SSL certificate files are located."
-              print_color "yellow" "Expected files: fullchain.pem and privkey.pem"
-              while true; do
-                echo
-                read -p "Enter SSL certificate directory path: " SSL_CERT_PATH
-                
-                # Check if path exists
-                if [[ ! -d "$SSL_CERT_PATH" ]]; then
-                  print_color "red" "❌ Directory '$SSL_CERT_PATH' does not exist."
-                  read -p "Do you want to try again? (y/N) " -n 1 -r
-                  echo
-                  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    SSL_CERT_PATH=""
-                    break
-                  fi
-                  continue
-                fi
-                
-                # Check if directory is readable
-                if [[ ! -r "$SSL_CERT_PATH" ]]; then
-                  print_color "red" "❌ Directory '$SSL_CERT_PATH' is not readable."
-                  read -p "Do you want to try again? (y/N) " -n 1 -r
-                  echo
-                  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    SSL_CERT_PATH=""
-                    break
-                  fi
-                  continue
-                fi
-                
-                # Check for required SSL certificate files
-                print_color "yellow" "\nChecking for SSL certificate files in '$SSL_CERT_PATH'..."
-                local found_files=()
-                local required_files=("fullchain.pem" "privkey.pem")
-                local missing_required=()
-                
-                for file in "${required_files[@]}"; do
-                  if [[ -f "$SSL_CERT_PATH/$file" ]]; then
-                    if [[ -r "$SSL_CERT_PATH/$file" ]]; then
-                      found_files+=("$file")
-                      print_color "green" "✅ Found: $file"
-                    else
-                      print_color "red" "❌ Found but not readable: $file"
-                      missing_required+=("$file")
-                    fi
-                  else
-                    print_color "red" "❌ Missing required file: $file"
-                    missing_required+=("$file")
-                  fi
-                done
-                
-                # Check for additional SSL files (optional)
-                local additional_files=("cert.pem" "certificate.pem" "key.pem" "private.key" "chain.pem" "ca.pem")
-                for file in "${additional_files[@]}"; do
-                  if [[ -f "$SSL_CERT_PATH/$file" ]]; then
-                    if [[ -r "$SSL_CERT_PATH/$file" ]]; then
-                      found_files+=("$file")
-                      print_color "green" "✅ Found additional: $file"
-                    else
-                      print_color "yellow" "⚠️  Found but not readable: $file"
-                    fi
-                  fi
-                done
-                
-                if [[ ${#missing_required[@]} -gt 0 ]]; then
-                  print_color "red" "\n❌ Missing required SSL files: ${missing_required[*]}"
-                  print_color "yellow" "Please ensure fullchain.pem and privkey.pem are present in the directory."
-                  read -p "Do you want to try again? (y/N) " -n 1 -r
-                  echo
-                  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    SSL_CERT_PATH=""
-                    break
-                  fi
-                  continue
-                fi
-                
-                print_color "green" "\n✅ SSL certificate path validated successfully!"
-                print_color "yellow" "Found ${#found_files[@]} SSL file(s) in '$SSL_CERT_PATH'"
-                print_color "green" "Required files (fullchain.pem, privkey.pem) are present."
-                break
-              done
-              break
-              ;;
-          "${options[1]}")
-              print_color "yellow" "\nSkipping SSL configuration."
-              print_color "blue" "Note: You can configure SSL later using cloud services like:"
-              print_color "blue" "  • Cloudflare SSL/TLS"
-              print_color "blue" "  • AWS Certificate Manager"
-              print_color "blue" "  • GoDaddy SSL Certificates"
-              print_color "blue" "  • Other SSL providers"
-              SSL_CERT_PATH=""
-              break
-              ;;
-          *)
-            print_color "red" "Invalid option $REPLY"
-            ;;
-      esac
-  done
+  
+  print_color "red" "🔥 Hot Wallet Impact:"
+  print_color "red" "  • Any funds in hot wallet will become PERMANENTLY INACCESSIBLE"
+  print_color "red" "  • AES key deletion = no way to decrypt hot wallet private keys"
+  print_color "red" "  • This action CANNOT be undone - backup first!"
+  echo
+  
+  print_color "yellow" "💾 Last Chance Backup Commands:"
+  print_color "gray" "  tar -czf payram-final-backup.tar.gz ~/.payraminfo ~/.payram-core"
+  print_color "gray" "  docker exec payram pg_dump -U payram payram > final-db-backup.sql"
+  echo
+  
+  read -p "Are you absolutely sure? Type 'DELETE' to confirm: " confirmation
+  if [[ "$confirmation" != "DELETE" ]]; then
+    log "INFO" "Reset cancelled"
+    return 0
+  fi
+  
+  get_payram_directories
+  
+  log "INFO" "Stopping and removing PayRam container..."
+  docker stop payram &>/dev/null || true
+  docker rm -v payram &>/dev/null || true
+  
+  log "INFO" "Removing PayRam Docker images..."
+  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+  
+  log "INFO" "Removing PayRam data and configuration..."
+  rm -rf "$PAYRAM_CORE_DIR" "$PAYRAM_INFO_DIR"
+  
+  log "SUCCESS" "PayRam environment reset complete"
 }
 
-# --- Main Logic ---
+# Function to print colored text
+print_color() {
+  case "$1" in
+    "green") echo -e "\033[0;32m$2\033[0m" ;;
+    "red") echo -e "\033[0;31m$2\033[0m" ;;
+    "yellow") echo -e "\033[0;33m$2\033[0m" ;;
+    "blue") echo -e "\033[0;34m$2\033[0m" ;;
+    "gray") echo -e "\033[0;90m$2\033[0m" ;;
+    "bold") echo -e "\033[1m$2\033[0m" ;;
+    "magenta") echo -e "\033[0;35m$2\033[0m" ;;
+    "cyan") echo -e "\033[0;36m$2\033[0m" ;;
+    *) echo "$2" ;;
+  esac
+}
 
+# Welcome banner with ASCII art
+display_welcome_banner() {
+  clear
+  echo
+  print_color "cyan" "╔═════════════════════════════════════════════════════════════════╗"
+  print_color "cyan" "║                                                                 ║"
+  print_color "yellow" "║  💰 ████   ███   █   █ ████   ███  █   █  💎  Crypto Gateway  ║"
+  print_color "yellow" "║  ₿  █   █ █   █  █   █ █   █ █   █ ██ ██  🚀                   ║"
+  print_color "yellow" "║  ⚡ ████  █████  █████ ████  █████ █ █ █  💸  Self-Hosted     ║"
+  print_color "yellow" "║  🌟 █     █   █      █ █   █ █   █ █   █  💰                   ║"
+  print_color "yellow" "║  � █     █   █      █ █   █ █   █ █   █  ₿   No middleman    ║"
+  print_color "cyan" "║                                                                 ║"
+  print_color "magenta" "║                    🚀 Welcome to PayRam Setup! 🚀             ║"
+  print_color "cyan" "║                                                                 ║"
+  print_color "green" "║    💰 Self-hosted crypto payment gateway with encryption 💰    ║"
+  print_color "blue" "║    ⚡ Multi-currency: Bitcoin, Ethereum, Litecoin & more ⚡     ║"
+  print_color "yellow" "║    � Enterprise-grade security with AES-256 encryption 🔒     ║"
+  print_color "cyan" "║                                                                 ║"
+  print_color "cyan" "╚═════════════════════════════════════════════════════════════════╝"
+  echo
+  print_color "bold" "🎉 Welcome to PayRam Universal Setup Script v3!"
+  echo
+  print_color "blue" "🚀 Setting up your crypto payment gateway with:"
+  print_color "gray" "   • ❄️  Cold wallet security (keys never stored)"
+  print_color "gray" "   • 🔥 Hot wallet for operations (minimal funds)"
+  print_color "gray" "   • 💳 Smart sweep deposits (no key storage)"
+  print_color "gray" "   • 🔐 AES-256 encryption for hot wallet keys"
+  print_color "gray" "   • 🌐 Multi-platform support (Linux, macOS)"
+  print_color "gray" "   • 🔒 SSL/TLS with Let's Encrypt automation"
+  echo
+  print_color "yellow" "💡 PayRam Philosophy: Minimal key storage = Maximum security"
+  echo
+  sleep 3
+}
+
+# Success completion banner
+display_success_banner() {
+  echo
+  print_color "green" "🎉 ═════════════════════════════════════════════════════════════════════════════════════════════════ 🎉"
+  echo
+  print_color "yellow" "    ____  _____  ______  ___    __  ___                                                                         "
+  print_color "yellow" "   / __ \/   \ \/ / __ \/   |  /  |/  /                                                                         "
+  print_color "yellow" "  / /_/ / /| |\  / /_/ / /| | / /|_/ /                                                                          "
+  print_color "yellow" " / ____/ ___ |/ / _, _/ ___ |/ /  / /                                                                           "
+  print_color "yellow" "/_/   /_/  |_/_/_/ |_/_/  |_/_/  /_/                                                                            "
+  echo
+  print_color "cyan" "__  __                    ____                                   __     ______      __                          "
+  print_color "cyan" "\ \/ ____  __  _______   / __ \____ ___  ______ ___  ___  ____  / /_   / ________ _/ /____ _      ______ ___  __"
+  print_color "cyan" " \  / __ \/ / / / ___/  / /_/ / __ \`/ / / / __ \`__ \/ _ \/ __ \/ __/  / / __/ __ \`/ __/ _ | | /| / / __ \`/ / / /"
+  print_color "cyan" " / / /_/ / /_/ / /     / ____/ /_/ / /_/ / / / / / /  __/ / / / /_   / /_/ / /_/ / /_/  __| |/ |/ / /_/ / /_/ / "
+  print_color "cyan" "/_/\____/\__,_/_/     /_/    \__,_/\__, /_/ /_/ /_/\___/_/ /_/\__/   \____/\__,_/\__/\___/|__/|__/\__,_/\__, /  "
+  print_color "cyan" "                                  /____/                                                               /____/   "
+  echo
+  print_color "green" "💰 ═════════════════════════════════════════════════════════════════════════════════════════════════ 💰"
+  echo
+  print_color "magenta" "                           🎊 Setup Successfully Completed! 🎊"
+  print_color "green" "                      🚀 Your crypto payment gateway is ready! 🚀"
+  echo
+  print_color "green" "₿ 🔥 💎 ⚡ 🌟 💸 🪙 🚀 💰 ₿ 🔥 💎 ⚡ 🌟 💸 🪙 🚀 💰 ₿ 🔥 💎 ⚡ 🌟 💸 🪙 🚀 💰 ₿"
+  echo
+}
+
+# --- MAIN ORCHESTRATION ---
+
+# Usage information
+usage() {
+  cat << EOF
+PayRam Universal Setup Script v3
+
+USAGE:
+    $0 [OPTIONS]
+
+DESCRIPTION:
+    Universal setup script for PayRam crypto payment gateway.
+    Supports multiple operating systems and provides interactive configuration.
+
+OPTIONS:
+    --update                 Update existing PayRam installation
+    --reset                  Completely remove PayRam (requires confirmation)
+    --testnet               Set up testnet environment (DEVELOPMENT mode)
+    --tag=<tag>             Specify Docker image tag (default: $DEFAULT_IMAGE_TAG)
+    --debug                 Enable debug logging
+    -h, --help              Show this help message
+
+EXAMPLES:
+    $0                      # Interactive fresh installation
+    $0 --testnet           # Setup testnet environment
+    $0 --update --tag=v1.5.0  # Update to specific version
+    $0 --reset             # Complete environment reset
+
+SUPPORTED SYSTEMS:
+    • Ubuntu, Debian, Linux Mint
+    • CentOS, RHEL, Rocky Linux, AlmaLinux
+    • Fedora
+    • Arch Linux, Manjaro
+    • Alpine Linux
+    • macOS (with Homebrew)
+
+For more information, visit: https://github.com/PayRam/payram-scripts
+EOF
+}
+
+# Main execution flow
 main() {
-  # --- Argument Parsing ---
-  local UPDATE_FLAG=false
-
+  # Initialize logging
+  echo "PayRam Setup Script v3 - $(date)" > "$LOG_FILE"
+  
+  # Parse command line arguments
+  local update_mode=false
+  local reset_mode=false
+  local testnet_mode=false
+  
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -h|--help)
-        # Help can be run without root
         usage
         exit 0
         ;;
-      --update|--reset|--testnet|--tag=*|-T=*)
-        # For operations that require root, check privileges first
-        check_root
-        
-        # Now process the actual argument
-        case "$1" in
-          --update)
-            UPDATE_FLAG=true
-            shift # past argument
-            ;;
-          --reset)
-            reset_environment
-            exit 0
-            ;;
-          --testnet)
-            NETWORK_TYPE="testnet"
-            SERVER="DEVELOPMENT"
-            shift # past argument
-            ;;
-          --tag=*|-T=*)
-            IMAGE_TAG="${1#*=}"
-            shift # past argument
-            ;;
-        esac
+      --update)
+        update_mode=true
+        shift
+        ;;
+      --reset)
+        reset_mode=true
+        shift
+        ;;
+      --testnet)
+        testnet_mode=true
+        NETWORK_TYPE="testnet"
+        SERVER="DEVELOPMENT"
+        shift
+        ;;
+      --tag=*)
+        NEW_IMAGE_TAG="${1#*=}"
+        shift
+        ;;
+      --debug)
+        DEBUG=1
+        shift
         ;;
       *)
-        print_color "red" "Error: Unknown option '$1'"
+        log "ERROR" "Unknown option: $1"
         usage
         exit 1
         ;;
     esac
   done
   
-  # Check for root for interactive mode (when no args provided)
-  if [ $# -eq 0 ]; then
-    check_root
+  # Check privileges for operations that require root
+  if [[ "$update_mode" == true || "$reset_mode" == true || $# -eq 0 ]]; then
+    check_privileges
   fi
   
-  # Process update after all arguments are parsed
-  if [[ "$UPDATE_FLAG" = true ]]; then
-    update_container
+  # Handle special modes
+  if [[ "$reset_mode" == true ]]; then
+    reset_payram_environment
+    exit 0
   fi
   
-  check_and_install_dependencies
-
-  # --- Pre-flight Check for Interactive Mode ---
-  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
-    print_color "red" "Error: A 'payram' container is already running."
-    print_color "yellow" "If you want to update it, use the '--update' flag."
-    print_color "yellow" "If you want to start over, use the '--reset' flag first."
+  if [[ "$update_mode" == true ]]; then
+    update_payram_container
+    exit 0
+  fi
+  
+  # Fresh installation workflow
+  log "SUCCESS" "Starting PayRam setup..."
+  
+  # Display welcome banner
+  display_welcome_banner
+  
+  # Step 1: System detection
+  detect_system_info
+  
+  # Step 2: Install dependencies
+  install_all_dependencies
+  
+  # Step 3: Setup directories and defaults
+  get_payram_directories
+  set_configuration_defaults
+  
+  # Apply testnet mode if selected
+  if [[ "$testnet_mode" == true ]]; then
+    log "INFO" "Testnet mode enabled"
+    NETWORK_TYPE="testnet"
+    SERVER="DEVELOPMENT"
+  fi
+  
+  # Set image tag
+  IMAGE_TAG="${NEW_IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  
+  # Step 4: Interactive configuration
+  log "INFO" "Starting interactive configuration..."
+  echo
+  print_color "blue" "=== PayRam Configuration ==="
+  echo
+  
+  configure_database
+  configure_ssl
+  
+  # Step 5: Generate hot wallet encryption key
+  show_progress 9 10 "Setting up hot wallet encryption (AES-256)"
+  generate_aes_key
+  
+  # Step 6: Configuration summary
+  echo
+  print_color "blue" "=== Configuration Summary ==="
+  log "INFO" "Docker Image: buddhasource/payram-core:$IMAGE_TAG"
+  log "INFO" "Network Mode: $NETWORK_TYPE"
+  log "INFO" "Server Mode: $SERVER"
+  log "INFO" "Database: $DB_HOST:$DB_PORT/$DB_NAME"
+  log "INFO" "SSL Path: ${SSL_CERT_PATH:-Not configured}"
+  echo
+  
+  print_color "yellow" "🔐 Security Architecture:"
+  print_color "gray" "  • Hot wallet encryption: AES-256 (for withdrawal operations only)"
+  print_color "gray" "  • Cold wallets: Keys never stored on server"
+  print_color "gray" "  • Deposit wallets: Smart sweep technology, no keys stored"
+  print_color "gray" "  • Database: Transaction history + encrypted hot wallet keys"
+  echo
+  
+  print_color "blue" "💾 Persistent Storage:"
+  print_color "gray" "  • Config & AES keys: $PAYRAM_INFO_DIR"
+  print_color "gray" "  • Application data: $PAYRAM_CORE_DIR"
+  print_color "gray" "  • Required space: 10GB minimum"
+  print_color "gray" "  • Backup critical: AES key + database data"
+  echo
+  
+  read -p "Press [Enter] to deploy PayRam container..."
+  
+  # Step 7: Deploy container
+  if deploy_payram_container; then
+    display_success_banner
+    
+    log "SUCCESS" "PayRam is now running and accessible at:"
+    log "INFO" "  HTTP API: http://localhost:8080"
+    log "INFO" "  HTTPS API: https://localhost:8443"
+    log "INFO" "  Web Interface: http://localhost"
+    echo
+    log "INFO" "Next steps:"
+    log "INFO" "  1. Complete setup via web interface"
+    log "INFO" "  2. Configure payment methods"
+    log "INFO" "  3. Set up merchant accounts"
+    echo
+    log "INFO" "Useful commands:"
+    log "INFO" "  View logs: docker logs payram"
+    log "INFO" "  Update: $0 --update"
+    log "INFO" "  Reset: $0 --reset"
+    echo
+  else
+    log "ERROR" "PayRam setup failed"
+    log "INFO" "Check logs at: $LOG_FILE"
+    log "INFO" "For support, visit: https://github.com/PayRam/payram-scripts/issues"
     exit 1
   fi
-
-  # --- Finalize and Validate Configuration ---
-  if [[ -z "$IMAGE_TAG" ]]; then
-    IMAGE_TAG=$DEFAULT_IMAGE_TAG # Default to 1.5.1 if no tag is specified
-  fi
-
-  # --- Interactive Setup ---
-  print_color "blue" "======================================"
-  print_color "blue" " Welcome to the PayRam Setup Utility"
-  print_color "blue" "======================================"
-  echo
-
-  configure_database
-  configure_ssl_path
-
-  # --- Pre-run Summary ---
-  echo
-  print_color "blue" "--- Configuration Summary ---"
-  print_color "yellow" "Docker Image: buddhasource/payram-core:$IMAGE_TAG"
-  print_color "yellow" "Network Mode: $NETWORK_TYPE"
-  print_color "yellow" "Database Host: $DB_HOST"
-  print_color "yellow" "Server: $SERVER"
-  if [[ -n "$SSL_CERT_PATH" ]]; then
-    print_color "yellow" "SSL Certificate Path: $SSL_CERT_PATH"
-  else
-    print_color "yellow" "SSL Certificate Path: Not configured"
-  fi
-  print_color "blue" "---------------------------"
-  echo
-
-  read -p "Press [Enter] to continue with the setup..."
-
-  # --- Run Docker ---
-  run_docker_container
 }
 
-# Execute the main function
+# Execute main function with all arguments
 main "$@"
+
 
