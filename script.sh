@@ -1508,12 +1508,25 @@ deploy_payram_container() {
   log "INFO" "Cleaning up old PayRam images..."
   docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f &>/dev/null || true
   
-  # Pull latest image
+  # Pull latest image with progress
   log "INFO" "Pulling PayRam image: buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
-  if ! docker pull "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
+  echo
+  print_color "blue" "📥 Downloading Docker image..."
+  print_color "gray" "   This may take several minutes depending on your connection"
+  echo
+  
+  # Pull with progress monitoring
+  if ! docker pull "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
+    if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
+      echo "   $line"
+    elif [[ "$line" =~ Status:.*Downloaded ]]; then
+      print_color "green" "   ✅ Download completed successfully"
+    fi
+  done; then
     log "ERROR" "Failed to pull Docker image"
     return 1
   fi
+  echo
   
   # Create data directories
   mkdir -p "$PAYRAM_CORE_DIR"/{log/supervisord,db/postgres}
@@ -1555,6 +1568,13 @@ deploy_payram_container() {
     # Save configuration after successful deployment
     save_configuration
     
+    # Perform health check
+    if perform_health_check; then
+      log "SUCCESS" "PayRam application is healthy and ready!"
+    else
+      log "WARN" "Container started but health check failed - may need time to initialize"
+    fi
+    
     # Show container info
     docker ps --filter name=payram
     log "INFO" "Container logs: docker logs payram"
@@ -1568,6 +1588,184 @@ deploy_payram_container() {
   fi
 }
 
+# Health check function
+perform_health_check() {
+  echo
+  print_color "blue" "🏥 Performing application health check..."
+  
+  local max_attempts=6
+  local attempt=1
+  local wait_time=10
+  
+  while [[ $attempt -le $max_attempts ]]; do
+    print_color "yellow" "   Attempt $attempt/$max_attempts: Checking application status..."
+    
+    # Check if container is still running
+    if ! docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
+      print_color "red" "   ❌ Container stopped unexpectedly"
+      return 1
+    fi
+    
+    # Check container logs for successful startup indicators
+    local logs=$(docker logs payram 2>&1 | tail -20)
+    
+    # Look for positive indicators in logs
+    if echo "$logs" | grep -qi "server.*start\|ready\|listening\|started\|running"; then
+      print_color "green" "   ✅ Application startup detected in logs"
+      
+      # Additional check: Try to connect to port 8080
+      if timeout 5 bash -c "</dev/tcp/127.0.0.1/8080" >/dev/null 2>&1; then
+        print_color "green" "   ✅ Port 8080 is accepting connections"
+        print_color "green" "   🎉 Health check passed - PayRam is healthy!"
+        echo
+        return 0
+      else
+        print_color "yellow" "   ⚠️  Application starting but port not ready yet..."
+      fi
+    elif echo "$logs" | grep -qi "error\|failed\|exception\|fatal"; then
+      print_color "red" "   ❌ Error detected in application logs"
+      print_color "gray" "   Last few log lines:"
+      echo "$logs" | tail -5 | sed 's/^/      /'
+      echo
+      return 1
+    else
+      print_color "yellow" "   ⏳ Application still initializing..."
+    fi
+    
+    if [[ $attempt -lt $max_attempts ]]; then
+      print_color "gray" "   Waiting ${wait_time}s before next check..."
+      sleep $wait_time
+    fi
+    
+    ((attempt++))
+  done
+  
+  print_color "yellow" "   ⚠️  Health check timeout - application may still be starting"
+  print_color "gray" "   You can check status later with: docker logs payram"
+  echo
+  return 1
+}
+
+# Pre-upgrade validation checklist
+validate_upgrade_readiness() {
+  log "INFO" "🔍 Performing pre-upgrade validation..."
+  echo
+  print_color "blue" "╔════════════════════════════════════════════════════════════╗"
+  print_color "blue" "║                    🔍 UPGRADE READINESS CHECK              ║"
+  print_color "blue" "╚════════════════════════════════════════════════════════════╝"
+  echo
+  
+  local checks_passed=0
+  local total_checks=7
+  
+  # Check 1: Configuration exists
+  print_color "yellow" "📋 1/7 Checking existing configuration..."
+  if [[ -f "$PAYRAM_INFO_DIR/config.env" ]]; then
+    print_color "green" "   ✅ Configuration file found"
+    ((checks_passed++))
+  else
+    print_color "red" "   ❌ Configuration file missing"
+  fi
+  
+  # Check 2: Docker service
+  print_color "yellow" "🐳 2/7 Checking Docker service..."
+  if command -v docker >/dev/null 2>&1 && docker ps >/dev/null 2>&1; then
+    print_color "green" "   ✅ Docker service is running"
+    ((checks_passed++))
+  else
+    print_color "red" "   ❌ Docker service not available"
+  fi
+  
+  # Check 3: Current container status
+  print_color "yellow" "📦 3/7 Checking current PayRam container..."
+  if docker ps --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
+    print_color "green" "   ✅ PayRam container is running"
+    ((checks_passed++))
+  else
+    if docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
+      print_color "yellow" "   ⚠️  PayRam container exists but stopped"
+      ((checks_passed++))
+    else
+      print_color "red" "   ❌ No PayRam container found"
+    fi
+  fi
+  
+  # Check 4: Disk space
+  print_color "yellow" "💾 4/7 Checking disk space..."
+  if check_disk_space_requirements >/dev/null 2>&1; then
+    print_color "green" "   ✅ Sufficient disk space available"
+    ((checks_passed++))
+  else
+    print_color "red" "   ❌ Insufficient disk space"
+  fi
+  
+  # Check 5: Network connectivity
+  print_color "yellow" "🌐 5/7 Checking network connectivity..."
+  if timeout 10 curl -s https://registry-1.docker.io >/dev/null 2>&1; then
+    print_color "green" "   ✅ Docker registry accessible"
+    ((checks_passed++))
+  else
+    print_color "red" "   ❌ Cannot reach Docker registry"
+  fi
+  
+  # Check 6: Target image availability
+  print_color "yellow" "🏷️  6/7 Checking target image availability..."
+  local target_tag="${NEW_IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  if validate_docker_tag "$target_tag" >/dev/null 2>&1; then
+    print_color "green" "   ✅ Target image 'buddhasource/payram-core:$target_tag' is available"
+    ((checks_passed++))
+  else
+    print_color "red" "   ❌ Target image 'buddhasource/payram-core:$target_tag' not found"
+  fi
+  
+  # Check 7: Database connectivity (if external)
+  print_color "yellow" "🗄️  7/7 Checking database connectivity..."
+  if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" ]]; then
+    if timeout 5 bash -c "</dev/tcp/$DB_HOST/$DB_PORT" >/dev/null 2>&1; then
+      print_color "green" "   ✅ External database is reachable"
+      ((checks_passed++))
+    else
+      print_color "red" "   ❌ Cannot reach external database"
+    fi
+  else
+    print_color "green" "   ✅ Using internal database (no check needed)"
+    ((checks_passed++))
+  fi
+  
+  echo
+  print_color "blue" "╔════════════════════════════════════════════════════════════╗"
+  if [[ $checks_passed -eq $total_checks ]]; then
+    print_color "green" "║  🎉 UPGRADE POSSIBLE: All checks passed ($checks_passed/$total_checks)          ║"
+    print_color "blue" "║                                                            ║"
+    print_color "green" "║  ✅ System is ready for upgrade                            ║"
+    print_color "blue" "╚════════════════════════════════════════════════════════════╝"
+    echo
+    return 0
+  elif [[ $checks_passed -ge 5 ]]; then
+    print_color "yellow" "║  ⚠️  UPGRADE POSSIBLE: Some issues detected ($checks_passed/$total_checks)      ║"
+    print_color "blue" "║                                                            ║"
+    print_color "yellow" "║  🔧 Upgrade can proceed but with warnings                 ║"
+    print_color "blue" "╚════════════════════════════════════════════════════════════╝"
+    echo
+    print_color "yellow" "⚠️  Some non-critical issues were found. Continue? (y/N): "
+    read -r continue_choice
+    if [[ "$continue_choice" =~ ^[Yy]$ ]]; then
+      return 0
+    else
+      log "INFO" "Upgrade cancelled by user"
+      return 1
+    fi
+  else
+    print_color "red" "║  ❌ UPGRADE NOT POSSIBLE: Critical issues found ($checks_passed/$total_checks)  ║"
+    print_color "blue" "║                                                            ║"
+    print_color "red" "║  🚫 Please resolve issues before upgrading                ║"
+    print_color "blue" "╚════════════════════════════════════════════════════════════╝"
+    echo
+    print_color "red" "Please resolve the above issues before attempting upgrade."
+    return 1
+  fi
+}
+
 # Container update workflow
 update_payram_container() {
   log "INFO" "Starting PayRam update process..."
@@ -1577,6 +1775,12 @@ update_payram_container() {
   if ! load_configuration; then
     log "ERROR" "Cannot update - no existing configuration found"
     log "INFO" "Please run initial setup first (without --update flag)"
+    return 1
+  fi
+  
+  # Validate upgrade readiness
+  if ! validate_upgrade_readiness; then
+    log "ERROR" "Upgrade validation failed"
     return 1
   fi
   
