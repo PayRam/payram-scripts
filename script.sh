@@ -1924,6 +1924,180 @@ reset_payram_environment() {
   log "SUCCESS" "PayRam environment reset complete"
 }
 
+# Function to detect public IP address with robust error handling
+get_public_ip() {
+  local public_ip=""
+  
+  # Set strict error handling for this function only
+  set +e  # Don't exit on error
+  
+  # Try multiple services for reliability
+  local ip_services=(
+    "https://ipinfo.io/ip"
+    "https://ip.seeip.org"
+    "https://ifconfig.me/ip"
+    "https://api.ipify.org"
+    "https://checkip.amazonaws.com"
+  )
+  
+  # Check if curl or wget is available
+  local has_curl=false
+  local has_wget=false
+  
+  if command -v curl >/dev/null 2>&1; then
+    has_curl=true
+  fi
+  
+  if command -v wget >/dev/null 2>&1; then
+    has_wget=true
+  fi
+  
+  # If neither curl nor wget is available, skip web-based detection
+  if [[ "$has_curl" == false && "$has_wget" == false ]]; then
+    # Try fallback method only
+    if command -v ip >/dev/null 2>&1; then
+      public_ip=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1); exit}' 2>/dev/null || echo "")
+      if [[ -n "$public_ip" ]] && [[ "$public_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        echo "$public_ip"
+        return 0
+      fi
+    fi
+    echo ""
+    return 1
+  fi
+  
+  # Try web services
+  for service in "${ip_services[@]}"; do
+    if [[ "$has_curl" == true ]]; then
+      # Use curl with comprehensive error handling
+      public_ip=$(timeout 15 curl -s --connect-timeout 5 --max-time 10 --retry 1 --fail "$service" 2>/dev/null | head -1 | grep -oE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || echo "")
+    elif [[ "$has_wget" == true ]]; then
+      # Use wget with comprehensive error handling  
+      public_ip=$(timeout 15 wget -qO- --timeout=10 --tries=1 "$service" 2>/dev/null | head -1 | grep -oE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || echo "")
+    fi
+    
+    # Validate the IP format more strictly
+    if [[ -n "$public_ip" ]] && [[ "$public_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+      # Additional validation: check IP ranges
+      local IFS='.'
+      local ip_parts=($public_ip)
+      local valid_ip=true
+      
+      # Check each octet is within valid range (0-255)
+      for part in "${ip_parts[@]}"; do
+        if [[ $part -gt 255 || $part -lt 0 ]]; then
+          valid_ip=false
+          break
+        fi
+      done
+      
+      # Check for private/reserved ranges
+      local first_octet=${ip_parts[0]}
+      local second_octet=${ip_parts[1]}
+      
+      # Skip private/reserved IPs
+      if [[ $first_octet -eq 10 ]] || \
+         [[ $first_octet -eq 172 && $second_octet -ge 16 && $second_octet -le 31 ]] || \
+         [[ $first_octet -eq 192 && $second_octet -eq 168 ]] || \
+         [[ $first_octet -eq 127 ]] || \
+         [[ $first_octet -eq 0 ]] || \
+         [[ $first_octet -ge 224 ]]; then
+        valid_ip=false
+      fi
+      
+      if [[ "$valid_ip" == true ]]; then
+        echo "$public_ip"
+        return 0
+      fi
+    fi
+    
+    # Clear the variable for next iteration
+    public_ip=""
+  done
+  
+  # Fallback: try to get IP from network interface (but only for local network awareness)
+  if command -v ip >/dev/null 2>&1; then
+    local local_ip=""
+    local_ip=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") print $(i+1); exit}' 2>/dev/null || echo "")
+    if [[ -n "$local_ip" ]] && [[ "$local_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+      # Only return local IP if it's not a private range (unlikely but possible)
+      local IFS='.'
+      local ip_parts=($local_ip)
+      local first_octet=${ip_parts[0]}
+      local second_octet=${ip_parts[1]}
+      
+      # If it's not a private IP, return it
+      if [[ $first_octet -ne 10 ]] && \
+         [[ ! ($first_octet -eq 172 && $second_octet -ge 16 && $second_octet -le 31) ]] && \
+         [[ ! ($first_octet -eq 192 && $second_octet -eq 168) ]] && \
+         [[ $first_octet -ne 127 ]] && \
+         [[ $first_octet -ne 0 ]] && \
+         [[ $first_octet -lt 224 ]]; then
+        echo "$local_ip"
+        return 0
+      fi
+    fi
+  fi
+  
+  # If all fails, return empty
+  echo ""
+  return 1
+}
+
+# Function to display access URLs with robust error handling
+display_access_urls() {
+  local public_ip=""
+  
+  # Safely attempt to get public IP with error handling
+  set +e  # Don't exit on error
+  public_ip=$(get_public_ip 2>/dev/null || echo "")
+  set -e  # Re-enable exit on error
+  
+  echo
+  print_color "green" "🌐 PayRam Access URLs:"
+  echo
+  
+  # Local access - always show this as it always works
+  print_color "blue" "📍 Local Access (from this server):"
+  print_color "gray" "  • HTTP API: http://localhost:8080"
+  print_color "gray" "  • HTTPS API: https://localhost:8443"
+  print_color "gray" "  • Web Interface: http://localhost"
+  echo
+  
+  # Public access - show only if we have a valid public IP
+  if [[ -n "$public_ip" && "$public_ip" != "ERROR" ]]; then
+    print_color "blue" "🌍 Public Access (from anywhere):"
+    print_color "gray" "  • HTTP API: http://$public_ip:8080"
+    print_color "gray" "  • HTTPS API: https://$public_ip:8443"
+    print_color "gray" "  • Web Interface: http://$public_ip"
+    echo
+    print_color "yellow" "⚠️  Security Note:"
+    print_color "gray" "  • Ensure firewall allows ports 80, 443, 8080, 8443"
+    print_color "gray" "  • Consider setting up a domain name for production"
+    print_color "gray" "  • Detected public IP: $public_ip"
+  else
+    print_color "yellow" "🔍 Public IP Detection:"
+    print_color "gray" "  • Could not detect public IP automatically"
+    print_color "gray" "  • This is normal for private networks or if internet is unavailable"
+    print_color "gray" "  • To check manually: curl -s ifconfig.me"
+    print_color "gray" "  • Public access (if available): http://YOUR_PUBLIC_IP:8080"
+    echo
+    print_color "blue" "💡 Alternative Access Methods:"
+    print_color "gray" "  • Use localhost URLs above for local access"
+    print_color "gray" "  • Set up port forwarding if behind NAT/firewall"
+    print_color "gray" "  • Configure a domain name for external access"
+  fi
+  echo
+  
+  # Domain access (if configured) - safely check for domain variable
+  if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "" ]]; then
+    print_color "blue" "🏷️  Domain Access (SSL enabled):"
+    print_color "gray" "  • HTTPS API: https://$DOMAIN_NAME:8443"
+    print_color "gray" "  • Web Interface: https://$DOMAIN_NAME"
+    echo
+  fi
+}
+
 # Function to print colored text
 print_color() {
   case "$1" in
@@ -2205,20 +2379,20 @@ main() {
   if deploy_payram_container; then
     display_success_banner
     
-    log "SUCCESS" "PayRam is now running and accessible at:"
-    log "INFO" "  HTTP API: http://localhost:8080"
-    log "INFO" "  HTTPS API: https://localhost:8443"
-    log "INFO" "  Web Interface: http://localhost"
+    log "SUCCESS" "PayRam installation completed successfully! 🎉"
+    
+    # Display access URLs with both local and public options
+    display_access_urls
+    
+    print_color "green" "📋 Next Steps:"
+    print_color "gray" "  1. Complete setup via web interface"
+    print_color "gray" "  2. Configure payment methods"
+    print_color "gray" "  3. Set up merchant accounts"
     echo
-    log "INFO" "Next steps:"
-    log "INFO" "  1. Complete setup via web interface"
-    log "INFO" "  2. Configure payment methods"
-    log "INFO" "  3. Set up merchant accounts"
-    echo
-    log "INFO" "Useful commands:"
-    log "INFO" "  View logs: docker logs payram"
-    log "INFO" "  Update: $0 --update"
-    log "INFO" "  Reset: $0 --reset"
+    print_color "blue" "🛠️  Useful Commands:"
+    print_color "gray" "  • View logs: docker logs payram"
+    print_color "gray" "  • Update: $0 --update"
+    print_color "gray" "  • Reset: $0 --reset"
     echo
   else
     log "ERROR" "PayRam setup failed"
