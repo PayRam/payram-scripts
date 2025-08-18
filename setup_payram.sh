@@ -1965,7 +1965,13 @@ deploy_payram_container_update() {
   
   # Clean up old images
   log "INFO" "Cleaning up old PayRam images..."
-  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f &>/dev/null || true
+  {
+    imgs="$(docker images --filter=reference='buddhasource/payram-core' -q)"
+    if [[ -n "$imgs" ]]; then
+      # shellcheck disable=SC2086
+      docker rmi -f $imgs
+    fi
+  } &>/dev/null || true
   
   # Pull latest image with progress
   log "INFO" "Pulling PayRam image: buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
