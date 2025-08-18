@@ -406,9 +406,9 @@ get_postgresql_client_package() {
   case "$OS_FAMILY" in
     debian) echo "postgresql-client" ;;
     rhel|fedora) echo "postgresql" ;;
-    arch) echo "postgresql-libs" ;;
+    arch)   echo "postgresql" ;;
     alpine) echo "postgresql-client" ;;
-    macos) echo "postgresql" ;;
+    macos)  echo "postgresql" ;;
     *) echo "postgresql-client" ;;
   esac
 }
