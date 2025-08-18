@@ -1913,18 +1913,6 @@ update_payram_container() {
     log "INFO" "Stopping existing PayRam container..."
     docker stop payram || true
   fi
-  
-  # Fix PostgreSQL directory permissions if they exist with wrong ownership
-  if [[ -d "$PAYRAM_CORE_DIR/db/postgres" ]]; then
-    log "INFO" "Fixing PostgreSQL directory permissions..."
-    rm -rf "$PAYRAM_CORE_DIR/db/postgres"
-    log "INFO" "Removed existing postgres directory - Docker will recreate with correct permissions"
-  fi
-  
-  # Fix SSL certificate mount permissions for updates
-  if [[ -d "/etc/letsencrypt" ]]; then
-    log "INFO" "Ensuring SSL certificate access permissions..."
-  fi
 
   # Deploy updated container with update-specific fixes
   deploy_payram_container_update
