@@ -1597,7 +1597,10 @@ deploy_payram_container() {
   if [[ "$ORIGINAL_USER" != "root" ]]; then
     chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"
   fi
-  
+
+  # Save configuration BEFORE starting container
+  save_configuration
+
   # Deploy container
   log "INFO" "Starting PayRam container..."
   docker run -d \
@@ -1621,16 +1624,13 @@ deploy_payram_container() {
     -v "$PAYRAM_CORE_DIR":/root/payram \
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
-    -v /etc/letsencrypt:/etc/letsencrypt:ro \
+    -v /etc/letsencrypt:/etc/letsencrypt \
     "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
   # Verify deployment
   sleep 5
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
     log "SUCCESS" "PayRam container deployed successfully!"
-    
-    # Save configuration after successful deployment
-    save_configuration
     
     # Perform health check
     if perform_health_check; then
