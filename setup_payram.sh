@@ -1347,49 +1347,45 @@ validate_ssl_certificate() {
     log "WARN" "OpenSSL not available for certificate validation"
     return 1
   fi
-  
+
   # Validate certificate format
   if ! openssl x509 -in "$cert_file" -noout -text &>/dev/null; then
     log "ERROR" "Invalid certificate format"
     return 1
   fi
-  
-  # Validate private key format
-  if ! openssl rsa -in "$key_file" -check -noout &>/dev/null 2>&1; then
-    if ! openssl ec -in "$key_file" -check -noout &>/dev/null 2>&1; then
-      log "ERROR" "Invalid private key format"
-      return 1
-    fi
+
+  # Validate private key format (supports RSA and EC)
+  if ! openssl pkey -in "$key_file" -noout -text &>/dev/null 2>&1; then
+    log "ERROR" "Invalid private key format"
+    return 1
   fi
-  
-  # Check if certificate and private key match
-  local cert_modulus=$(openssl x509 -noout -modulus -in "$cert_file" 2>/dev/null | openssl md5)
-  local key_modulus=$(openssl rsa -noout -modulus -in "$key_file" 2>/dev/null | openssl md5)
-  
-  if [[ "$cert_modulus" != "$key_modulus" ]]; then
-    # Try EC key
-    key_modulus=$(openssl ec -noout -pubout -in "$key_file" 2>/dev/null | openssl md5)
-    if [[ "$cert_modulus" != "$key_modulus" ]]; then
-      log "ERROR" "Certificate and private key do not match"
-      return 1
-    fi
+
+  # Check if certificate and private key match (by public key digest)
+  local cert_pubkey_digest
+  local key_pubkey_digest
+  cert_pubkey_digest="$(openssl x509 -in "$cert_file" -noout -pubkey 2>/dev/null \
+                        | openssl pkey -pubin -outform pem 2>/dev/null \
+                        | openssl dgst -sha256 2>/dev/null)"
+  key_pubkey_digest="$(openssl pkey -in "$key_file" -pubout -outform pem 2>/dev/null \
+                      | openssl dgst -sha256 2>/dev/null)"
+  if [[ -z "$cert_pubkey_digest" || -z "$key_pubkey_digest" || \
+        "$cert_pubkey_digest" != "$key_pubkey_digest" ]]; then
+    log "ERROR" "Certificate and private key do not match"
+    return 1
   fi
-  
-  # Check certificate expiration
-  local exp_date=$(openssl x509 -noout -enddate -in "$cert_file" | cut -d= -f2)
-  local exp_epoch=$(date -d "$exp_date" +%s 2>/dev/null || echo "0")
-  local now_epoch=$(date +%s)
-  local days_left=$(( (exp_epoch - now_epoch) / 86400 ))
-  
-  if [[ $days_left -lt 1 ]]; then
+
+  # Check certificate expiration using openssl (portable)
+  if ! openssl x509 -in "$cert_file" -noout -checkend 0 >/dev/null 2>&1; then
     log "ERROR" "Certificate has expired"
     return 1
-  elif [[ $days_left -lt 30 ]]; then
-    print_color "yellow" "⚠️  Certificate expires in $days_left days"
-  else
-    print_color "green" "✅ Certificate is valid for $days_left days"
   fi
-  
+  # Warn if expiring within 30 days
+  if ! openssl x509 -in "$cert_file" -noout -checkend $((30*24*3600)) >/dev/null 2>&1; then
+    print_color "yellow" "⚠️  Certificate expires within 30 days"
+  else
+    print_color "green" "✅ Certificate validity is more than 30 days"
+  fi
+
   log "SUCCESS" "SSL certificate validation passed"
   return 0
 }
