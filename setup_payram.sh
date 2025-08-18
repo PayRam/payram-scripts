@@ -2019,7 +2019,7 @@ deploy_payram_container_update() {
     -v "$PAYRAM_CORE_DIR":/root/payram \
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
-    -v /etc/letsencrypt:/etc/letsencrypt \
+    -v /etc/letsencrypt:/etc/letsencrypt:ro \
     "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
   # Verify deployment
