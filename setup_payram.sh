@@ -475,8 +475,14 @@ install_docker_official_repo() {
       # Add Docker repository
       local repo_url="https://download.docker.com/linux/centos/docker-ce.repo"
       [[ "$OS_FAMILY" == "fedora" ]] && repo_url="https://download.docker.com/linux/fedora/docker-ce.repo"
-      
-      $PACKAGE_MANAGER config-manager --add-repo "$repo_url"
+
+      if [[ "$PACKAGE_MANAGER" == "dnf" ]]; then
+        pkg_install dnf-plugins-core
+        dnf config-manager --add-repo "$repo_url"
+      else
+        # yum has config-manager via yum-utils
+        $PACKAGE_MANAGER config-manager --add-repo "$repo_url"
+      fi
       pkg_install docker-ce docker-ce-cli containerd.io docker-compose-plugin
       ;;
       
