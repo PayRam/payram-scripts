@@ -1372,7 +1372,7 @@ generate_aes_key() {
   echo
   
   print_color "yellow" "⚠️  Hot Wallet Security Guidelines:"
-  print_color "red" "  • Store MINIMAL funds only (recommended: <$1,000 equivalent)"
+  print_color "red" "  • Store MINIMAL funds only (recommended: <\$1,000 equivalent)"
   print_color "red" "  • Hot wallet = convenient but higher risk"
   print_color "red" "  • Most funds should stay in cold storage"
   print_color "red" "  • Regular withdrawal of excess funds to cold wallet"
@@ -1426,7 +1426,7 @@ generate_aes_key() {
   echo
   
   print_color "green" "📈 Best Practices:"
-  print_color "gray" "  • Keep hot wallet balance under $1,000"
+  print_color "gray" "  • Keep hot wallet balance under \$1,000"
   print_color "gray" "  • Monitor hot wallet activity regularly"
   print_color "gray" "  • Set up automatic cold storage transfers"
   print_color "gray" "  • Test key backup/restore procedures quarterly"
