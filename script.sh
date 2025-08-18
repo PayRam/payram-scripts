@@ -53,7 +53,9 @@ show_progress() {
     "$percent" \
     "$description"
     
-  [[ $current -eq $total ]] && echo ""
+  if [[ $current -eq $total ]]; then
+    echo ""
+  fi
 }
 
 # Check if script is run as root (with better UX)
@@ -1905,13 +1907,13 @@ display_welcome_banner() {
   print_color "yellow" "║  ₿  █   █ █   █  █   █ █   █ █   █ ██ ██  🚀                   ║"
   print_color "yellow" "║  ⚡ ████  █████  █████ ████  █████ █ █ █  💸  Self-Hosted     ║"
   print_color "yellow" "║  🌟 █     █   █      █ █   █ █   █ █   █  💰                   ║"
-  print_color "yellow" "║  � █     █   █      █ █   █ █   █ █   █  ₿   No middleman    ║"
+  print_color "yellow" "║  🔥 █     █   █      █ █   █ █   █ █   █  ₿   No middleman    ║"
   print_color "cyan" "║                                                                 ║"
   print_color "magenta" "║                    🚀 Welcome to PayRam Setup! 🚀             ║"
   print_color "cyan" "║                                                                 ║"
   print_color "green" "║    💰 Self-hosted crypto payment gateway with encryption 💰    ║"
   print_color "blue" "║    ⚡ Multi-currency: Bitcoin, Ethereum, Litecoin & more ⚡     ║"
-  print_color "yellow" "║    � Enterprise-grade security with AES-256 encryption 🔒     ║"
+  print_color "yellow" "║    🔐 Enterprise-grade security with AES-256 encryption 🔒     ║"
   print_color "cyan" "║                                                                 ║"
   print_color "cyan" "╚═════════════════════════════════════════════════════════════════╝"
   echo
