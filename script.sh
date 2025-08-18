@@ -15,7 +15,7 @@ declare -g OS_VERSION=""
 declare -g PACKAGE_MANAGER=""
 declare -g SERVICE_MANAGER=""
 declare -g INSTALL_METHOD=""
-declare -g SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+declare -g SCRIPT_DIR="${PWD}"
 declare -g LOG_FILE="/tmp/payram-setup.log"
 
 # --- CORE UTILITY FUNCTIONS ---
@@ -1912,7 +1912,7 @@ display_welcome_banner() {
   print_color "magenta" "║                    🚀 Welcome to PayRam Setup! 🚀             ║"
   print_color "cyan" "║                                                                 ║"
   print_color "green" "║    💰 Self-hosted crypto payment gateway with encryption 💰    ║"
-  print_color "blue" "║    ⚡ Multi-currency: Bitcoin, Ethereum, Litecoin & more ⚡     ║"
+  print_color "blue" "║    ⚡ Bitcoin, Ethereum, USDT, USDC, TRX & more ⚡            ║"
   print_color "yellow" "║    🔐 Enterprise-grade security with AES-256 encryption 🔒     ║"
   print_color "cyan" "║                                                                 ║"
   print_color "cyan" "╚═════════════════════════════════════════════════════════════════╝"
@@ -1987,6 +1987,17 @@ EXAMPLES:
     $0 --update --tag=v1.5.0  # Update to specific version
     $0 --reset             # Complete environment reset
 
+CURL INSTALLATION:
+    # Recommended syntax (most reliable):
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --help
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --testnet
+    
+    # Alternative syntax (arguments inside quotes):
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh) --help"
+    
+    # Incorrect syntax (will fail):
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh)" --help
+
 SUPPORTED SYSTEMS:
     • Ubuntu, Debian, Linux Mint
     • CentOS, RHEL, Rocky Linux, AlmaLinux
@@ -1999,15 +2010,31 @@ For more information, visit: https://github.com/PayRam/payram-scripts
 EOF
 }
 
+# Initialize logging with proper error handling
+init_logging() {
+  # Try to create log file, fallback if permission denied
+  if ! echo "PayRam Setup Script v3 - $(date)" > "$LOG_FILE" 2>/dev/null; then
+    # Fallback to user's home directory if /tmp is not writable
+    LOG_FILE="$HOME/payram-setup.log"
+    if ! echo "PayRam Setup Script v3 - $(date)" > "$LOG_FILE" 2>/dev/null; then
+      # Final fallback: disable file logging
+      LOG_FILE="/dev/null"
+      echo "Warning: Could not create log file, logging to console only" >&2
+    fi
+  fi
+}
+
 # Main execution flow
 main() {
-  # Initialize logging
-  echo "PayRam Setup Script v3 - $(date)" > "$LOG_FILE"
+  # Initialize logging safely
+  init_logging
   
   # Parse command line arguments
   local update_mode=false
   local reset_mode=false
   local testnet_mode=false
+  local install_mode=false
+  local args_processed=$#
   
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2027,6 +2054,7 @@ main() {
         testnet_mode=true
         NETWORK_TYPE="testnet"
         SERVER="DEVELOPMENT"
+        install_mode=true
         shift
         ;;
       --tag=*)
@@ -2045,8 +2073,13 @@ main() {
     esac
   done
   
+  # If no arguments were provided, we're in interactive install mode
+  if [[ $args_processed -eq 0 ]]; then
+    install_mode=true
+  fi
+  
   # Check privileges for operations that require root
-  if [[ "$update_mode" == true || "$reset_mode" == true || $# -eq 0 ]]; then
+  if [[ "$update_mode" == true || "$reset_mode" == true || "$install_mode" == true ]]; then
     check_privileges
   fi
   
