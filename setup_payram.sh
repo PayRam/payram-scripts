@@ -663,7 +663,15 @@ check_disk_space_requirements() {
   # Get available space in KB for the target directory
   local available_space_kb
   if command -v df >/dev/null 2>&1; then
-    available_space_kb=$(df "$PAYRAM_HOME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+    # Try different approaches to get disk space
+    available_space_kb=$(df "$PAYRAM_HOME" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [[ -z "$available_space_kb" || "$available_space_kb" == "0" ]]; then
+      # Fallback to root filesystem if PAYRAM_HOME fails
+      available_space_kb=$(df / 2>/dev/null | awk 'NR==2 {print $4}')
+    fi
+    if [[ -z "$available_space_kb" ]]; then
+      available_space_kb=0
+    fi
     local available_space_gb=$((available_space_kb / 1024 / 1024))
     
     echo
@@ -729,7 +737,15 @@ check_disk_space_requirements_silent() {
   # Get available space in KB for the target directory
   local available_space_kb
   if command -v df >/dev/null 2>&1; then
-    available_space_kb=$(df "$PAYRAM_HOME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+    # Try different approaches to get disk space
+    available_space_kb=$(df "$PAYRAM_HOME" 2>/dev/null | awk 'NR==2 {print $4}')
+    if [[ -z "$available_space_kb" || "$available_space_kb" == "0" ]]; then
+      # Fallback to root filesystem if PAYRAM_HOME fails
+      available_space_kb=$(df / 2>/dev/null | awk 'NR==2 {print $4}')
+    fi
+    if [[ -z "$available_space_kb" ]]; then
+      available_space_kb=0
+    fi
     
     if [[ $available_space_kb -lt $required_space_kb ]]; then
       return 1  # Insufficient space
@@ -1593,21 +1609,10 @@ deploy_payram_container() {
   echo
   
   # Create data directories
-  mkdir -p "$PAYRAM_CORE_DIR"/log/supervisord
-  mkdir -p "$PAYRAM_CORE_DIR"/db/postgres
-  
-  # Set correct ownership for directories
+  mkdir -p "$PAYRAM_CORE_DIR"/{log/supervisord,db/postgres}
   if [[ "$ORIGINAL_USER" != "root" ]]; then
-    chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"/log
-    # PostgreSQL needs specific ownership (999:999 is postgres user in container)
-    chown -R 999:999 "$PAYRAM_CORE_DIR"/db/postgres 2>/dev/null || true
-  else
-    # If running as root, set postgres ownership directly  
-    chown -R 999:999 "$PAYRAM_CORE_DIR"/db/postgres 2>/dev/null || true
+    chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"
   fi
-
-  # Save configuration BEFORE starting container
-  save_configuration
 
   # Deploy container
   log "INFO" "Starting PayRam container..."
@@ -1632,13 +1637,16 @@ deploy_payram_container() {
     -v "$PAYRAM_CORE_DIR":/root/payram \
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
-    -v /etc/letsencrypt:/etc/letsencrypt \
+    -v /etc/letsencrypt:/etc/letsencrypt:ro \
     "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
   # Verify deployment
   sleep 5
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
     log "SUCCESS" "PayRam container deployed successfully!"
+    
+    # Save configuration after successful deployment
+    save_configuration
     
     # Perform health check
     if perform_health_check; then
@@ -1906,8 +1914,126 @@ update_payram_container() {
     docker stop payram || true
   fi
   
-  # Deploy updated container
-  deploy_payram_container
+  # Fix PostgreSQL directory permissions if they exist with wrong ownership
+  if [[ -d "$PAYRAM_CORE_DIR/db/postgres" ]]; then
+    log "INFO" "Fixing PostgreSQL directory permissions..."
+    rm -rf "$PAYRAM_CORE_DIR/db/postgres"
+    log "INFO" "Removed existing postgres directory - Docker will recreate with correct permissions"
+  fi
+  
+  # Fix SSL certificate mount permissions for updates
+  if [[ -d "/etc/letsencrypt" ]]; then
+    log "INFO" "Ensuring SSL certificate access permissions..."
+  fi
+
+  # Deploy updated container with update-specific fixes
+  deploy_payram_container_update
+}
+
+# Update-specific container deployment with fixes
+deploy_payram_container_update() {
+  show_progress 10 10 "Deploying updated PayRam container..."
+  
+  # Generate AES key if not exists
+  if [[ -z "$AES_KEY" ]]; then
+    generate_aes_key
+  fi
+  
+  # Validate Docker tag
+  if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
+    log "ERROR" "Cannot proceed with invalid Docker tag"
+    return 1
+  fi
+  
+  # Check for existing container
+  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
+    log "WARN" "PayRam container is already running"
+    docker ps --filter "name=payram"
+    return 0
+  fi
+  
+  # Remove stopped container if exists
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
+    log "INFO" "Removing existing stopped PayRam container..."
+    docker rm -v payram &>/dev/null || true
+  fi
+  
+  # Clean up old images
+  log "INFO" "Cleaning up old PayRam images..."
+  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f &>/dev/null || true
+  
+  # Pull latest image with progress
+  log "INFO" "Pulling PayRam image: buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
+  echo
+  print_color "blue" "📥 Downloading Docker image..."
+  print_color "gray" "   This may take several minutes depending on your connection"
+  echo
+  
+  # Pull with progress monitoring
+  if ! docker pull "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
+    if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
+      echo "   $line"
+    elif [[ "$line" =~ Status:.*Downloaded ]]; then
+      print_color "green" "   ✅ Download completed successfully"
+    fi
+  done; then
+    log "ERROR" "Failed to pull Docker image"
+    return 1
+  fi
+  echo
+  
+  # Save configuration BEFORE starting container (update-specific fix)
+  save_configuration
+  
+  # Deploy container with update-specific volume mounts
+  log "INFO" "Starting updated PayRam container..."
+  docker run -d \
+    --name payram \
+    --restart unless-stopped \
+    --publish 8080:8080 \
+    --publish 8443:8443 \
+    --publish 80:80 \
+    --publish 443:443 \
+    --publish 5432:5432 \
+    -e AES_KEY="$AES_KEY" \
+    -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
+    -e SERVER="$SERVER" \
+    -e POSTGRES_SSLMODE="$POSTGRES_SSLMODE" \
+    -e POSTGRES_HOST="$DB_HOST" \
+    -e POSTGRES_PORT="$DB_PORT" \
+    -e POSTGRES_DATABASE="$DB_NAME" \
+    -e POSTGRES_USERNAME="$DB_USER" \
+    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
+    -e SSL_CERT_PATH="$SSL_CERT_PATH" \
+    -v "$PAYRAM_CORE_DIR":/root/payram \
+    -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
+    -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
+    -v /etc/letsencrypt:/etc/letsencrypt \
+    "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  
+  # Verify deployment
+  sleep 5
+  if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
+    log "SUCCESS" "PayRam container updated successfully!"
+    
+    # Perform health check
+    if perform_health_check; then
+      log "SUCCESS" "PayRam application is healthy and ready!"
+    else
+      log "WARN" "Container started but health check failed - may need time to initialize"
+    fi
+    
+    # Show container info
+    docker ps --filter name=payram
+    log "INFO" "Container logs: docker logs payram"
+    log "INFO" "Container shell: docker exec -it payram bash"
+    
+    return 0
+  else
+    log "ERROR" "PayRam container failed to start"
+    log "INFO" "Check logs with: docker logs payram"
+    return 1
+  fi
 }
 
 # Environment reset
