@@ -1593,9 +1593,17 @@ deploy_payram_container() {
   echo
   
   # Create data directories
-  mkdir -p "$PAYRAM_CORE_DIR"/{log/supervisord,db/postgres}
+  mkdir -p "$PAYRAM_CORE_DIR"/log/supervisord
+  mkdir -p "$PAYRAM_CORE_DIR"/db/postgres
+  
+  # Set correct ownership for directories
   if [[ "$ORIGINAL_USER" != "root" ]]; then
-    chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"
+    chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"/log
+    # PostgreSQL needs specific ownership (999:999 is postgres user in container)
+    chown -R 999:999 "$PAYRAM_CORE_DIR"/db/postgres 2>/dev/null || true
+  else
+    # If running as root, set postgres ownership directly  
+    chown -R 999:999 "$PAYRAM_CORE_DIR"/db/postgres 2>/dev/null || true
   fi
 
   # Save configuration BEFORE starting container
