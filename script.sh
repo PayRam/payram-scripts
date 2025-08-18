@@ -38,7 +38,7 @@ log() {
   esac
 }
 
-# Progress indicator
+# Progress indicator with improved spacing
 show_progress() {
   local current=$1
   local total=$2
@@ -47,14 +47,23 @@ show_progress() {
   local completed=$((current * 50 / total))
   local remaining=$((50 - completed))
   
-  printf "\r🚀 [%s%s] %d%% - %s" \
+  # Add space above progress bar
+  echo
+  
+  printf "🚀 [%s%s] %d%% - %s" \
     "$(printf "%${completed}s" | tr ' ' '=')" \
     "$(printf "%${remaining}s" | tr ' ' '-')" \
     "$percent" \
     "$description"
     
   if [[ $current -eq $total ]]; then
-    echo ""
+    echo
+    # Add space below when progress is complete
+    echo
+  else
+    echo
+    # Add space below for ongoing progress
+    echo
   fi
 }
 
@@ -644,7 +653,7 @@ get_payram_directories() {
   check_disk_space_requirements
 }
 
-# Check disk space requirements
+# Check disk space requirements with user choice
 check_disk_space_requirements() {
   local required_space_gb=10
   local required_space_kb=$((required_space_gb * 1024 * 1024))
@@ -664,9 +673,42 @@ check_disk_space_requirements() {
     
     if [[ $available_space_kb -lt $required_space_kb ]]; then
       print_color "red" "  ❌ Insufficient disk space!"
-      print_color "yellow" "  Please free up space or choose a different location"
       echo
-      return 1
+      print_color "yellow" "⚠️  WARNING: You have ${available_space_gb}GB available, but ${required_space_gb}GB is recommended."
+      print_color "yellow" "   PayRam requires space for:"
+      print_color "gray" "   • Docker images and containers (~5GB)"
+      print_color "gray" "   • Database storage (~2GB)"
+      print_color "gray" "   • Logs and temporary files (~1GB)"
+      print_color "gray" "   • Growth buffer (~2GB)"
+      echo
+      print_color "blue" "💡 Note: You can increase disk space after installation if needed."
+      echo
+      
+      while true; do
+        print_color "yellow" "Do you want to continue anyway? (y/N): "
+        read -r response
+        case $response in
+          [Yy]|[Yy][Ee][Ss])
+            print_color "yellow" "⚠️  Proceeding with limited disk space..."
+            echo
+            return 0
+            ;;
+          [Nn]|[Nn][Oo]|"")
+            print_color "red" "Installation cancelled. Please free up disk space and try again."
+            echo
+            print_color "blue" "💡 Tips to free up space:"
+            print_color "gray" "   • Remove unused Docker images: docker system prune -a"
+            print_color "gray" "   • Clean package cache: sudo apt clean (Ubuntu/Debian)"
+            print_color "gray" "   • Remove old log files: sudo journalctl --vacuum-time=7d"
+            print_color "gray" "   • Use a different installation directory with more space"
+            echo
+            return 1
+            ;;
+          *)
+            print_color "red" "Please answer 'y' for yes or 'n' for no."
+            ;;
+        esac
+      done
     else
       print_color "green" "  ✅ Sufficient disk space available"
     fi
