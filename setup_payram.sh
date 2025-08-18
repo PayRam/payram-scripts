@@ -721,6 +721,26 @@ check_disk_space_requirements() {
   return 0
 }
 
+# Non-interactive disk space check for validation purposes
+check_disk_space_requirements_silent() {
+  local required_space_gb=10
+  local required_space_kb=$((required_space_gb * 1024 * 1024))
+  
+  # Get available space in KB for the target directory
+  local available_space_kb
+  if command -v df >/dev/null 2>&1; then
+    available_space_kb=$(df "$PAYRAM_HOME" 2>/dev/null | awk 'NR==2 {print $4}' || echo "0")
+    
+    if [[ $available_space_kb -lt $required_space_kb ]]; then
+      return 1  # Insufficient space
+    else
+      return 0  # Sufficient space
+    fi
+  else
+    return 0  # Can't check, assume OK
+  fi
+}
+
 # Enhanced database configuration with better UX
 configure_database() {
   show_progress 8 10 "Configuring database connection..."
@@ -1736,7 +1756,7 @@ validate_upgrade_readiness() {
   
   # Check 4: Disk space
   print_color "yellow" "💾 4/7 Checking disk space..."
-  if check_disk_space_requirements >/dev/null 2>&1; then
+  if check_disk_space_requirements_silent; then
     print_color "green" "   ✅ Sufficient disk space available"
     ((checks_passed++))
   else
@@ -2207,12 +2227,15 @@ CURL INSTALLATION:
     # Recommended syntax (most reliable):
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --help
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --testnet
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --update
     
     # Alternative syntax (arguments inside quotes):
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh) --help"
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh) --update"
     
     # Incorrect syntax (will fail):
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh)" --help
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh)" --update
 
 SUPPORTED SYSTEMS:
     • Ubuntu, Debian, Linux Mint

@@ -87,13 +87,13 @@
 
 ### **✅ Syntax Validation**
 ```bash
-$ bash -n script.sh
+$ bash -n setup_payram.sh
 # ✅ No syntax errors detected
 ```
 
 ### **✅ Help System**
 ```bash
-$ ./script.sh --help
+$ ./setup_payram.sh --help
 # ✅ Displays comprehensive help with examples and supported systems
 ```
 

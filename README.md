@@ -3,7 +3,7 @@
 🚀 **One-Line Setup** - Copy, paste, and run:
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
 ```
 
 ## 💎 What is PayRam?
@@ -24,21 +24,21 @@ PayRam is a **self-hosted cryptocurrency payment gateway** that enables business
 
 ### Option 1: Direct Install (Recommended)
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh)"
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
 ```
 
 ### Option 2: Download and Run
 ```bash
-curl -O https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh
-chmod +x script.sh
-sudo ./script.sh
+curl -O https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh
+chmod +x setup_payram.sh
+sudo ./setup_payram.sh
 ```
 
 ### Option 3: Clone Repository
 ```bash
 git clone https://github.com/PayRam/payram-scripts.git
 cd payram-scripts
-sudo ./script.sh
+sudo ./setup_payram.sh
 ```
 
 ## 🛠️ Advanced Usage
@@ -47,32 +47,32 @@ sudo ./script.sh
 
 ```bash
 # Fresh installation (default)
-sudo ./script.sh
+sudo ./setup_payram.sh
 
 # Update existing installation
-sudo ./script.sh --update
+sudo ./setup_payram.sh --update
 
 # Testnet deployment
-sudo ./script.sh --testnet
+sudo ./setup_payram.sh --testnet
 
 # Specific Docker image tag
-sudo ./script.sh --tag=latest
+sudo ./setup_payram.sh --tag=latest
 
 # Complete reset (removes all data)
-sudo ./script.sh --reset
+sudo ./setup_payram.sh --reset
 
 # Help and usage
-sudo ./script.sh --help
+sudo ./setup_payram.sh --help
 ```
 
 ### Environment Variables
 
 ```bash
 # Specify Docker image tag
-PAYRAM_TAG=latest sudo ./script.sh
+PAYRAM_TAG=latest sudo ./setup_payram.sh
 
 # Skip interactive prompts (use defaults)
-PAYRAM_AUTO=true sudo ./script.sh
+PAYRAM_AUTO=true sudo ./setup_payram.sh
 ```
 
 ## 📋 Requirements
@@ -143,7 +143,7 @@ The script automatically installs:
 
 **Permission Denied**: Make sure to run with `sudo`
 ```bash
-sudo ./script.sh
+sudo ./setup_payram.sh
 ```
 
 **Docker Not Found**: Script will install Docker automatically
