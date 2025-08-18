@@ -406,9 +406,9 @@ get_postgresql_client_package() {
   case "$OS_FAMILY" in
     debian) echo "postgresql-client" ;;
     rhel|fedora) echo "postgresql" ;;
-    arch)   echo "postgresql" ;;
+    arch) echo "postgresql" ;;
     alpine) echo "postgresql-client" ;;
-    macos)  echo "postgresql" ;;
+    macos) echo "postgresql" ;;
     *) echo "postgresql-client" ;;
   esac
 }
@@ -2370,17 +2370,17 @@ EXAMPLES:
 
 CURL INSTALLATION:
     # Recommended syntax (most reliable):
-    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --help
-    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --testnet
-    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh | bash -s -- --update
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --help
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --testnet
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --update
     
     # Alternative syntax (arguments inside quotes):
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh) --help"
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh) --update"
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --help"
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --update"
     
     # Incorrect syntax (will fail):
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh)" --help
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/script.sh)" --update
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" --help
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" --update
 
 SUPPORTED SYSTEMS:
     • Ubuntu, Debian, Linux Mint
