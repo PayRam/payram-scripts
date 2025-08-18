@@ -30,13 +30,13 @@
 
 ## 💎 What is PayRam?
 
-PayRam is a **self-hosted cryptocurrency payment gateway** that enables businesses to accept crypto payments directly - **no middleman, no fees, complete control**. Perfect for e-commerce, APIs, subscriptions, and any business wanting to embrace the future of payments.
+PayRam is a **self-hosted cryptocurrency payment gateway** that enables businesses to accept crypto payments directly - **no middleman, no charge back, complete control**. Perfect for e-commerce, APIs, subscriptions, and any business wanting to embrace the future of payments.
 
 ## ✨ Key Features
 
 - 🏛️ **Universal OS Support**: Ubuntu, Debian, CentOS, RHEL, Fedora, Arch Linux, Alpine, macOS
 - 🐳 **Docker-Based**: Containerized deployment with automatic dependency management
-- 🔐 **Security First**: AES-256 encryption, secure credential storage, SSL/TLS support
+- 🔐 **Security First**: Keys not stored on server for fund collection, AES-256 encryption, secure credential storage, SSL/TLS support
 - 🌐 **Let's Encrypt Integration**: Automatic SSL certificate management
 - 📊 **PostgreSQL Support**: External database integration with connection validation
 - 🎨 **Enhanced UX**: Beautiful ASCII art banners and guided setup experience
