@@ -6,6 +6,28 @@
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
 ```
 
+💡 **One-Line with Arguments** - Add `bash` followed by options:
+
+```bash
+# Fresh installation (default)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
+
+# Update existing installation
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
+
+# Complete reset (removes all data)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --reset
+
+# Testnet deployment
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --testnet
+
+# Specific Docker image tag
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --tag=latest
+
+# Help and usage
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --help
+```
+
 ## 💎 What is PayRam?
 
 PayRam is a **self-hosted cryptocurrency payment gateway** that enables businesses to accept crypto payments directly - **no middleman, no fees, complete control**. Perfect for e-commerce, APIs, subscriptions, and any business wanting to embrace the future of payments.
@@ -27,14 +49,20 @@ PayRam is a **self-hosted cryptocurrency payment gateway** that enables business
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
 ```
 
-### Option 2: Download and Run
+### Option 2: One-Line with Arguments
+```bash
+# Add 'bash' followed by arguments for advanced options
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
+```
+
+### Option 3: Download and Run
 ```bash
 curl -O https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh
 chmod +x setup_payram.sh
 sudo ./setup_payram.sh
 ```
 
-### Option 3: Clone Repository
+### Option 4: Clone Repository
 ```bash
 git clone https://github.com/PayRam/payram-scripts.git
 cd payram-scripts
@@ -45,6 +73,7 @@ sudo ./setup_payram.sh
 
 ### Command Line Options
 
+#### Local Script Execution:
 ```bash
 # Fresh installation (default)
 sudo ./setup_payram.sh
@@ -65,6 +94,24 @@ sudo ./setup_payram.sh --reset
 sudo ./setup_payram.sh --help
 ```
 
+#### One-Line Remote Execution:
+```bash
+# Fresh installation (default)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
+
+# Update existing installation
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
+
+# Testnet deployment  
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --testnet
+
+# Specific Docker image tag
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --tag=latest
+
+# Complete reset (removes all data)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --reset
+```
+
 ### Environment Variables
 
 ```bash
@@ -80,7 +127,7 @@ PAYRAM_AUTO=true sudo ./setup_payram.sh
 ### System Requirements
 - **OS**: Ubuntu 18.04+, Debian 9+, CentOS 7+, RHEL 7+, Fedora 30+, Arch Linux, Alpine Linux, macOS 10.14+
 - **RAM**: 2GB minimum, 4GB recommended
-- **Storage**: 10GB available space
+- **Storage**: 5GB minimum, 10GB recommended
 - **Network**: Internet connection for Docker images and dependencies
 
 ### Automatic Dependencies
@@ -141,6 +188,15 @@ The script automatically installs:
 
 ### Common Issues
 
+**One-Line Command Arguments**: To pass arguments to the one-liner, add `bash` followed by options:
+```bash
+# Correct syntax for one-liner with arguments
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --reset
+
+# Incorrect (won't work)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --reset"
+```
+
 **Permission Denied**: Make sure to run with `sudo`
 ```bash
 sudo ./setup_payram.sh
@@ -167,11 +223,6 @@ dig +short yourdomain.com
 - **Application Logs**: `/home/$USER/.payram-core/logs/`
 - **Docker Logs**: `docker logs payram-core`
 
-## 📖 Documentation
-
-- **API Documentation**: Available at `https://yourdomain.com/docs` after setup
-- **Admin Panel**: Access at `https://yourdomain.com/admin`
-- **Configuration Guide**: See `/home/$USER/.payraminfo/README.txt` after installation
 
 ## 🤝 Contributing
 
@@ -188,7 +239,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🆘 Support
 
 - **GitHub Issues**: [Report bugs and request features](https://github.com/PayRam/payram-scripts/issues)
-- **Documentation**: [Full setup guide](https://docs.payram.org)
+- **Documentation**: [Full setup guide](https://docs.payram.com)
 - **Community**: [Discord server](https://discord.gg/payram)
 
 ---

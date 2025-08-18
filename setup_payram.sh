@@ -655,8 +655,10 @@ get_payram_directories() {
 
 # Check disk space requirements with user choice
 check_disk_space_requirements() {
-  local required_space_gb=10
-  local required_space_kb=$((required_space_gb * 1024 * 1024))
+  local minimum_space_gb=5
+  local recommended_space_gb=10
+  local minimum_space_kb=$((minimum_space_gb * 1024 * 1024))
+  local recommended_space_kb=$((recommended_space_gb * 1024 * 1024))
   
   log "INFO" "Checking disk space requirements..."
   
@@ -676,18 +678,18 @@ check_disk_space_requirements() {
     
     echo
     print_color "blue" "💾 Disk Space Requirements:"
-    print_color "gray" "  • Required: ${required_space_gb}GB minimum"
+    print_color "gray" "  • Minimum: ${minimum_space_gb}GB required"
+    print_color "gray" "  • Recommended: ${recommended_space_gb}GB for optimal performance"
     print_color "gray" "  • Available: ${available_space_gb}GB"
     
-    if [[ $available_space_kb -lt $required_space_kb ]]; then
+    if [[ $available_space_kb -lt $minimum_space_kb ]]; then
       print_color "red" "  ❌ Insufficient disk space!"
       echo
-      print_color "yellow" "⚠️  WARNING: You have ${available_space_gb}GB available, but ${required_space_gb}GB is recommended."
+      print_color "red" "❌ CRITICAL: You have ${available_space_gb}GB available, but ${minimum_space_gb}GB minimum is required."
       print_color "yellow" "   PayRam requires space for:"
-      print_color "gray" "   • Docker images and containers (~5GB)"
-      print_color "gray" "   • Database storage (~2GB)"
+      print_color "gray" "   • Docker images and containers (~3GB)"
+      print_color "gray" "   • Database storage (~1GB)"
       print_color "gray" "   • Logs and temporary files (~1GB)"
-      print_color "gray" "   • Growth buffer (~2GB)"
       echo
       print_color "blue" "💡 Note: You can increase disk space after installation if needed."
       echo
@@ -697,7 +699,7 @@ check_disk_space_requirements() {
         read -r response
         case $response in
           [Yy]|[Yy][Ee][Ss])
-            print_color "yellow" "⚠️  Proceeding with limited disk space..."
+            print_color "yellow" "⚠️  Proceeding with insufficient disk space - installation may fail..."
             echo
             return 0
             ;;
@@ -717,12 +719,25 @@ check_disk_space_requirements() {
             ;;
         esac
       done
+    elif [[ $available_space_kb -lt $recommended_space_kb ]]; then
+      print_color "yellow" "  ⚠️  Limited disk space available"
+      echo
+      print_color "yellow" "⚠️  WARNING: You have ${available_space_gb}GB available. ${recommended_space_gb}GB is recommended for optimal performance."
+      print_color "yellow" "   With ${available_space_gb}GB you may experience:"
+      print_color "gray" "   • Slower performance during heavy usage"
+      print_color "gray" "   • Limited log retention"
+      print_color "gray" "   • Potential space issues with large transactions"
+      echo
+      print_color "blue" "💡 Note: Installation will proceed but monitor disk usage closely."
+      print_color "yellow" "⚠️  Continuing with limited disk space..."
+      echo
+      return 0
     else
       print_color "green" "  ✅ Sufficient disk space available"
     fi
     echo
   else
-    print_color "yellow" "⚠️  Could not check disk space. Ensure ${required_space_gb}GB available"
+    print_color "yellow" "⚠️  Could not check disk space. Ensure ${minimum_space_gb}GB minimum (${recommended_space_gb}GB recommended) available"
     echo
   fi
   
@@ -731,8 +746,8 @@ check_disk_space_requirements() {
 
 # Non-interactive disk space check for validation purposes
 check_disk_space_requirements_silent() {
-  local required_space_gb=10
-  local required_space_kb=$((required_space_gb * 1024 * 1024))
+  local minimum_space_gb=5
+  local minimum_space_kb=$((minimum_space_gb * 1024 * 1024))
   
   # Get available space in KB for the target directory
   local available_space_kb
@@ -747,7 +762,7 @@ check_disk_space_requirements_silent() {
       available_space_kb=0
     fi
     
-    if [[ $available_space_kb -lt $required_space_kb ]]; then
+    if [[ $available_space_kb -lt $minimum_space_kb ]]; then
       return 1  # Insufficient space
     else
       return 0  # Sufficient space
@@ -2514,7 +2529,7 @@ main() {
   print_color "blue" "💾 Persistent Storage:"
   print_color "gray" "  • Config & AES keys: $PAYRAM_INFO_DIR"
   print_color "gray" "  • Application data: $PAYRAM_CORE_DIR"
-  print_color "gray" "  • Required space: 10GB minimum"
+  print_color "gray" "  • Required space: 5GB minimum, 10GB recommended"
   print_color "gray" "  • Backup critical: AES key + database data"
   echo
   
