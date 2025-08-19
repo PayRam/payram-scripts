@@ -2049,12 +2049,16 @@ deploy_payram_container_update() {
 
 # Environment reset
 reset_payram_environment() {
-  print_color "red" "🚨 CRITICAL WARNING: This will permanently delete:"
-  print_color "yellow" "  💀 PayRam container and ALL persistent data"
-  print_color "yellow" "  🔑 AES encryption keys (hot wallet access lost forever)"
-  print_color "yellow" "  🗄️  Database data (transaction history, configurations)"
-  print_color "yellow" "  📄 Configuration files and SSL certificates"
-  print_color "yellow" "  🐳 All PayRam Docker images"
+  print_color "red" "🚨 CRITICAL WARNING: Complete PayRam Environment Reset"
+  echo
+  print_color "yellow" "This will permanently delete ALL PayRam data including:"
+  print_color "red" "  💀 PayRam container and ALL persistent data"
+  print_color "red" "  🔑 AES encryption keys (hot wallet access lost forever)"
+  print_color "red" "  🗄️  Database data (transaction history, configurations)"
+  print_color "red" "  📄 Configuration files and custom SSL certificates"
+  print_color "red" "  🔒 Let's Encrypt certificates and renewal settings"
+  print_color "red" "  🐳 All PayRam Docker images"
+  print_color "red" "  📋 Cron jobs and renewal tasks"
   echo
   
   print_color "red" "🔥 Hot Wallet Impact:"
@@ -2063,30 +2067,197 @@ reset_payram_environment() {
   print_color "red" "  • This action CANNOT be undone - backup first!"
   echo
   
-  print_color "yellow" "💾 Last Chance Backup Commands:"
-  print_color "gray" "  tar -czf payram-final-backup.tar.gz ~/.payraminfo ~/.payram-core"
-  print_color "gray" "  docker exec payram pg_dump -U payram payram > final-db-backup.sql"
+  # Get directories to show what will be deleted
+  get_payram_directories
+  
+  print_color "blue" "📋 DETAILED REMOVAL PREVIEW:"
+  echo
+  print_color "yellow" "� Docker Components:"
+  local container_count=$(docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | wc -l)
+  local image_count=$(docker images --filter=reference='buddhasource/payram-core' -q 2>/dev/null | wc -l)
+  print_color "gray" "  • PayRam container: $([ $container_count -gt 0 ] && echo "✅ Found (will remove)" || echo "❌ Not found")"
+  print_color "gray" "  • PayRam images: $([ $image_count -gt 0 ] && echo "✅ Found $image_count image(s) (will remove)" || echo "❌ Not found")"
+  echo
+  
+  print_color "yellow" "📁 File System Components:"
+  print_color "gray" "  • Config directory: $PAYRAM_INFO_DIR"
+  [[ -d "$PAYRAM_INFO_DIR" ]] && print_color "gray" "    └─ Status: ✅ Exists ($(du -sh "$PAYRAM_INFO_DIR" 2>/dev/null | cut -f1) - will remove)" || print_color "gray" "    └─ Status: ❌ Not found"
+  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    [[ -d "$PAYRAM_INFO_DIR/aes" ]] && print_color "gray" "    └─ AES keys: ✅ Found (will remove)" || print_color "gray" "    └─ AES keys: ❌ Not found"
+    [[ -f "$PAYRAM_INFO_DIR/config.env" ]] && print_color "gray" "    └─ Config file: ✅ Found (will remove)" || print_color "gray" "    └─ Config file: ❌ Not found"
+  fi
+  echo
+  
+  print_color "gray" "  • Data directory: $PAYRAM_CORE_DIR"
+  [[ -d "$PAYRAM_CORE_DIR" ]] && print_color "gray" "    └─ Status: ✅ Exists ($(du -sh "$PAYRAM_CORE_DIR" 2>/dev/null | cut -f1) - will remove)" || print_color "gray" "    └─ Status: ❌ Not found"
+  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+    [[ -d "$PAYRAM_CORE_DIR/db" ]] && print_color "gray" "    └─ Database: ✅ Found (will remove)" || print_color "gray" "    └─ Database: ❌ Not found"
+    [[ -d "$PAYRAM_CORE_DIR/logs" ]] && print_color "gray" "    └─ Logs: ✅ Found (will remove)" || print_color "gray" "    └─ Logs: ❌ Not found"
+  fi
+  echo
+  
+  print_color "yellow" "🔒 SSL/TLS Components:"
+  print_color "gray" "  • Let's Encrypt certificates: /etc/letsencrypt/"
+  if [[ -d "/etc/letsencrypt" ]] && [[ "$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)" -gt 0 ]]; then
+    local cert_count=$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)
+    print_color "gray" "    └─ Status: ✅ Found $cert_count certificate files (will remove)"
+    find /etc/letsencrypt/live -type d -name "*.* " 2>/dev/null | head -3 | while read domain_dir; do
+      local domain=$(basename "$domain_dir")
+      print_color "gray" "    └─ Domain: $domain"
+    done
+  else
+    print_color "gray" "    └─ Status: ❌ No certificates found"
+  fi
+  echo
+  
+  print_color "gray" "  • Renewal cron jobs: /etc/cron.d/payram-*"
+  local cron_count=$(find /etc/cron.d -name "payram-*" 2>/dev/null | wc -l)
+  [[ $cron_count -gt 0 ]] && print_color "gray" "    └─ Status: ✅ Found $cron_count cron job(s) (will remove)" || print_color "gray" "    └─ Status: ❌ Not found"
+  echo
+  
+  print_color "yellow" "�💾 CRITICAL: Last Chance Backup Commands:"
+  print_color "gray" "  # Complete backup (recommended)"
+  print_color "gray" "  tar -czf payram-complete-backup-$(date +%Y%m%d-%H%M%S).tar.gz \\"
+  print_color "gray" "      ~/.payraminfo ~/.payram-core /etc/letsencrypt 2>/dev/null"
+  print_color "gray" "  "
+  print_color "gray" "  # Database only backup"
+  print_color "gray" "  docker exec payram pg_dump -U payram payram > payram-db-backup-$(date +%Y%m%d-%H%M%S).sql"
+  echo
+  
+  print_color "red" "⚠️  This is your FINAL WARNING - ALL DATA WILL BE PERMANENTLY LOST!"
   echo
   
   read -p "Are you absolutely sure? Type 'DELETE' to confirm: " confirmation
   if [[ "$confirmation" != "DELETE" ]]; then
-    log "INFO" "Reset cancelled"
+    log "INFO" "Reset cancelled by user"
     return 0
   fi
+  echo
   
-  get_payram_directories
+  print_color "red" "🔥 Starting complete PayRam environment removal..."
+  echo
   
-  log "INFO" "Stopping and removing PayRam container..."
-  docker stop payram &>/dev/null || true
-  docker rm -v payram &>/dev/null || true
+  # Stop and remove container
+  log "INFO" "Step 1/6: Stopping and removing PayRam container..."
+  if docker ps --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "payram"; then
+    docker stop payram &>/dev/null || true
+    print_color "green" "  ✅ Container stopped"
+  fi
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "payram"; then
+    docker rm -v payram &>/dev/null || true
+    print_color "green" "  ✅ Container removed"
+  fi
   
-  log "INFO" "Removing PayRam Docker images..."
-  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+  # Remove Docker images
+  log "INFO" "Step 2/6: Removing PayRam Docker images..."
+  {
+    imgs="$(docker images --filter=reference='buddhasource/payram-core' -q)"
+    if [[ -n "$imgs" ]]; then
+      # shellcheck disable=SC2086
+      docker rmi -f $imgs &>/dev/null
+      print_color "green" "  ✅ Docker images removed"
+    else
+      print_color "yellow" "  ⚠️  No PayRam images found"
+    fi
+  } || print_color "yellow" "  ⚠️  Some images may still be in use"
   
-  log "INFO" "Removing PayRam data and configuration..."
-  rm -rf "$PAYRAM_CORE_DIR" "$PAYRAM_INFO_DIR"
+  # Remove PayRam data directories
+  log "INFO" "Step 3/6: Removing PayRam data directories..."
+  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+    rm -rf "$PAYRAM_CORE_DIR"
+    print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
+  else
+    print_color "yellow" "  ⚠️  Data directory not found: $PAYRAM_CORE_DIR"
+  fi
   
-  log "SUCCESS" "PayRam environment reset complete"
+  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    rm -rf "$PAYRAM_INFO_DIR"
+    print_color "green" "  ✅ Config directory removed: $PAYRAM_INFO_DIR"
+  else
+    print_color "yellow" "  ⚠️  Config directory not found: $PAYRAM_INFO_DIR"
+  fi
+  
+  # Remove Let's Encrypt certificates
+  log "INFO" "Step 4/6: Removing Let's Encrypt certificates..."
+  if [[ -d "/etc/letsencrypt" ]] && [[ "$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)" -gt 0 ]]; then
+    # Only remove PayRam-related certificates, not all Let's Encrypt certs
+    # Check if any certificates were created during PayRam setup
+    local removed_certs=false
+    
+    # Look for certificates that might be PayRam-related (created recently or in common patterns)
+    if [[ -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" ]]; then
+      rm -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" &>/dev/null || true
+      removed_certs=true
+    fi
+    
+    # Remove renewal hooks
+    find /etc/letsencrypt/renewal-hooks -name "*payram*" -delete &>/dev/null || true
+    
+    if [[ "$removed_certs" == true ]]; then
+      print_color "green" "  ✅ PayRam-related certificate hooks removed"
+      print_color "yellow" "  ⚠️  Manual removal may be needed for domain certificates"
+      print_color "gray" "     Use: certbot delete --cert-name <domain-name>"
+    else
+      print_color "yellow" "  ⚠️  No PayRam-specific certificates found"
+      print_color "blue" "     To remove all certificates manually: certbot delete --cert-name <domain>"
+    fi
+  else
+    print_color "yellow" "  ⚠️  No Let's Encrypt certificates found"
+  fi
+  
+  # Remove cron jobs
+  log "INFO" "Step 5/6: Removing PayRam cron jobs..."
+  local removed_cron=false
+  for cron_file in /etc/cron.d/payram-*; do
+    if [[ -f "$cron_file" ]]; then
+      rm -f "$cron_file" &>/dev/null || true
+      print_color "green" "  ✅ Removed cron job: $(basename "$cron_file")"
+      removed_cron=true
+    fi
+  done
+  
+  if [[ "$removed_cron" == false ]]; then
+    print_color "yellow" "  ⚠️  No PayRam cron jobs found"
+  fi
+  
+  # Final cleanup and summary
+  log "INFO" "Step 6/6: Final cleanup and verification..."
+  
+  # Verify removal
+  local cleanup_success=true
+  
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "payram"; then
+    print_color "red" "  ❌ Container still exists"
+    cleanup_success=false
+  fi
+  
+  if [[ -d "$PAYRAM_CORE_DIR" ]] || [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    print_color "red" "  ❌ Some directories still exist"
+    cleanup_success=false
+  fi
+  
+  echo
+  if [[ "$cleanup_success" == true ]]; then
+    print_color "green" "🎉 PayRam environment reset completed successfully!"
+    print_color "green" "✅ All PayRam components have been removed"
+    echo
+    print_color "blue" "📋 Summary of actions performed:"
+    print_color "gray" "  • Docker containers and images removed"
+    print_color "gray" "  • Configuration and data directories deleted"
+    print_color "gray" "  • AES encryption keys permanently deleted"
+    print_color "gray" "  • Certificate renewal hooks removed"
+    print_color "gray" "  • Cron jobs cleaned up"
+    echo
+    print_color "yellow" "💡 To reinstall PayRam, run:"
+    print_color "gray" "   sudo ./setup_payram.sh"
+  else
+    print_color "red" "❌ Reset completed with some issues"
+    print_color "yellow" "Some components may need manual removal"
+    print_color "gray" "Check the messages above for details"
+  fi
+  
+  echo
+  log "SUCCESS" "PayRam environment reset process complete"
 }
 
 # Function to detect public IP address with robust error handling
