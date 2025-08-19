@@ -2125,7 +2125,7 @@ reset_payram_environment() {
   [[ $cron_count -gt 0 ]] && print_color "gray" "    └─ Status: ✅ Found $cron_count cron job(s) (will remove)" || print_color "gray" "    └─ Status: ❌ Not found"
   echo
   
-  print_color "yellow" "�💾 CRITICAL: Last Chance Backup Commands:"
+  print_color "yellow" "🚨💾 CRITICAL: Last Chance Backup Commands:"
   print_color "gray" "  # Complete backup (recommended)"
   print_color "gray" "  tar -czf payram-complete-backup-$(date +%Y%m%d-%H%M%S).tar.gz \\"
   print_color "gray" "      ~/.payraminfo ~/.payram-core /etc/letsencrypt 2>/dev/null"
