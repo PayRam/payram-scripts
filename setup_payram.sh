@@ -2111,10 +2111,10 @@ reset_payram_environment() {
   if [[ -d "/etc/letsencrypt" ]] && [[ "$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)" -gt 0 ]]; then
     local cert_count=$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)
     print_color "gray" "    └─ Status: ✅ Found $cert_count certificate files (will remove)"
-    find /etc/letsencrypt/live -type d -name "*.* " 2>/dev/null | head -3 | while read domain_dir; do
-      local domain=$(basename "$domain_dir")
+    while IFS= read -r domain_dir; do
+      domain="$(basename "$domain_dir")"
       print_color "gray" "    └─ Domain: $domain"
-    done
+    done < <(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d -name "*.*" 2>/dev/null | head -3)
   else
     print_color "gray" "    └─ Status: ❌ No certificates found"
   fi
