@@ -13,6 +13,15 @@ declare -g OS_FAMILY=""
 declare -g OS_DISTRO=""
 declare -g OS_VERSION=""
 declare -g PACKAGE_MANAGER=""
+
+# Initialize original user information early
+if [[ -n "${SUDO_USER:-}" ]]; then
+  ORIGINAL_USER="$SUDO_USER"
+  ORIGINAL_HOME=$(eval echo "~$SUDO_USER")
+else
+  ORIGINAL_USER="$(whoami)"
+  ORIGINAL_HOME="$HOME"
+fi
 declare -g SERVICE_MANAGER=""
 declare -g INSTALL_METHOD=""
 declare -g SCRIPT_DIR="${PWD}"
@@ -79,11 +88,11 @@ check_privileges() {
     exit 1
   fi
   
-  # Store original user info
-  if [[ -n "${SUDO_USER:-}" ]]; then
+  # Update user info if running as root via sudo
+  if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
     ORIGINAL_USER="$SUDO_USER"
     ORIGINAL_HOME=$(eval echo "~$SUDO_USER")
-  else
+  elif [[ "$(id -u)" -eq 0 ]]; then
     ORIGINAL_USER="root"
     ORIGINAL_HOME="/root"
   fi
@@ -1925,6 +1934,13 @@ update_payram_container() {
   
   read -p "Press [Enter] to proceed with update..."
   
+  # Validate Docker tag BEFORE stopping container
+  if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
+    log "ERROR" "Cannot proceed with invalid Docker tag: ${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+    log "ERROR" "Update cancelled - existing container remains running"
+    return 1
+  fi
+  
   # Stop existing container
   if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
     log "INFO" "Stopping existing PayRam container..."
@@ -1942,12 +1958,6 @@ deploy_payram_container_update() {
   # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
     generate_aes_key
-  fi
-  
-  # Validate Docker tag
-  if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
-    log "ERROR" "Cannot proceed with invalid Docker tag"
-    return 1
   fi
   
   # Check for existing container
@@ -2544,10 +2554,12 @@ CURL INSTALLATION:
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --help
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --testnet
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --update
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --update --tag=v1.5.0
     
     # Alternative syntax (arguments inside quotes):
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --help"
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --update"
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --update --tag=v1.5.0"
     
     # Incorrect syntax (will fail):
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" --help
@@ -2916,8 +2928,8 @@ main() {
     echo
     print_color "blue" "🛠️  Useful Commands:"
     print_color "gray" "  • View logs: docker logs payram"
-    print_color "gray" "  • Update: $0 --update"
-    print_color "gray" "  • Reset: $0 --reset"
+    print_color "gray" "  • Update: ./setup_payram.sh --update"
+    print_color "gray" "  • Reset: ./setup_payram.sh --reset"
     echo
   else
     log "ERROR" "PayRam setup failed"
