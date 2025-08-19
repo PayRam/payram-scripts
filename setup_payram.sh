@@ -2082,7 +2082,7 @@ reset_payram_environment() {
   
   print_color "blue" "📋 DETAILED REMOVAL PREVIEW:"
   echo
-  print_color "yellow" "� Docker Components:"
+  print_color "yellow" "🐳 Docker Components:"
   local container_count=$(docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | wc -l)
   local image_count=$(docker images --filter=reference='buddhasource/payram-core' -q 2>/dev/null | wc -l)
   print_color "gray" "  • PayRam container: $([ $container_count -gt 0 ] && echo "✅ Found (will remove)" || echo "❌ Not found")"
