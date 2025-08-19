@@ -13,6 +13,15 @@ declare -g OS_FAMILY=""
 declare -g OS_DISTRO=""
 declare -g OS_VERSION=""
 declare -g PACKAGE_MANAGER=""
+
+# Initialize original user information early
+if [[ -n "${SUDO_USER:-}" ]]; then
+  ORIGINAL_USER="$SUDO_USER"
+  ORIGINAL_HOME=$(eval echo "~$SUDO_USER")
+else
+  ORIGINAL_USER="$(whoami)"
+  ORIGINAL_HOME="$HOME"
+fi
 declare -g SERVICE_MANAGER=""
 declare -g INSTALL_METHOD=""
 declare -g SCRIPT_DIR="${PWD}"
@@ -79,11 +88,11 @@ check_privileges() {
     exit 1
   fi
   
-  # Store original user info
-  if [[ -n "${SUDO_USER:-}" ]]; then
+  # Update user info if running as root via sudo
+  if [[ "$(id -u)" -eq 0 && -n "${SUDO_USER:-}" ]]; then
     ORIGINAL_USER="$SUDO_USER"
     ORIGINAL_HOME=$(eval echo "~$SUDO_USER")
-  else
+  elif [[ "$(id -u)" -eq 0 ]]; then
     ORIGINAL_USER="root"
     ORIGINAL_HOME="/root"
   fi
@@ -1925,6 +1934,13 @@ update_payram_container() {
   
   read -p "Press [Enter] to proceed with update..."
   
+  # Validate Docker tag BEFORE stopping container
+  if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
+    log "ERROR" "Cannot proceed with invalid Docker tag: ${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+    log "ERROR" "Update cancelled - existing container remains running"
+    return 1
+  fi
+  
   # Stop existing container
   if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
     log "INFO" "Stopping existing PayRam container..."
@@ -1942,12 +1958,6 @@ deploy_payram_container_update() {
   # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
     generate_aes_key
-  fi
-  
-  # Validate Docker tag
-  if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
-    log "ERROR" "Cannot proceed with invalid Docker tag"
-    return 1
   fi
   
   # Check for existing container
@@ -2049,12 +2059,16 @@ deploy_payram_container_update() {
 
 # Environment reset
 reset_payram_environment() {
-  print_color "red" "🚨 CRITICAL WARNING: This will permanently delete:"
-  print_color "yellow" "  💀 PayRam container and ALL persistent data"
-  print_color "yellow" "  🔑 AES encryption keys (hot wallet access lost forever)"
-  print_color "yellow" "  🗄️  Database data (transaction history, configurations)"
-  print_color "yellow" "  📄 Configuration files and SSL certificates"
-  print_color "yellow" "  🐳 All PayRam Docker images"
+  print_color "red" "🚨 CRITICAL WARNING: Complete PayRam Environment Reset"
+  echo
+  print_color "yellow" "This will permanently delete ALL PayRam data including:"
+  print_color "red" "  💀 PayRam container and ALL persistent data"
+  print_color "red" "  🔑 AES encryption keys (hot wallet access lost forever)"
+  print_color "red" "  🗄️  Database data (transaction history, configurations)"
+  print_color "red" "  📄 Configuration files and custom SSL certificates"
+  print_color "red" "  🔒 Let's Encrypt certificates and renewal settings"
+  print_color "red" "  🐳 All PayRam Docker images"
+  print_color "red" "  📋 Cron jobs and renewal tasks"
   echo
   
   print_color "red" "🔥 Hot Wallet Impact:"
@@ -2063,30 +2077,197 @@ reset_payram_environment() {
   print_color "red" "  • This action CANNOT be undone - backup first!"
   echo
   
-  print_color "yellow" "💾 Last Chance Backup Commands:"
-  print_color "gray" "  tar -czf payram-final-backup.tar.gz ~/.payraminfo ~/.payram-core"
-  print_color "gray" "  docker exec payram pg_dump -U payram payram > final-db-backup.sql"
+  # Get directories to show what will be deleted
+  get_payram_directories
+  
+  print_color "blue" "📋 DETAILED REMOVAL PREVIEW:"
+  echo
+  print_color "yellow" "🐳 Docker Components:"
+  local container_count=$(docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | wc -l)
+  local image_count=$(docker images --filter=reference='buddhasource/payram-core' -q 2>/dev/null | wc -l)
+  print_color "gray" "  • PayRam container: $([ $container_count -gt 0 ] && echo "✅ Found (will remove)" || echo "❌ Not found")"
+  print_color "gray" "  • PayRam images: $([ $image_count -gt 0 ] && echo "✅ Found $image_count image(s) (will remove)" || echo "❌ Not found")"
+  echo
+  
+  print_color "yellow" "📁 File System Components:"
+  print_color "gray" "  • Config directory: $PAYRAM_INFO_DIR"
+  [[ -d "$PAYRAM_INFO_DIR" ]] && print_color "gray" "    └─ Status: ✅ Exists ($(du -sh "$PAYRAM_INFO_DIR" 2>/dev/null | cut -f1) - will remove)" || print_color "gray" "    └─ Status: ❌ Not found"
+  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    [[ -d "$PAYRAM_INFO_DIR/aes" ]] && print_color "gray" "    └─ AES keys: ✅ Found (will remove)" || print_color "gray" "    └─ AES keys: ❌ Not found"
+    [[ -f "$PAYRAM_INFO_DIR/config.env" ]] && print_color "gray" "    └─ Config file: ✅ Found (will remove)" || print_color "gray" "    └─ Config file: ❌ Not found"
+  fi
+  echo
+  
+  print_color "gray" "  • Data directory: $PAYRAM_CORE_DIR"
+  [[ -d "$PAYRAM_CORE_DIR" ]] && print_color "gray" "    └─ Status: ✅ Exists ($(du -sh "$PAYRAM_CORE_DIR" 2>/dev/null | cut -f1) - will remove)" || print_color "gray" "    └─ Status: ❌ Not found"
+  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+    [[ -d "$PAYRAM_CORE_DIR/db" ]] && print_color "gray" "    └─ Database: ✅ Found (will remove)" || print_color "gray" "    └─ Database: ❌ Not found"
+    [[ -d "$PAYRAM_CORE_DIR/logs" ]] && print_color "gray" "    └─ Logs: ✅ Found (will remove)" || print_color "gray" "    └─ Logs: ❌ Not found"
+  fi
+  echo
+  
+  print_color "yellow" "🔒 SSL/TLS Components:"
+  print_color "gray" "  • Let's Encrypt certificates: /etc/letsencrypt/"
+  if [[ -d "/etc/letsencrypt" ]] && [[ "$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)" -gt 0 ]]; then
+    local cert_count=$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)
+    print_color "gray" "    └─ Status: ✅ Found $cert_count certificate files (will remove)"
+    while IFS= read -r domain_dir; do
+      domain="$(basename "$domain_dir")"
+      print_color "gray" "    └─ Domain: $domain"
+    done < <(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d -name "*.*" 2>/dev/null | head -3)
+  else
+    print_color "gray" "    └─ Status: ❌ No certificates found"
+  fi
+  echo
+  
+  print_color "gray" "  • Renewal cron jobs: /etc/cron.d/payram-*"
+  local cron_count=$(find /etc/cron.d -name "payram-*" 2>/dev/null | wc -l)
+  [[ $cron_count -gt 0 ]] && print_color "gray" "    └─ Status: ✅ Found $cron_count cron job(s) (will remove)" || print_color "gray" "    └─ Status: ❌ Not found"
+  echo
+  
+  print_color "yellow" "🚨💾 CRITICAL: Last Chance Backup Commands:"
+  print_color "gray" "  # Complete backup (recommended)"
+  print_color "gray" "  tar -czf payram-complete-backup-$(date +%Y%m%d-%H%M%S).tar.gz \\"
+  print_color "gray" "      ~/.payraminfo ~/.payram-core /etc/letsencrypt 2>/dev/null"
+  print_color "gray" "  "
+  print_color "gray" "  # Database only backup"
+  print_color "gray" "  docker exec payram pg_dump -U payram payram > payram-db-backup-$(date +%Y%m%d-%H%M%S).sql"
+  echo
+  
+  print_color "red" "⚠️  This is your FINAL WARNING - ALL DATA WILL BE PERMANENTLY LOST!"
   echo
   
   read -p "Are you absolutely sure? Type 'DELETE' to confirm: " confirmation
   if [[ "$confirmation" != "DELETE" ]]; then
-    log "INFO" "Reset cancelled"
+    log "INFO" "Reset cancelled by user"
     return 0
   fi
+  echo
   
-  get_payram_directories
+  print_color "red" "🔥 Starting complete PayRam environment removal..."
+  echo
   
-  log "INFO" "Stopping and removing PayRam container..."
-  docker stop payram &>/dev/null || true
-  docker rm -v payram &>/dev/null || true
+  # Stop and remove container
+  log "INFO" "Step 1/6: Stopping and removing PayRam container..."
+  if docker ps --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "payram"; then
+    docker stop payram &>/dev/null || true
+    print_color "green" "  ✅ Container stopped"
+  fi
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "payram"; then
+    docker rm -v payram &>/dev/null || true
+    print_color "green" "  ✅ Container removed"
+  fi
   
-  log "INFO" "Removing PayRam Docker images..."
-  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f
+  # Remove Docker images
+  log "INFO" "Step 2/6: Removing PayRam Docker images..."
+  {
+    imgs="$(docker images --filter=reference='buddhasource/payram-core' -q)"
+    if [[ -n "$imgs" ]]; then
+      # shellcheck disable=SC2086
+      docker rmi -f $imgs &>/dev/null
+      print_color "green" "  ✅ Docker images removed"
+    else
+      print_color "yellow" "  ⚠️  No PayRam images found"
+    fi
+  } || print_color "yellow" "  ⚠️  Some images may still be in use"
   
-  log "INFO" "Removing PayRam data and configuration..."
-  rm -rf "$PAYRAM_CORE_DIR" "$PAYRAM_INFO_DIR"
+  # Remove PayRam data directories
+  log "INFO" "Step 3/6: Removing PayRam data directories..."
+  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+    rm -rf "$PAYRAM_CORE_DIR"
+    print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
+  else
+    print_color "yellow" "  ⚠️  Data directory not found: $PAYRAM_CORE_DIR"
+  fi
   
-  log "SUCCESS" "PayRam environment reset complete"
+  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    rm -rf "$PAYRAM_INFO_DIR"
+    print_color "green" "  ✅ Config directory removed: $PAYRAM_INFO_DIR"
+  else
+    print_color "yellow" "  ⚠️  Config directory not found: $PAYRAM_INFO_DIR"
+  fi
+  
+  # Remove Let's Encrypt certificates
+  log "INFO" "Step 4/6: Removing Let's Encrypt certificates..."
+  if [[ -d "/etc/letsencrypt" ]] && [[ "$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)" -gt 0 ]]; then
+    # Only remove PayRam-related certificates, not all Let's Encrypt certs
+    # Check if any certificates were created during PayRam setup
+    local removed_certs=false
+    
+    # Look for certificates that might be PayRam-related (created recently or in common patterns)
+    if [[ -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" ]]; then
+      rm -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" &>/dev/null || true
+      removed_certs=true
+    fi
+    
+    # Remove renewal hooks
+    find /etc/letsencrypt/renewal-hooks -name "*payram*" -delete &>/dev/null || true
+    
+    if [[ "$removed_certs" == true ]]; then
+      print_color "green" "  ✅ PayRam-related certificate hooks removed"
+      print_color "yellow" "  ⚠️  Manual removal may be needed for domain certificates"
+      print_color "gray" "     Use: certbot delete --cert-name <domain-name>"
+    else
+      print_color "yellow" "  ⚠️  No PayRam-specific certificates found"
+      print_color "blue" "     To remove all certificates manually: certbot delete --cert-name <domain>"
+    fi
+  else
+    print_color "yellow" "  ⚠️  No Let's Encrypt certificates found"
+  fi
+  
+  # Remove cron jobs
+  log "INFO" "Step 5/6: Removing PayRam cron jobs..."
+  local removed_cron=false
+  for cron_file in /etc/cron.d/payram-*; do
+    if [[ -f "$cron_file" ]]; then
+      rm -f "$cron_file" &>/dev/null || true
+      print_color "green" "  ✅ Removed cron job: $(basename "$cron_file")"
+      removed_cron=true
+    fi
+  done
+  
+  if [[ "$removed_cron" == false ]]; then
+    print_color "yellow" "  ⚠️  No PayRam cron jobs found"
+  fi
+  
+  # Final cleanup and summary
+  log "INFO" "Step 6/6: Final cleanup and verification..."
+  
+  # Verify removal
+  local cleanup_success=true
+  
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "payram"; then
+    print_color "red" "  ❌ Container still exists"
+    cleanup_success=false
+  fi
+  
+  if [[ -d "$PAYRAM_CORE_DIR" ]] || [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    print_color "red" "  ❌ Some directories still exist"
+    cleanup_success=false
+  fi
+  
+  echo
+  if [[ "$cleanup_success" == true ]]; then
+    print_color "green" "🎉 PayRam environment reset completed successfully!"
+    print_color "green" "✅ All PayRam components have been removed"
+    echo
+    print_color "blue" "📋 Summary of actions performed:"
+    print_color "gray" "  • Docker containers and images removed"
+    print_color "gray" "  • Configuration and data directories deleted"
+    print_color "gray" "  • AES encryption keys permanently deleted"
+    print_color "gray" "  • Certificate renewal hooks removed"
+    print_color "gray" "  • Cron jobs cleaned up"
+    echo
+    print_color "yellow" "💡 To reinstall PayRam, run:"
+    print_color "gray" "   sudo ./setup_payram.sh"
+  else
+    print_color "red" "❌ Reset completed with some issues"
+    print_color "yellow" "Some components may need manual removal"
+    print_color "gray" "Check the messages above for details"
+  fi
+  
+  echo
+  log "SUCCESS" "PayRam environment reset process complete"
 }
 
 # Function to detect public IP address with robust error handling
@@ -2373,10 +2554,12 @@ CURL INSTALLATION:
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --help
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --testnet
     curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --update
+    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --update --tag=v1.5.0
     
     # Alternative syntax (arguments inside quotes):
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --help"
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --update"
+    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --update --tag=v1.5.0"
     
     # Incorrect syntax (will fail):
     bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" --help
@@ -2406,6 +2589,192 @@ init_logging() {
       echo "Warning: Could not create log file, logging to console only" >&2
     fi
   fi
+}
+
+# Check for existing PayRam installation
+check_existing_installation() {
+  log "INFO" "Checking for existing PayRam installation..."
+  
+  local container_running=false
+  local container_exists=false
+  local config_exists=false
+  local data_exists=false
+  local installation_found=false
+  
+  # Initialize directories for checking
+  get_payram_directories
+  
+  # Check for running container (only if docker is available)
+  if command -v docker >/dev/null 2>&1 && \
+     docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" 2>/dev/null | grep -q "^payram$"; then
+    container_running=true
+    installation_found=true
+  fi
+  
+  # Check for existing container (stopped)
+  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "^payram$"; then
+    container_exists=true
+    installation_found=true
+  fi
+  …  
+}
+  
+  # Check for configuration files
+  if [[ -f "$PAYRAM_INFO_DIR/config.env" ]] || [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    config_exists=true
+    installation_found=true
+  fi
+  
+  # Check for data directories
+  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+    data_exists=true
+    installation_found=true
+  fi
+  
+  # If no installation found, proceed normally
+  if [[ "$installation_found" == false ]]; then
+    log "INFO" "No existing PayRam installation detected. Proceeding with fresh setup..."
+    return 0
+  fi
+  
+  # Show detailed warning about existing installation
+  echo
+  print_color "red" "⚠️  EXISTING PAYRAM INSTALLATION DETECTED!"
+  echo
+  print_color "yellow" "🔍 Installation Status:"
+  
+  if [[ "$container_running" == true ]]; then
+    print_color "green" "  • PayRam Container: ✅ RUNNING"
+    local container_uptime=$(docker ps --filter "name=^payram$" --format "{{.Status}}" 2>/dev/null)
+    print_color "gray" "    └─ Status: $container_uptime"
+  elif [[ "$container_exists" == true ]]; then
+    print_color "yellow" "  • PayRam Container: ⚠️  EXISTS (stopped)"
+    local container_status=$(docker ps -a --filter "name=^payram$" --format "{{.Status}}" 2>/dev/null)
+    print_color "gray" "    └─ Status: $container_status"
+  else
+    print_color "gray" "  • PayRam Container: ❌ Not found"
+  fi
+  
+  if [[ "$config_exists" == true ]]; then
+    print_color "green" "  • Configuration: ✅ EXISTS"
+    print_color "gray" "    └─ Location: $PAYRAM_INFO_DIR"
+    if [[ -f "$PAYRAM_INFO_DIR/config.env" ]]; then
+      local config_size=$(du -sh "$PAYRAM_INFO_DIR" 2>/dev/null | cut -f1)
+      print_color "gray" "    └─ Size: $config_size"
+    fi
+  else
+    print_color "gray" "  • Configuration: ❌ Not found"
+  fi
+  
+  if [[ "$data_exists" == true ]]; then
+    print_color "green" "  • Data Directory: ✅ EXISTS"
+    print_color "gray" "    └─ Location: $PAYRAM_CORE_DIR"
+    local data_size=$(du -sh "$PAYRAM_CORE_DIR" 2>/dev/null | cut -f1)
+    print_color "gray" "    └─ Size: $data_size"
+  else
+    print_color "gray" "  • Data Directory: ❌ Not found"
+  fi
+  
+  echo
+  print_color "red" "🚨 CRITICAL WARNING:"
+  print_color "yellow" "  • Running setup again may cause data loss or conflicts"
+  print_color "yellow" "  • Existing configuration may be overwritten"
+  print_color "yellow" "  • Hot wallet keys could become inaccessible"
+  print_color "yellow" "  • Database data might be lost or corrupted"
+  echo
+  
+  if [[ "$container_running" == true ]]; then
+    print_color "red" "🔥 PayRam is currently RUNNING!"
+    print_color "yellow" "   • Users may be actively using the payment gateway"
+    print_color "yellow" "   • Active transactions could be interrupted"
+    print_color "yellow" "   • Service downtime will occur during reinstallation"
+    echo
+    
+    print_color "blue" "💡 Recommended Actions:"
+    print_color "gray" "   • Use --update flag to update existing installation:"
+    print_color "gray" "     sudo ./setup_payram.sh --update"
+    print_color "gray" "   • View current status: docker ps | grep payram"
+    print_color "gray" "   • Check logs: docker logs payram"
+    echo
+  else
+    print_color "blue" "💡 Recommended Actions:"
+    print_color "gray" "   • Use --update flag to restart/update installation:"
+    print_color "gray" "     sudo ./setup_payram.sh --update"
+    print_color "gray" "   • Use --reset flag to completely remove existing installation:"
+    print_color "gray" "     sudo ./setup_payram.sh --reset"
+    print_color "gray" "   • Manual container restart: docker start payram"
+    echo
+  fi
+  
+  print_color "yellow" "💾 Before Continuing - Backup Commands:"
+  print_color "gray" "  # Complete backup (RECOMMENDED)"
+  print_color "gray" "  tar -czf payram-backup-$(date +%Y%m%d-%H%M%S).tar.gz \\"
+  print_color "gray" "      ~/.payraminfo ~/.payram-core 2>/dev/null"
+  print_color "gray" "  "
+  if [[ "$container_running" == true ]]; then
+    print_color "gray" "  # Database backup (while running)"
+    print_color "gray" "  docker exec payram pg_dump -U payram payram > payram-db-backup-$(date +%Y%m%d-%H%M%S).sql"
+  elif [[ "$container_exists" == true ]]; then
+    print_color "gray" "  # Start container temporarily for backup"
+    print_color "gray" "  docker start payram && docker exec payram pg_dump -U payram payram > backup.sql && docker stop payram"
+  fi
+  echo
+  
+  print_color "red" "⚠️  PROCEEDING WILL OVERWRITE EXISTING INSTALLATION!"
+  echo
+  
+  # Get user confirmation
+  while true; do
+    print_color "yellow" "PayRam installation detected. Do you want to continue anyway? (y/N): "
+    read -r continue_choice
+    
+    case "$continue_choice" in
+      [Yy]|[Yy][Ee][Ss])
+        echo
+        print_color "yellow" "⚠️  Continuing with installation despite existing PayRam detected..."
+        print_color "red" "🔥 LAST WARNING: This may cause data loss!"
+        echo
+        
+        # Final confirmation for running instances
+        if [[ "$container_running" == true ]]; then
+          print_color "red" "PayRam is currently RUNNING and serving users!"
+          print_color "yellow" "Final confirmation - Type 'OVERRIDE' to proceed: "
+          read -r final_confirm
+          
+          if [[ "$final_confirm" != "OVERRIDE" ]]; then
+            print_color "green" "✅ Installation cancelled - wise choice!"
+            print_color "blue" "Use --update flag to safely update your installation"
+            exit 0
+          fi
+          
+          print_color "red" "🛑 Stopping running PayRam instance..."
+          docker stop payram &>/dev/null || true
+          sleep 2
+        fi
+        
+        log "WARN" "User chose to continue despite existing installation"
+        return 0
+        ;;
+      [Nn]|[Nn][Oo]|"")
+        echo
+        print_color "green" "✅ Installation cancelled - wise choice!"
+        echo
+        print_color "blue" "📋 What you can do instead:"
+        print_color "gray" "  • Update existing installation: sudo ./setup_payram.sh --update"
+        print_color "gray" "  • Check current status: docker ps | grep payram"
+        print_color "gray" "  • View logs: docker logs payram"
+        print_color "gray" "  • Access web interface: http://localhost (if running)"
+        if [[ "$container_exists" == true && "$container_running" == false ]]; then
+          print_color "gray" "  • Start existing container: docker start payram"
+        fi
+        echo
+        exit 0
+        ;;
+      *)
+        print_color "red" "Please answer 'y' for yes or 'n' for no."
+        ;;
+    esac
+  done
 }
 
 # Main execution flow
@@ -2484,6 +2853,9 @@ main() {
   # Display welcome banner
   display_welcome_banner
   
+  # Check for existing installation before proceeding
+  check_existing_installation
+  
   # Step 1: System detection
   detect_system_info
   
@@ -2559,8 +2931,8 @@ main() {
     echo
     print_color "blue" "🛠️  Useful Commands:"
     print_color "gray" "  • View logs: docker logs payram"
-    print_color "gray" "  • Update: $0 --update"
-    print_color "gray" "  • Reset: $0 --reset"
+    print_color "gray" "  • Update: ./setup_payram.sh --update"
+    print_color "gray" "  • Reset: ./setup_payram.sh --reset"
     echo
   else
     log "ERROR" "PayRam setup failed"
