@@ -2604,8 +2604,9 @@ check_existing_installation() {
   # Initialize directories for checking
   get_payram_directories
   
-  # Check for running container
-  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" 2>/dev/null | grep -q "^payram$"; then
+  # Check for running container (only if docker is available)
+  if command -v docker >/dev/null 2>&1 && \
+     docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" 2>/dev/null | grep -q "^payram$"; then
     container_running=true
     installation_found=true
   fi
@@ -2615,6 +2616,8 @@ check_existing_installation() {
     container_exists=true
     installation_found=true
   fi
+  …  
+}
   
   # Check for configuration files
   if [[ -f "$PAYRAM_INFO_DIR/config.env" ]] || [[ -d "$PAYRAM_INFO_DIR" ]]; then
