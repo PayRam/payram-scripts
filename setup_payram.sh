@@ -2180,21 +2180,8 @@ reset_payram_environment() {
     fi
   } || print_color "yellow" "  ⚠️  Some images may still be in use"
   
-  # Remove PayRam data directories
-  log "INFO" "Step 3/6: Removing PayRam data directories..."
-  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
-    rm -rf "$PAYRAM_CORE_DIR"
-    print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
-  else
-    print_color "yellow" "  ⚠️  Data directory not found: $PAYRAM_CORE_DIR"
-  fi
-  
-  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
-    rm -rf "$PAYRAM_INFO_DIR"
-    print_color "green" "  ✅ Config directory removed: $PAYRAM_INFO_DIR"
-  else
-    print_color "yellow" "  ⚠️  Config directory not found: $PAYRAM_INFO_DIR"
-  fi
+  # Skip removing data directories here; will remove at Step 6 after using config
+  log "INFO" "Step 3/6: Skipping data/config directory removal until Step 6..."
   
   # Remove Let's Encrypt certificates (for configured domain only)
   log "INFO" "Step 4/6: Removing Let's Encrypt certificates..."
@@ -2255,8 +2242,24 @@ reset_payram_environment() {
     print_color "yellow" "  ⚠️  No PayRam cron jobs found"
   fi
   
+  # Remove PayRam data directories at the end (after cert cleanup and cron removal)
+  log "INFO" "Step 6/6: Removing PayRam data directories..."
+  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+    rm -rf "$PAYRAM_CORE_DIR"
+    print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
+  else
+    print_color "yellow" "  ⚠️  Data directory not found: $PAYRAM_CORE_DIR"
+  fi
+  
+  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    rm -rf "$PAYRAM_INFO_DIR"
+    print_color "green" "  ✅ Config directory removed: $PAYRAM_INFO_DIR"
+  else
+    print_color "yellow" "  ⚠️  Config directory not found: $PAYRAM_INFO_DIR"
+  fi
+  
   # Final cleanup and summary
-  log "INFO" "Step 6/6: Final cleanup and verification..."
+  log "INFO" "Final cleanup and verification..."
   
   # Verify removal
   local cleanup_success=true
