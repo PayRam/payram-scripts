@@ -645,6 +645,8 @@ set_configuration_defaults() {
   IMAGE_TAG=""
   POSTGRES_SSLMODE="prefer"
   SSL_CERT_PATH=""
+  SSL_MODE=""
+  DOMAIN_NAME=""
   AES_KEY=""
 }
 
@@ -1070,6 +1072,7 @@ configure_ssl_letsencrypt() {
   print_color "blue" "🔐 Generating SSL certificate for $DOMAIN_NAME..."
   if generate_letsencrypt_cert "$DOMAIN_NAME" "$LE_EMAIL"; then
     SSL_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_NAME"
+    SSL_MODE="letsencrypt"
     
     print_color "green" "✅ SSL certificate generated successfully!"
     print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
@@ -1168,6 +1171,7 @@ configure_ssl_custom() {
     
     # Validate certificate
     if validate_ssl_certificate "$SSL_CERT_PATH"; then
+      SSL_MODE="custom"
       print_color "green" "✅ SSL certificates validated successfully!"
       print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
       print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
@@ -1232,6 +1236,7 @@ configure_ssl_external() {
   read -p "Do you want to continue with external SSL management? (y/N): " confirm_external
   if [[ "$confirm_external" =~ ^[Yy]$ ]]; then
     SSL_CERT_PATH=""
+    SSL_MODE="external"
     print_color "green" "✅ External SSL management selected"
     print_color "blue" "Next steps after PayRam installation:"
     print_color "gray" "  1. Configure your reverse proxy to forward to:"
@@ -1528,6 +1533,7 @@ POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-prefer}"
 
 # SSL Configuration
 SSL_CERT_PATH="${SSL_CERT_PATH:-}"
+SSL_MODE="${SSL_MODE:-}"
 
 # System Information
 OS_FAMILY="$OS_FAMILY"
@@ -2190,32 +2196,48 @@ reset_payram_environment() {
     print_color "yellow" "  ⚠️  Config directory not found: $PAYRAM_INFO_DIR"
   fi
   
-  # Remove Let's Encrypt certificates
+  # Remove Let's Encrypt certificates (for configured domain only)
   log "INFO" "Step 4/6: Removing Let's Encrypt certificates..."
-  if [[ -d "/etc/letsencrypt" ]] && [[ "$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)" -gt 0 ]]; then
-    # Only remove PayRam-related certificates, not all Let's Encrypt certs
-    # Check if any certificates were created during PayRam setup
-    local removed_certs=false
-    
-    # Look for certificates that might be PayRam-related (created recently or in common patterns)
-    if [[ -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" ]]; then
-      rm -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" &>/dev/null || true
-      removed_certs=true
-    fi
-    
-    # Remove renewal hooks
-    find /etc/letsencrypt/renewal-hooks -name "*payram*" -delete &>/dev/null || true
-    
-    if [[ "$removed_certs" == true ]]; then
-      print_color "green" "  ✅ PayRam-related certificate hooks removed"
-      print_color "yellow" "  ⚠️  Manual removal may be needed for domain certificates"
-      print_color "gray" "     Use: certbot delete --cert-name <domain-name>"
+  local removed_certs=false
+  # Try to source existing config to get SSL_MODE and SSL_CERT_PATH if available
+  if [[ -f "$PAYRAM_INFO_DIR/config.env" ]]; then
+    # shellcheck disable=SC1090
+    source "$PAYRAM_INFO_DIR/config.env"
+  fi
+  if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "${SSL_CERT_PATH:-}" ]]; then
+    # Normalize and extract domain from SSL_CERT_PATH (expecting /etc/letsencrypt/live/<domain>)
+    local cert_path_normalized="${SSL_CERT_PATH%/}"
+    local domain_name
+    domain_name="$(basename "$cert_path_normalized")"
+    if [[ -n "$domain_name" && -d "/etc/letsencrypt/live/$domain_name" ]]; then
+      if command -v certbot >/dev/null 2>&1; then
+        if certbot delete --cert-name "$domain_name" --non-interactive --quiet; then
+          print_color "green" "  ✅ Removed Let's Encrypt certificate for domain: $domain_name"
+          removed_certs=true
+        else
+          print_color "yellow" "  ⚠️  Failed to delete cert via certbot for domain: $domain_name"
+          print_color "gray" "     You may remove manually: certbot delete --cert-name $domain_name"
+        fi
+      else
+        print_color "yellow" "  ⚠️  Certbot not found; skipping certificate deletion for $domain_name"
+        print_color "gray" "     Install certbot or remove manually under /etc/letsencrypt/{live,archive,renewal}"
+      fi
     else
-      print_color "yellow" "  ⚠️  No PayRam-specific certificates found"
-      print_color "blue" "     To remove all certificates manually: certbot delete --cert-name <domain>"
+      print_color "yellow" "  ⚠️  SSL_CERT_PATH points to a non-existent domain directory: $SSL_CERT_PATH"
     fi
   else
-    print_color "yellow" "  ⚠️  No Let's Encrypt certificates found"
+    print_color "yellow" "  ⚠️  No Let's Encrypt configuration detected for this installation"
+  fi
+
+  # Always remove PayRam-related renewal hooks if present
+  if [[ -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" ]]; then
+    rm -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" &>/dev/null || true
+    removed_certs=true
+  fi
+  find /etc/letsencrypt/renewal-hooks -name "*payram*" -delete &>/dev/null || true
+
+  if [[ "$removed_certs" == true ]]; then
+    print_color "green" "  ✅ Certificate artifacts cleaned (domain and/or hooks)"
   fi
   
   # Remove cron jobs
