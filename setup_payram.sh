@@ -26,6 +26,9 @@ declare -g SERVICE_MANAGER=""
 declare -g INSTALL_METHOD=""
 declare -g SCRIPT_DIR="${PWD}"
 declare -g LOG_FILE="/tmp/payram-setup.log"
+# Initialize directory variables with defaults
+declare -g PAYRAM_INFO_DIR="${HOME}/.payraminfo"
+declare -g PAYRAM_CORE_DIR="${HOME}/.payram-core"
 
 # --- CORE UTILITY FUNCTIONS ---
 
@@ -2616,8 +2619,6 @@ check_existing_installation() {
     container_exists=true
     installation_found=true
   fi
-  …  
-}
   
   # Check for configuration files
   if [[ -f "$PAYRAM_INFO_DIR/config.env" ]] || [[ -d "$PAYRAM_INFO_DIR" ]]; then
