@@ -2711,17 +2711,12 @@ check_existing_installation() {
   
   if [[ "$container_running" == true ]]; then
     print_color "red" "🔥 PayRam is currently RUNNING!"
-    print_color "yellow" "   • Users may be actively using the payment gateway"
-    print_color "yellow" "   • Active transactions could be interrupted"
-    print_color "yellow" "   • Service downtime will occur during reinstallation"
-    echo
-    
-    print_color "blue" "💡 Recommended Actions:"
-    print_color "gray" "   • Use --update flag to update existing installation:"
+    print_color "yellow" "   • To deploy a new instance, first reset the environment:"
+    print_color "gray" "     sudo ./setup_payram.sh --reset"
+    print_color "yellow" "   • To keep data and upgrade, use update:"
     print_color "gray" "     sudo ./setup_payram.sh --update"
-    print_color "gray" "   • View current status: docker ps | grep payram"
-    print_color "gray" "   • Check logs: docker logs payram"
     echo
+    exit 0
   else
     print_color "blue" "💡 Recommended Actions:"
     print_color "gray" "   • Use --update flag to restart/update installation:"
@@ -2746,61 +2741,16 @@ check_existing_installation() {
   fi
   echo
   
-  print_color "red" "⚠️  PROCEEDING WILL OVERWRITE EXISTING INSTALLATION!"
+  print_color "blue" "📋 What you can do instead:"
+  print_color "gray" "  • Update existing installation: sudo ./setup_payram.sh --update"
+  print_color "gray" "  • Reset environment to start fresh: sudo ./setup_payram.sh --reset"
+  print_color "gray" "  • Check current status: docker ps | grep payram"
+  print_color "gray" "  • View logs: docker logs payram"
+  if [[ "$container_exists" == true && "$container_running" == false ]]; then
+    print_color "gray" "  • Start existing container: docker start payram"
+  fi
   echo
-  
-  # Get user confirmation
-  while true; do
-    print_color "yellow" "PayRam installation detected. Do you want to continue anyway? (y/N): "
-    read -r continue_choice
-    
-    case "$continue_choice" in
-      [Yy]|[Yy][Ee][Ss])
-        echo
-        print_color "yellow" "⚠️  Continuing with installation despite existing PayRam detected..."
-        print_color "red" "🔥 LAST WARNING: This may cause data loss!"
-        echo
-        
-        # Final confirmation for running instances
-        if [[ "$container_running" == true ]]; then
-          print_color "red" "PayRam is currently RUNNING and serving users!"
-          print_color "yellow" "Final confirmation - Type 'OVERRIDE' to proceed: "
-          read -r final_confirm
-          
-          if [[ "$final_confirm" != "OVERRIDE" ]]; then
-            print_color "green" "✅ Installation cancelled - wise choice!"
-            print_color "blue" "Use --update flag to safely update your installation"
-            exit 0
-          fi
-          
-          print_color "red" "🛑 Stopping running PayRam instance..."
-          docker stop payram &>/dev/null || true
-          sleep 2
-        fi
-        
-        log "WARN" "User chose to continue despite existing installation"
-        return 0
-        ;;
-      [Nn]|[Nn][Oo]|"")
-        echo
-        print_color "green" "✅ Installation cancelled - wise choice!"
-        echo
-        print_color "blue" "📋 What you can do instead:"
-        print_color "gray" "  • Update existing installation: sudo ./setup_payram.sh --update"
-        print_color "gray" "  • Check current status: docker ps | grep payram"
-        print_color "gray" "  • View logs: docker logs payram"
-        print_color "gray" "  • Access web interface: http://localhost (if running)"
-        if [[ "$container_exists" == true && "$container_running" == false ]]; then
-          print_color "gray" "  • Start existing container: docker start payram"
-        fi
-        echo
-        exit 0
-        ;;
-      *)
-        print_color "red" "Please answer 'y' for yes or 'n' for no."
-        ;;
-    esac
-  done
+  exit 0
 }
 
 # Main execution flow
