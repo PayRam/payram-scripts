@@ -26,6 +26,9 @@ declare -g SERVICE_MANAGER=""
 declare -g INSTALL_METHOD=""
 declare -g SCRIPT_DIR="${PWD}"
 declare -g LOG_FILE="/tmp/payram-setup.log"
+# Initialize directory variables with defaults
+declare -g PAYRAM_INFO_DIR="${HOME}/.payraminfo"
+declare -g PAYRAM_CORE_DIR="${HOME}/.payram-core"
 
 # --- CORE UTILITY FUNCTIONS ---
 
@@ -642,6 +645,8 @@ set_configuration_defaults() {
   IMAGE_TAG=""
   POSTGRES_SSLMODE="prefer"
   SSL_CERT_PATH=""
+  SSL_MODE=""
+  DOMAIN_NAME=""
   AES_KEY=""
 }
 
@@ -1067,6 +1072,7 @@ configure_ssl_letsencrypt() {
   print_color "blue" "🔐 Generating SSL certificate for $DOMAIN_NAME..."
   if generate_letsencrypt_cert "$DOMAIN_NAME" "$LE_EMAIL"; then
     SSL_CERT_PATH="/etc/letsencrypt/live/$DOMAIN_NAME"
+    SSL_MODE="letsencrypt"
     
     print_color "green" "✅ SSL certificate generated successfully!"
     print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
@@ -1165,6 +1171,7 @@ configure_ssl_custom() {
     
     # Validate certificate
     if validate_ssl_certificate "$SSL_CERT_PATH"; then
+      SSL_MODE="custom"
       print_color "green" "✅ SSL certificates validated successfully!"
       print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
       print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
@@ -1229,6 +1236,7 @@ configure_ssl_external() {
   read -p "Do you want to continue with external SSL management? (y/N): " confirm_external
   if [[ "$confirm_external" =~ ^[Yy]$ ]]; then
     SSL_CERT_PATH=""
+    SSL_MODE="external"
     print_color "green" "✅ External SSL management selected"
     print_color "blue" "Next steps after PayRam installation:"
     print_color "gray" "  1. Configure your reverse proxy to forward to:"
@@ -1525,6 +1533,7 @@ POSTGRES_SSLMODE="${POSTGRES_SSLMODE:-prefer}"
 
 # SSL Configuration
 SSL_CERT_PATH="${SSL_CERT_PATH:-}"
+SSL_MODE="${SSL_MODE:-}"
 
 # System Information
 OS_FAMILY="$OS_FAMILY"
@@ -2171,48 +2180,51 @@ reset_payram_environment() {
     fi
   } || print_color "yellow" "  ⚠️  Some images may still be in use"
   
-  # Remove PayRam data directories
-  log "INFO" "Step 3/6: Removing PayRam data directories..."
-  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
-    rm -rf "$PAYRAM_CORE_DIR"
-    print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
-  else
-    print_color "yellow" "  ⚠️  Data directory not found: $PAYRAM_CORE_DIR"
-  fi
+  # Skip removing data directories here; will remove at Step 6 after using config
+  log "INFO" "Step 3/6: Skipping data/config directory removal until Step 6..."
   
-  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
-    rm -rf "$PAYRAM_INFO_DIR"
-    print_color "green" "  ✅ Config directory removed: $PAYRAM_INFO_DIR"
-  else
-    print_color "yellow" "  ⚠️  Config directory not found: $PAYRAM_INFO_DIR"
-  fi
-  
-  # Remove Let's Encrypt certificates
+  # Remove Let's Encrypt certificates (for configured domain only)
   log "INFO" "Step 4/6: Removing Let's Encrypt certificates..."
-  if [[ -d "/etc/letsencrypt" ]] && [[ "$(find /etc/letsencrypt -name "*.pem" 2>/dev/null | wc -l)" -gt 0 ]]; then
-    # Only remove PayRam-related certificates, not all Let's Encrypt certs
-    # Check if any certificates were created during PayRam setup
-    local removed_certs=false
-    
-    # Look for certificates that might be PayRam-related (created recently or in common patterns)
-    if [[ -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" ]]; then
-      rm -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" &>/dev/null || true
-      removed_certs=true
-    fi
-    
-    # Remove renewal hooks
-    find /etc/letsencrypt/renewal-hooks -name "*payram*" -delete &>/dev/null || true
-    
-    if [[ "$removed_certs" == true ]]; then
-      print_color "green" "  ✅ PayRam-related certificate hooks removed"
-      print_color "yellow" "  ⚠️  Manual removal may be needed for domain certificates"
-      print_color "gray" "     Use: certbot delete --cert-name <domain-name>"
+  local removed_certs=false
+  # Try to source existing config to get SSL_MODE and SSL_CERT_PATH if available
+  if [[ -f "$PAYRAM_INFO_DIR/config.env" ]]; then
+    # shellcheck disable=SC1090
+    source "$PAYRAM_INFO_DIR/config.env"
+  fi
+  if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "${SSL_CERT_PATH:-}" ]]; then
+    # Normalize and extract domain from SSL_CERT_PATH (expecting /etc/letsencrypt/live/<domain>)
+    local cert_path_normalized="${SSL_CERT_PATH%/}"
+    local domain_name
+    domain_name="$(basename "$cert_path_normalized")"
+    if [[ -n "$domain_name" && -d "/etc/letsencrypt/live/$domain_name" ]]; then
+      if command -v certbot >/dev/null 2>&1; then
+        if certbot delete --cert-name "$domain_name" --non-interactive --quiet; then
+          print_color "green" "  ✅ Removed Let's Encrypt certificate for domain: $domain_name"
+          removed_certs=true
+        else
+          print_color "yellow" "  ⚠️  Failed to delete cert via certbot for domain: $domain_name"
+          print_color "gray" "     You may remove manually: certbot delete --cert-name $domain_name"
+        fi
+      else
+        print_color "yellow" "  ⚠️  Certbot not found; skipping certificate deletion for $domain_name"
+        print_color "gray" "     Install certbot or remove manually under /etc/letsencrypt/{live,archive,renewal}"
+      fi
     else
-      print_color "yellow" "  ⚠️  No PayRam-specific certificates found"
-      print_color "blue" "     To remove all certificates manually: certbot delete --cert-name <domain>"
+      print_color "yellow" "  ⚠️  SSL_CERT_PATH points to a non-existent domain directory: $SSL_CERT_PATH"
     fi
   else
-    print_color "yellow" "  ⚠️  No Let's Encrypt certificates found"
+    print_color "yellow" "  ⚠️  No Let's Encrypt configuration detected for this installation"
+  fi
+
+  # Always remove PayRam-related renewal hooks if present
+  if [[ -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" ]]; then
+    rm -f "/etc/letsencrypt/renewal-hooks/deploy/payram-restart" &>/dev/null || true
+    removed_certs=true
+  fi
+  find /etc/letsencrypt/renewal-hooks -name "*payram*" -delete &>/dev/null || true
+
+  if [[ "$removed_certs" == true ]]; then
+    print_color "green" "  ✅ Certificate artifacts cleaned (domain and/or hooks)"
   fi
   
   # Remove cron jobs
@@ -2230,8 +2242,24 @@ reset_payram_environment() {
     print_color "yellow" "  ⚠️  No PayRam cron jobs found"
   fi
   
+  # Remove PayRam data directories at the end (after cert cleanup and cron removal)
+  log "INFO" "Step 6/6: Removing PayRam data directories..."
+  if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+    rm -rf "$PAYRAM_CORE_DIR"
+    print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
+  else
+    print_color "yellow" "  ⚠️  Data directory not found: $PAYRAM_CORE_DIR"
+  fi
+  
+  if [[ -d "$PAYRAM_INFO_DIR" ]]; then
+    rm -rf "$PAYRAM_INFO_DIR"
+    print_color "green" "  ✅ Config directory removed: $PAYRAM_INFO_DIR"
+  else
+    print_color "yellow" "  ⚠️  Config directory not found: $PAYRAM_INFO_DIR"
+  fi
+  
   # Final cleanup and summary
-  log "INFO" "Step 6/6: Final cleanup and verification..."
+  log "INFO" "Final cleanup and verification..."
   
   # Verify removal
   local cleanup_success=true
@@ -2616,8 +2644,6 @@ check_existing_installation() {
     container_exists=true
     installation_found=true
   fi
-  …  
-}
   
   # Check for configuration files
   if [[ -f "$PAYRAM_INFO_DIR/config.env" ]] || [[ -d "$PAYRAM_INFO_DIR" ]]; then
@@ -2685,17 +2711,12 @@ check_existing_installation() {
   
   if [[ "$container_running" == true ]]; then
     print_color "red" "🔥 PayRam is currently RUNNING!"
-    print_color "yellow" "   • Users may be actively using the payment gateway"
-    print_color "yellow" "   • Active transactions could be interrupted"
-    print_color "yellow" "   • Service downtime will occur during reinstallation"
-    echo
-    
-    print_color "blue" "💡 Recommended Actions:"
-    print_color "gray" "   • Use --update flag to update existing installation:"
+    print_color "yellow" "   • To deploy a new instance, first reset the environment:"
+    print_color "gray" "     sudo ./setup_payram.sh --reset"
+    print_color "yellow" "   • To keep data and upgrade, use update:"
     print_color "gray" "     sudo ./setup_payram.sh --update"
-    print_color "gray" "   • View current status: docker ps | grep payram"
-    print_color "gray" "   • Check logs: docker logs payram"
     echo
+    exit 0
   else
     print_color "blue" "💡 Recommended Actions:"
     print_color "gray" "   • Use --update flag to restart/update installation:"
@@ -2720,61 +2741,16 @@ check_existing_installation() {
   fi
   echo
   
-  print_color "red" "⚠️  PROCEEDING WILL OVERWRITE EXISTING INSTALLATION!"
+  print_color "blue" "📋 What you can do instead:"
+  print_color "gray" "  • Update existing installation: sudo ./setup_payram.sh --update"
+  print_color "gray" "  • Reset environment to start fresh: sudo ./setup_payram.sh --reset"
+  print_color "gray" "  • Check current status: docker ps | grep payram"
+  print_color "gray" "  • View logs: docker logs payram"
+  if [[ "$container_exists" == true && "$container_running" == false ]]; then
+    print_color "gray" "  • Start existing container: docker start payram"
+  fi
   echo
-  
-  # Get user confirmation
-  while true; do
-    print_color "yellow" "PayRam installation detected. Do you want to continue anyway? (y/N): "
-    read -r continue_choice
-    
-    case "$continue_choice" in
-      [Yy]|[Yy][Ee][Ss])
-        echo
-        print_color "yellow" "⚠️  Continuing with installation despite existing PayRam detected..."
-        print_color "red" "🔥 LAST WARNING: This may cause data loss!"
-        echo
-        
-        # Final confirmation for running instances
-        if [[ "$container_running" == true ]]; then
-          print_color "red" "PayRam is currently RUNNING and serving users!"
-          print_color "yellow" "Final confirmation - Type 'OVERRIDE' to proceed: "
-          read -r final_confirm
-          
-          if [[ "$final_confirm" != "OVERRIDE" ]]; then
-            print_color "green" "✅ Installation cancelled - wise choice!"
-            print_color "blue" "Use --update flag to safely update your installation"
-            exit 0
-          fi
-          
-          print_color "red" "🛑 Stopping running PayRam instance..."
-          docker stop payram &>/dev/null || true
-          sleep 2
-        fi
-        
-        log "WARN" "User chose to continue despite existing installation"
-        return 0
-        ;;
-      [Nn]|[Nn][Oo]|"")
-        echo
-        print_color "green" "✅ Installation cancelled - wise choice!"
-        echo
-        print_color "blue" "📋 What you can do instead:"
-        print_color "gray" "  • Update existing installation: sudo ./setup_payram.sh --update"
-        print_color "gray" "  • Check current status: docker ps | grep payram"
-        print_color "gray" "  • View logs: docker logs payram"
-        print_color "gray" "  • Access web interface: http://localhost (if running)"
-        if [[ "$container_exists" == true && "$container_running" == false ]]; then
-          print_color "gray" "  • Start existing container: docker start payram"
-        fi
-        echo
-        exit 0
-        ;;
-      *)
-        print_color "red" "Please answer 'y' for yes or 'n' for no."
-        ;;
-    esac
-  done
+  exit 0
 }
 
 # Main execution flow
