@@ -372,24 +372,6 @@ service_enable() {
   esac
 }
 
-service_is_running() {
-  local service="$1"
-  case "$SERVICE_MANAGER" in
-    systemd)
-      systemctl is-active --quiet "$service"
-      ;;
-    sysvinit)
-      service "$service" status &>/dev/null
-      ;;
-    openrc)
-      rc-service "$service" status &>/dev/null
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
 # Get appropriate package names for different systems
 get_docker_prerequisites() {
   case "$OS_FAMILY" in
@@ -2549,6 +2531,160 @@ display_success_banner() {
   echo
 }
 
+# Interactive menu for no-arguments mode
+show_interactive_menu() {
+  # Display welcome banner
+  display_welcome_banner
+  
+  echo
+  print_color "blue" "╔═══════════════════════════════════════════════════════════╗"
+  print_color "blue" "║                    🚀 PayRam Operations Menu              ║"
+  print_color "blue" "╚═══════════════════════════════════════════════════════════╝"
+  echo
+  
+  print_color "green" "Please select an operation:"
+  echo
+  print_color "yellow" "1) 🆕 Install PayRam"
+  print_color "gray" "   • Fresh installation with interactive setup"
+  print_color "gray" "   • Configure database, SSL, and hot wallet encryption"
+  print_color "gray" "   • Deploy new PayRam container"
+  echo
+  
+  print_color "yellow" "2) 🔄 Update PayRam instance to latest version"
+  print_color "gray" "   • Update existing PayRam installation"
+  print_color "gray" "   • Preserve configuration and data"
+  print_color "gray" "   • Pull latest Docker image and restart"
+  echo
+  
+  print_color "yellow" "3) 🔄 Restart PayRam container"
+  print_color "gray" "   • Restart existing PayRam container"
+  print_color "gray" "   • Quick restart without updates"
+  print_color "gray" "   • Useful for configuration changes"
+  echo
+  
+  print_color "yellow" "4) 🗑️  Reset PayRam environment"
+  print_color "gray" "   • Completely remove PayRam installation"
+  print_color "gray" "   • Delete containers, data, and configuration"
+  print_color "gray" "   • ⚠️  WARNING: This will delete ALL PayRam data!"
+  echo
+  
+  print_color "yellow" "5) ❌ Exit"
+  echo
+  
+  while true; do
+    read -p "Enter your choice (1-5): " choice
+    case $choice in
+      1)
+        log "INFO" "User selected: Install PayRam"
+        MENU_CHOICE=1
+        return 0
+        ;;
+      2)
+        log "INFO" "User selected: Update PayRam"
+        MENU_CHOICE=2
+        return 0
+        ;;
+      3)
+        log "INFO" "User selected: Restart PayRam"
+        MENU_CHOICE=3
+        return 0
+        ;;
+      4)
+        log "INFO" "User selected: Reset PayRam"
+        MENU_CHOICE=4
+        return 0
+        ;;
+      5)
+        log "INFO" "User selected: Exit"
+        print_color "blue" "👋 Goodbye! Thank you for using PayRam setup script."
+        exit 0
+        ;;
+      *)
+        print_color "red" "❌ Invalid option. Please select 1, 2, 3, 4, or 5."
+        ;;
+    esac
+  done
+}
+
+# Show network selection submenu for install
+show_network_selection() {
+  echo
+  print_color "blue" "╔═══════════════════════════════════════════════════════════╗"
+  print_color "blue" "║                    🌐 Network Selection                   ║"
+  print_color "blue" "╚═══════════════════════════════════════════════════════════╝"
+  echo
+  
+  print_color "yellow" "Please select the network for PayRam installation:"
+  echo
+  
+  print_color "green" "1) 🌐 Mainnet (Production)"
+  print_color "gray" "   • Live Bitcoin, Ethereum, and other cryptocurrencies"
+  print_color "gray" "   • Real transactions and payments"
+  print_color "gray" "   • Production environment"
+  echo
+  
+  print_color "cyan" "2) 🧪 Testnet (Development) – Best for first-time users, testing out features"
+  print_color "gray" "   • Test networks for development and testing"
+  print_color "gray" "   • Uses testnet tokens (no monetary value)"
+  print_color "gray" "   • Development environment"
+  echo
+  
+  while true; do
+    read -p "Enter your choice (1-2): " choice
+    case $choice in
+      1)
+        log "INFO" "User selected: Mainnet installation"
+        NETWORK_TYPE="mainnet"
+        SERVER="PRODUCTION"
+        NETWORK_CHOICE=1
+        return 0
+        ;;
+      2)
+        log "INFO" "User selected: Testnet installation"
+        NETWORK_TYPE="testnet"
+        SERVER="DEVELOPMENT"
+        NETWORK_CHOICE=2
+        return 0
+        ;;
+      *)
+        print_color "red" "❌ Invalid option. Please select 1 or 2."
+        ;;
+    esac
+  done
+}
+
+# Restart PayRam container
+restart_payram_container() {
+  log "INFO" "Starting PayRam container restart..."
+  
+  # Check if PayRam container exists
+  if ! docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "^payram$"; then
+    print_color "red" "❌ No PayRam container found."
+    print_color "yellow" "Please install PayRam first using option 1."
+    return 1
+  fi
+  
+  # Check current container status
+  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "^payram$"; then
+    print_color "blue" "🔄 Restarting PayRam container..."
+    docker restart payram
+  else
+    print_color "blue" "🚀 Starting stopped PayRam container..."
+    docker start payram
+  fi
+  
+  # Verify restart was successful
+  sleep 3
+  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "^payram$"; then
+    print_color "green" "✅ PayRam container is now running!"
+    docker ps --filter name=payram
+  else
+    print_color "red" "❌ Failed to start PayRam container"
+    print_color "yellow" "Check logs: docker logs payram"
+    return 1
+  fi
+}
+
 # --- MAIN ORCHESTRATION ---
 
 # Usage information
@@ -2564,10 +2700,11 @@ DESCRIPTION:
     Supports multiple operating systems and provides interactive configuration.
 
 OPTIONS:
-    --update                 Update existing PayRam installation
+    --update --tag=<version> Update existing PayRam installation to specific version
+    --restart                Restart PayRam container
     --reset                  Completely remove PayRam (requires confirmation)
     --testnet               Set up testnet environment (DEVELOPMENT mode)
-    --tag=<tag>             Specify Docker image tag (default: $DEFAULT_IMAGE_TAG)
+    --tag=<tag>             Specify Docker image tag (required with --update)
     --debug                 Enable debug logging
     -h, --help              Show this help message
 
@@ -2575,6 +2712,7 @@ EXAMPLES:
     $0                      # Interactive fresh installation
     $0 --testnet           # Setup testnet environment
     $0 --update --tag=v1.5.0  # Update to specific version
+    $0 --restart           # Restart PayRam container
     $0 --reset             # Complete environment reset
 
 CURL INSTALLATION:
@@ -2758,12 +2896,19 @@ main() {
   # Initialize logging safely
   init_logging
   
+  # Check privileges early - all operations except help require root
+  if [[ $# -eq 0 || ($# -eq 1 && "$1" != "-h" && "$1" != "--help") || ($# -gt 1) ]]; then
+    check_privileges
+  fi
+  
   # Parse command line arguments
   local update_mode=false
   local reset_mode=false
   local testnet_mode=false
   local install_mode=false
+  local restart_mode=false
   local args_processed=$#
+  NEW_IMAGE_TAG=""
   
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2777,6 +2922,10 @@ main() {
         ;;
       --reset)
         reset_mode=true
+        shift
+        ;;
+      --restart)
+        restart_mode=true
         shift
         ;;
       --testnet)
@@ -2802,15 +2951,29 @@ main() {
     esac
   done
   
-  # If no arguments were provided, we're in interactive install mode
-  if [[ $args_processed -eq 0 ]]; then
-    install_mode=true
+  # Validate --update requires --tag
+  if [[ "$update_mode" == true && -z "$NEW_IMAGE_TAG" ]]; then
+    log "ERROR" "--update requires --tag parameter to specify version"
+    print_color "red" "❌ Error: --update must be used with --tag=version"
+    print_color "yellow" "Example: $0 --update --tag=v1.2.0"
+    exit 1
   fi
   
-  # Check privileges for operations that require root
-  if [[ "$update_mode" == true || "$reset_mode" == true || "$install_mode" == true ]]; then
-    check_privileges
+  # If no arguments were provided, show interactive menu
+  if [[ $args_processed -eq 0 ]]; then
+    show_interactive_menu
+    
+    case $MENU_CHOICE in
+      1) 
+        install_mode=true
+        show_network_selection
+        ;;
+      2) update_mode=true ;;
+      3) restart_mode=true ;;
+      4) reset_mode=true ;;
+    esac
   fi
+  
   
   # Handle special modes
   if [[ "$reset_mode" == true ]]; then
@@ -2823,11 +2986,13 @@ main() {
     exit 0
   fi
   
+  if [[ "$restart_mode" == true ]]; then
+    restart_payram_container
+    exit 0
+  fi
+  
   # Fresh installation workflow
   log "SUCCESS" "Starting PayRam setup..."
-  
-  # Display welcome banner
-  display_welcome_banner
   
   # Check for existing installation before proceeding
   check_existing_installation
@@ -2847,6 +3012,17 @@ main() {
     log "INFO" "Testnet mode enabled"
     NETWORK_TYPE="testnet"
     SERVER="DEVELOPMENT"
+  fi
+  
+  # Apply network selection from interactive menu
+  if [[ "$NETWORK_CHOICE" == "2" ]]; then
+    log "INFO" "Applying testnet configuration from menu selection"
+    NETWORK_TYPE="testnet"
+    SERVER="DEVELOPMENT"
+  elif [[ "$NETWORK_CHOICE" == "1" ]]; then
+    log "INFO" "Applying mainnet configuration from menu selection"
+    NETWORK_TYPE="mainnet"
+    SERVER="PRODUCTION"
   fi
   
   # Set image tag
