@@ -2860,17 +2860,17 @@ check_existing_installation() {
   if [[ "$container_running" == true ]]; then
     print_color "red" "🔥 PayRam is currently RUNNING!"
     print_color "yellow" "   • To deploy a new instance, first reset the environment:"
-    print_color "gray" "     sudo ./setup_payram.sh --reset"
+    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
     print_color "yellow" "   • To keep data and upgrade, use update:"
-    print_color "gray" "     sudo ./setup_payram.sh --update"
+    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
     echo
     exit 0
   else
     print_color "blue" "💡 Recommended Actions:"
     print_color "gray" "   • Use --update flag to restart/update installation:"
-    print_color "gray" "     sudo ./setup_payram.sh --update"
+    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
     print_color "gray" "   • Use --reset flag to completely remove existing installation:"
-    print_color "gray" "     sudo ./setup_payram.sh --reset"
+    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
     print_color "gray" "   • Manual container restart: docker start payram"
     echo
   fi
@@ -2890,8 +2890,8 @@ check_existing_installation() {
   echo
   
   print_color "blue" "📋 What you can do instead:"
-  print_color "gray" "  • Update existing installation: sudo ./setup_payram.sh --update"
-  print_color "gray" "  • Reset environment to start fresh: sudo ./setup_payram.sh --reset"
+  print_color "gray" "  • Update existing installation: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
+  print_color "gray" "  • Reset environment to start fresh: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
   print_color "gray" "  • Check current status: docker ps | grep payram"
   print_color "gray" "  • View logs: docker logs payram"
   if [[ "$container_exists" == true && "$container_running" == false ]]; then
