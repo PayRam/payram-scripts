@@ -2415,7 +2415,7 @@ display_access_urls() {
   
   # Check if SSL is configured (domain name set or SSL certificates exist)
   local ssl_enabled=false
-  if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "" ]] || [[ -f "/etc/letsencrypt/live/"*"/fullchain.pem" ]]; then
+  if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "" ]] || compgen -G "/etc/letsencrypt/live/*/fullchain.pem" > /dev/null 2>&1; then
     ssl_enabled=true
   fi
   
