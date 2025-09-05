@@ -2269,7 +2269,7 @@ reset_payram_environment() {
     print_color "gray" "  • Cron jobs cleaned up"
     echo
     print_color "yellow" "💡 To reinstall PayRam, run:"
-    print_color "gray" "   sudo ./setup_payram.sh"
+    print_color "gray" "   sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\""
   else
     print_color "red" "❌ Reset completed with some issues"
     print_color "yellow" "Some components may need manual removal"
@@ -2413,33 +2413,43 @@ display_access_urls() {
   print_color "green" "🌐 PayRam Access URLs:"
   echo
   
-  # Local access - always show this as it always works
-  print_color "blue" "📍 Local Access (from this server):"
-  print_color "gray" "  • HTTP API: http://localhost:8080"
-  print_color "gray" "  • HTTPS API: https://localhost:8443"
-  print_color "gray" "  • Web Interface: http://localhost"
-  echo
+  # Check if SSL is configured (domain name set or SSL certificates exist)
+  local ssl_enabled=false
+  if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "" ]] || [[ -f "/etc/letsencrypt/live/"*"/fullchain.pem" ]]; then
+    ssl_enabled=true
+  fi
   
   # Public access - show only if we have a valid public IP
   if [[ -n "$public_ip" && "$public_ip" != "ERROR" ]]; then
     print_color "blue" "🌍 Public Access (from anywhere):"
-    print_color "gray" "  • HTTP API: http://$public_ip:8080"
-    print_color "gray" "  • HTTPS API: https://$public_ip:8443"
-    print_color "gray" "  • Web Interface: http://$public_ip"
+    
+    if [[ "$ssl_enabled" == "true" ]]; then
+      print_color "gray" "  • HTTPS API: https://$public_ip:8443"
+      print_color "gray" "  • Web Interface: https://$public_ip/login"
+    else
+      print_color "gray" "  • HTTP API: http://$public_ip:8080"
+      print_color "gray" "  • Web Interface: http://$public_ip/login"
+    fi
+    
     echo
     print_color "yellow" "⚠️  Security Note:"
-    print_color "gray" "  • Ensure firewall allows ports 80, 443, 8080, 8443"
-    print_color "gray" "  • Consider setting up a domain name for production"
+    if [[ "$ssl_enabled" == "true" ]]; then
+      print_color "gray" "  • Ensure firewall allows ports 443, 8443"
+      print_color "gray" "  • SSL is enabled - using secure HTTPS connections"
+    else
+      print_color "gray" "  • Ensure firewall allows ports 80, 8080"
+      print_color "gray" "  • Consider setting up SSL/domain name for production"
+    fi
     print_color "gray" "  • Detected public IP: $public_ip"
   else
     print_color "yellow" "🔍 Public IP Detection:"
     print_color "gray" "  • Could not detect public IP automatically"
     print_color "gray" "  • This is normal for private networks or if internet is unavailable"
     print_color "gray" "  • To check manually: curl -s ifconfig.me"
-    print_color "gray" "  • Public access (if available): http://YOUR_PUBLIC_IP:8080"
+    print_color "gray" "  • Public access (if available): http://YOUR_PUBLIC_IP/login"
     echo
     print_color "blue" "💡 Alternative Access Methods:"
-    print_color "gray" "  • Use localhost URLs above for local access"
+    print_color "gray" "  • Access locally via http://localhost/login"
     print_color "gray" "  • Set up port forwarding if behind NAT/firewall"
     print_color "gray" "  • Configure a domain name for external access"
   fi
@@ -2449,7 +2459,7 @@ display_access_urls() {
   if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "" ]]; then
     print_color "blue" "🏷️  Domain Access (SSL enabled):"
     print_color "gray" "  • HTTPS API: https://$DOMAIN_NAME:8443"
-    print_color "gray" "  • Web Interface: https://$DOMAIN_NAME"
+    print_color "gray" "  • Web Interface: https://$DOMAIN_NAME/login"
     echo
   fi
 }
@@ -3083,8 +3093,9 @@ main() {
     echo
     print_color "blue" "🛠️  Useful Commands:"
     print_color "gray" "  • View logs: docker logs payram"
-    print_color "gray" "  • Update: ./setup_payram.sh --update"
-    print_color "gray" "  • Reset: ./setup_payram.sh --reset"
+    print_color "gray" "  • Update: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
+    print_color "gray" "  • Restart: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --restart"
+    print_color "gray" "  • Reset: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
     echo
   else
     log "ERROR" "PayRam setup failed"
