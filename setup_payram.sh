@@ -630,6 +630,7 @@ set_configuration_defaults() {
   SSL_MODE=""
   DOMAIN_NAME=""
   AES_KEY=""
+  : "${NETWORK_CHOICE:=}"
 }
 
 # Initialize defaults early
@@ -1564,7 +1565,8 @@ validate_docker_tag() {
   local tag_to_check="$1"
   log "INFO" "Validating Docker tag: $tag_to_check..."
   
-  if docker manifest inspect "buddhasource/payram-core:$tag_to_check" >/dev/null 2>&1; then
+  # Use Docker Hub API to check if tag exists
+  if curl -s "https://registry.hub.docker.com/v2/repositories/payramapp/payram/tags/$tag_to_check/" | grep -q '"name"' 2>/dev/null; then
     log "SUCCESS" "Docker tag '$tag_to_check' is valid"
     return 0
   else
@@ -1603,17 +1605,17 @@ deploy_payram_container() {
   
   # Clean up old images
   log "INFO" "Cleaning up old PayRam images..."
-  docker images --filter=reference='buddhasource/payram-core' -q | xargs -r docker rmi -f &>/dev/null || true
+  docker images --filter=reference='payramapp/payram' -q | xargs -r docker rmi -f &>/dev/null || true
   
   # Pull latest image with progress
-  log "INFO" "Pulling PayRam image: buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
+  log "INFO" "Pulling PayRam image: payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
   echo
   print_color "blue" "📥 Downloading Docker image..."
   print_color "gray" "   This may take several minutes depending on your connection"
   echo
   
   # Pull with progress monitoring
-  if ! docker pull "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
+  if ! docker pull "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
     if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
       echo "   $line"
     elif [[ "$line" =~ Status:.*Downloaded ]]; then
@@ -1655,7 +1657,7 @@ deploy_payram_container() {
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
   # Verify deployment
   sleep 5
@@ -1809,10 +1811,10 @@ validate_upgrade_readiness() {
   print_color "yellow" "🏷️  6/7 Checking target image availability..."
   local target_tag="${NEW_IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   if validate_docker_tag "$target_tag" >/dev/null 2>&1; then
-    print_color "green" "   ✅ Target image 'buddhasource/payram-core:$target_tag' is available"
+    print_color "green" "   ✅ Target image 'payramapp/payram:$target_tag' is available"
     ((checks_passed++))
   else
-    print_color "red" "   ❌ Target image 'buddhasource/payram-core:$target_tag' not found"
+    print_color "red" "   ❌ Target image 'payramapp/payram:$target_tag' not found"
   fi
   
   # Check 7: Database connectivity (if external)
@@ -1918,7 +1920,7 @@ update_payram_container() {
   
   # Show final configuration
   log "INFO" "Final Update Configuration:"
-  log "INFO" "  Image: buddhasource/payram-core:$IMAGE_TAG"
+  log "INFO" "  Image: payramapp/payram:$IMAGE_TAG"
   log "INFO" "  Network: $NETWORK_TYPE"
   log "INFO" "  Server: $SERVER"
   log "INFO" "  Database: $DB_HOST:$DB_PORT/$DB_NAME"
@@ -1967,7 +1969,7 @@ deploy_payram_container_update() {
   # Clean up old images
   log "INFO" "Cleaning up old PayRam images..."
   {
-    imgs="$(docker images --filter=reference='buddhasource/payram-core' -q)"
+    imgs="$(docker images --filter=reference='payramapp/payram' -q)"
     if [[ -n "$imgs" ]]; then
       # shellcheck disable=SC2086
       docker rmi -f $imgs
@@ -1975,14 +1977,14 @@ deploy_payram_container_update() {
   } &>/dev/null || true
   
   # Pull latest image with progress
-  log "INFO" "Pulling PayRam image: buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
+  log "INFO" "Pulling PayRam image: payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
   echo
   print_color "blue" "📥 Downloading Docker image..."
   print_color "gray" "   This may take several minutes depending on your connection"
   echo
   
   # Pull with progress monitoring
-  if ! docker pull "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
+  if ! docker pull "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
     if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
       echo "   $line"
     elif [[ "$line" =~ Status:.*Downloaded ]]; then
@@ -2021,7 +2023,7 @@ deploy_payram_container_update() {
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    "buddhasource/payram-core:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
   # Verify deployment
   sleep 5
@@ -2075,7 +2077,7 @@ reset_payram_environment() {
   echo
   print_color "yellow" "🐳 Docker Components:"
   local container_count=$(docker ps -a --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | wc -l)
-  local image_count=$(docker images --filter=reference='buddhasource/payram-core' -q 2>/dev/null | wc -l)
+  local image_count=$(docker images --filter=reference='payramapp/payram' -q 2>/dev/null | wc -l)
   print_color "gray" "  • PayRam container: $([ $container_count -gt 0 ] && echo "✅ Found (will remove)" || echo "❌ Not found")"
   print_color "gray" "  • PayRam images: $([ $image_count -gt 0 ] && echo "✅ Found $image_count image(s) (will remove)" || echo "❌ Not found")"
   echo
@@ -2152,7 +2154,7 @@ reset_payram_environment() {
   # Remove Docker images
   log "INFO" "Step 2/6: Removing PayRam Docker images..."
   {
-    imgs="$(docker images --filter=reference='buddhasource/payram-core' -q)"
+    imgs="$(docker images --filter=reference='payramapp/payram' -q)"
     if [[ -n "$imgs" ]]; then
       # shellcheck disable=SC2086
       docker rmi -f $imgs &>/dev/null
@@ -3054,7 +3056,7 @@ main() {
   # Step 6: Configuration summary
   echo
   print_color "blue" "=== Configuration Summary ==="
-  log "INFO" "Docker Image: buddhasource/payram-core:$IMAGE_TAG"
+  log "INFO" "Docker Image: payramapp/payram:$IMAGE_TAG"
   log "INFO" "Network Mode: $NETWORK_TYPE"
   log "INFO" "Server Mode: $SERVER"
   log "INFO" "Database: $DB_HOST:$DB_PORT/$DB_NAME"
