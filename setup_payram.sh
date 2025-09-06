@@ -630,7 +630,7 @@ set_configuration_defaults() {
   SSL_MODE=""
   DOMAIN_NAME=""
   AES_KEY=""
-  NETWORK_CHOICE=""
+  : "${NETWORK_CHOICE:=}"
 }
 
 # Initialize defaults early
