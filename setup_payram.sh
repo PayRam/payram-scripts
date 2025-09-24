@@ -782,8 +782,19 @@ check_required_ports() {
   
   log "INFO" "Checking required ports for PayRam..."
   
+  # Check if ss command is available, fallback to netstat
+  local check_cmd=""
+  if command -v ss >/dev/null 2>&1; then
+    check_cmd="ss -tuln"
+  elif command -v netstat >/dev/null 2>&1; then
+    check_cmd="netstat -tuln"
+  else
+    log "WARN" "Neither 'ss' nor 'netstat' available - skipping port check"
+    return 0
+  fi
+  
   for port in "${ports[@]}"; do
-    if ss -tuln | grep -q ":$port "; then
+    if $check_cmd 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
       log "ERROR" "Port $port is already in use"
       print_color "red" "❌ Port $port is already in use by another service"
       port_in_use=true
@@ -796,7 +807,8 @@ check_required_ports() {
     echo
     print_color "red" "❌ CRITICAL: Required ports are in use. Please free them or modify the script to use different ports."
     print_color "yellow" "💡 To check what's using a port:"
-    print_color "gray" "   sudo ss -tuln | grep :PORT"
+    print_color "gray" "   sudo $check_cmd | grep :PORT"
+    print_color "gray" "   sudo lsof -i :PORT"
     echo
     exit 1
   fi
