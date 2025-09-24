@@ -783,18 +783,18 @@ check_required_ports() {
   log "INFO" "Checking required ports for PayRam..."
   
   # Check if ss command is available, fallback to netstat
-  local check_cmd=""
+  local check_cmd=()
   if command -v ss >/dev/null 2>&1; then
-    check_cmd="ss -tuln"
+    check_cmd=(ss -tuln)
   elif command -v netstat >/dev/null 2>&1; then
-    check_cmd="netstat -tuln"
+    check_cmd=(netstat -tuln)
   else
     log "WARN" "Neither 'ss' nor 'netstat' available - skipping port check"
     return 0
   fi
   
   for port in "${ports[@]}"; do
-    if $check_cmd 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
+    if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
       log "ERROR" "Port $port is already in use"
       print_color "red" "❌ Port $port is already in use by another service"
       port_in_use=true
