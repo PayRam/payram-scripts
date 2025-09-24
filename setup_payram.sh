@@ -775,6 +775,47 @@ check_disk_space_requirements_silent() {
   fi
 }
 
+# Check required ports for PayRam installation
+check_required_ports() {
+  local ports=(5432 80 443 8080 8443)
+  local port_in_use=false
+  
+  log "INFO" "Checking required ports for PayRam..."
+  
+  # Check if ss command is available, fallback to netstat
+  local check_cmd=()
+  if command -v ss >/dev/null 2>&1; then
+    check_cmd=(ss -tuln)
+  elif command -v netstat >/dev/null 2>&1; then
+    check_cmd=(netstat -tuln)
+  else
+    log "WARN" "Neither 'ss' nor 'netstat' available - skipping port check"
+    return 0
+  fi
+  
+  for port in "${ports[@]}"; do
+    if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
+      log "ERROR" "Port $port is already in use"
+      print_color "red" "❌ Port $port is already in use by another service"
+      port_in_use=true
+    else
+      log "INFO" "Port $port is available"
+    fi
+  done
+  
+  if [[ "$port_in_use" == true ]]; then
+    echo
+    print_color "red" "❌ CRITICAL: Required ports are in use. Please free them or modify the script to use different ports."
+    print_color "yellow" "💡 To check what's using a port:"
+    print_color "gray" "   sudo $check_cmd | grep :PORT"
+    print_color "gray" "   sudo lsof -i :PORT"
+    echo
+    exit 1
+  fi
+  
+  log "SUCCESS" "All required ports are available"
+}
+
 # Enhanced database configuration with better UX
 configure_database() {
   show_progress 8 10 "Configuring database connection..."
@@ -3008,6 +3049,9 @@ main() {
   
   # Check for existing installation before proceeding
   check_existing_installation
+  
+  # Check required ports
+  check_required_ports
   
   # Step 1: System detection
   detect_system_info
