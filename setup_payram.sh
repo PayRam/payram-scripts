@@ -2757,40 +2757,29 @@ OPTIONS:
     --restart                Restart PayRam container
     --reset                  Completely remove PayRam (requires confirmation)
     --testnet               Set up testnet environment (DEVELOPMENT mode)
+    --mainnet               Set up mainnet environment (PRODUCTION mode)
     --tag=<tag>             Specify Docker image tag (required with --update)
     --debug                 Enable debug logging
     -h, --help              Show this help message
 
-EXAMPLES:
-    $0                      # Interactive fresh installation
-    $0 --testnet           # Setup testnet environment
-    $0 --update --tag=v1.5.0  # Update to specific version
-    $0 --restart           # Restart PayRam container
-    $0 --reset             # Complete environment reset
 
-CURL INSTALLATION:
-    # Recommended syntax (most reliable):
-    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --help
-    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --testnet
-    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --update
-    curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh | bash -s -- --update --tag=v1.5.0
+CURL Commands:
+
+    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --help
+    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --testnet
+    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --mainnet
+    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
+    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update --tag=v1.5.0
     
-    # Alternative syntax (arguments inside quotes):
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --help"
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --update"
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --update --tag=v1.5.0"
     
-    # Incorrect syntax (will fail):
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" --help
-    bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" --update
 
 SUPPORTED SYSTEMS:
     • Ubuntu, Debian, Linux Mint
     • CentOS, RHEL, Rocky Linux, AlmaLinux
     • Fedora
-    • Arch Linux, Manjaro
+    • Arch Linux
     • Alpine Linux
-    • macOS (with Homebrew)
+    
 
 For more information, visit: https://github.com/PayRam/payram-scripts
 EOF
@@ -2958,6 +2947,7 @@ main() {
   local update_mode=false
   local reset_mode=false
   local testnet_mode=false
+  local mainnet_mode=false
   local install_mode=false
   local restart_mode=false
   local args_processed=$#
@@ -2985,6 +2975,13 @@ main() {
         testnet_mode=true
         NETWORK_TYPE="testnet"
         SERVER="DEVELOPMENT"
+        install_mode=true
+        shift
+        ;;
+      --mainnet)
+        mainnet_mode=true
+        NETWORK_TYPE="mainnet"
+        SERVER="PRODUCTION"
         install_mode=true
         shift
         ;;
@@ -3068,6 +3065,13 @@ main() {
     log "INFO" "Testnet mode enabled"
     NETWORK_TYPE="testnet"
     SERVER="DEVELOPMENT"
+  fi
+  
+  # Apply mainnet mode if selected
+  if [[ "$mainnet_mode" == true ]]; then
+    log "INFO" "Mainnet mode enabled"
+    NETWORK_TYPE="mainnet"
+    SERVER="PRODUCTION"
   fi
   
   # Apply network selection from interactive menu
