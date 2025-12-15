@@ -2756,8 +2756,8 @@ OPTIONS:
     --update --tag=<version> Update existing PayRam installation to specific version
     --restart                Restart PayRam container
     --reset                  Completely remove PayRam (requires confirmation)
-    --testnet               Set up testnet environment (DEVELOPMENT mode)
-    --mainnet               Set up mainnet environment (PRODUCTION mode)
+    --testnet               Set up testnet environment (DEVELOPMENT mode, recommended for first-time setup)
+    --mainnet               Set up mainnet environment (PRODUCTION mode, use with caution!)
     --tag=<tag>             Specify Docker image tag (required with --update)
     --debug                 Enable debug logging
     -h, --help              Show this help message
