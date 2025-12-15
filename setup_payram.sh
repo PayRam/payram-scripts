@@ -5,7 +5,7 @@ set -euo pipefail
 # PayRam Universal Setup Script v3
 # =============================================================================
 # A universal, cross-platform setup script for PayRam crypto payment gateway
-# Supports: Ubuntu, Debian, CentOS, RHEL, Fedora, Arch, Alpine, macOS
+# Supports: Ubuntu, Debian, CentOS, RHEL, Fedora, Arch, Alpine
 # =============================================================================
 
 # --- GLOBAL SYSTEM INFORMATION ---
