@@ -621,7 +621,7 @@ install_all_dependencies() {
 
 # Configuration defaults
 set_configuration_defaults() {
-  DEFAULT_IMAGE_TAG="1.6.9"
+  DEFAULT_IMAGE_TAG="1.7.4"
   NETWORK_TYPE="mainnet"
   SERVER="PRODUCTION"
   IMAGE_TAG=""
