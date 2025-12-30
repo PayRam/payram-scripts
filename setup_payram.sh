@@ -619,9 +619,30 @@ install_all_dependencies() {
 
 # --- CONFIGURATION MANAGEMENT MODULE ---
 
+# Fetch latest PayRam version from Docker Hub
+fetch_latest_payram_version() {
+  local latest_version=""
+  
+  # Try to fetch from Docker Hub API
+  if command -v curl >/dev/null 2>&1; then
+    latest_version=$(curl -s --connect-timeout 5 --max-time 10 \
+      "https://registry.hub.docker.com/v2/repositories/payramapp/payram/tags/?page_size=100" 2>/dev/null \
+      | grep -oP '"name":\s*"\K[0-9]+\.[0-9]+\.[0-9]+' \
+      | sort -V \
+      | tail -1)
+  fi
+  
+  # Fallback to hardcoded version if fetch fails
+  if [[ -z "$latest_version" ]]; then
+    latest_version="1.7.5"
+  fi
+  
+  echo "$latest_version"
+}
+
 # Configuration defaults
 set_configuration_defaults() {
-  DEFAULT_IMAGE_TAG="1.7.4"
+  DEFAULT_IMAGE_TAG=$(fetch_latest_payram_version)
   NETWORK_TYPE="mainnet"
   SERVER="PRODUCTION"
   IMAGE_TAG=""
