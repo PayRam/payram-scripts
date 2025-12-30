@@ -627,7 +627,9 @@ fetch_latest_payram_version() {
   if command -v curl >/dev/null 2>&1; then
     latest_version=$(curl -s --connect-timeout 5 --max-time 10 \
       "https://registry.hub.docker.com/v2/repositories/payramapp/payram/tags/?page_size=100" 2>/dev/null \
-      | grep -oP '"name":\s*"\K[0-9]+\.[0-9]+\.[0-9]+' \
+      | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+      | sed 's/.*"\([^"]*\)".*/\1/' \
+      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
       | sort -V \
       | tail -1)
   fi
