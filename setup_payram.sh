@@ -634,9 +634,9 @@ fetch_latest_payram_version() {
       | tail -1)
   fi
   
-  # Fallback to hardcoded version if fetch fails
+  # Fallback to latest tag if fetch fails
   if [[ -z "$latest_version" ]]; then
-    latest_version="1.7.5"
+    latest_version="latest"
   fi
   
   echo "$latest_version"
