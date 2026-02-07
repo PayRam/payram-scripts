@@ -17,6 +17,8 @@ echo "PayRam local setup: config and data in this directory"
 echo "  PAYRAM_INFO_DIR=$PAYRAM_INFO_DIR"
 echo "  PAYRAM_CORE_DIR=$PAYRAM_CORE_DIR"
 echo "  LOG_FILE=$LOG_FILE"
+echo "  After setup, use ./headless.sh for CLI-only operations (setup, signin, create-payment-link)."
+echo "  If you just ran ./headless.sh reset-local, choose option 1 (Install PayRam) to deploy a new container."
 echo ""
 
 exec sudo -E ./script.sh "$@"
