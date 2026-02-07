@@ -9,10 +9,10 @@ set -euo pipefail
 # =============================================================================
 
 # --- GLOBAL SYSTEM INFORMATION ---
-declare -g OS_FAMILY=""
-declare -g OS_DISTRO=""
-declare -g OS_VERSION=""
-declare -g PACKAGE_MANAGER=""
+OS_FAMILY=""
+OS_DISTRO=""
+OS_VERSION=""
+PACKAGE_MANAGER=""
 
 # Initialize original user information early
 if [[ -n "${SUDO_USER:-}" ]]; then
@@ -22,13 +22,13 @@ else
   ORIGINAL_USER="$(whoami)"
   ORIGINAL_HOME="$HOME"
 fi
-declare -g SERVICE_MANAGER=""
-declare -g INSTALL_METHOD=""
-declare -g SCRIPT_DIR="${PWD}"
-declare -g LOG_FILE="/tmp/payram-setup.log"
-# Initialize directory variables with defaults
-declare -g PAYRAM_INFO_DIR="${HOME}/.payraminfo"
-declare -g PAYRAM_CORE_DIR="${HOME}/.payram-core"
+SERVICE_MANAGER=""
+INSTALL_METHOD=""
+SCRIPT_DIR="${PWD}"
+LOG_FILE="${LOG_FILE:-/tmp/payram-setup.log}"
+# Initialize directory variables with defaults (override via env for local/CWD setup)
+PAYRAM_INFO_DIR="${PAYRAM_INFO_DIR:-${HOME}/.payraminfo}"
+PAYRAM_CORE_DIR="${PAYRAM_CORE_DIR:-${HOME}/.payram-core}"
 
 # --- CORE UTILITY FUNCTIONS ---
 
@@ -659,7 +659,7 @@ set_configuration_defaults() {
 # Initialize defaults early
 set_configuration_defaults
 
-# Dynamic directory paths based on original user
+# Dynamic directory paths based on original user (respect env when PAYRAM_LOCAL_SETUP=1)
 get_payram_directories() {
   if [[ "$ORIGINAL_USER" == "root" ]]; then
     PAYRAM_HOME="/root"
@@ -667,8 +667,11 @@ get_payram_directories() {
     PAYRAM_HOME="$ORIGINAL_HOME"
   fi
   
-  PAYRAM_INFO_DIR="$PAYRAM_HOME/.payraminfo"
-  PAYRAM_CORE_DIR="$PAYRAM_HOME/.payram-core"
+  # When PAYRAM_LOCAL_SETUP=1, keep PAYRAM_INFO_DIR and PAYRAM_CORE_DIR from env (e.g. CWD)
+  if [[ -z "${PAYRAM_LOCAL_SETUP:-}" ]]; then
+    PAYRAM_INFO_DIR="$PAYRAM_HOME/.payraminfo"
+    PAYRAM_CORE_DIR="$PAYRAM_HOME/.payram-core"
+  fi
   
   log "INFO" "PayRam directories:"
   log "INFO" "  Home: $PAYRAM_HOME"
@@ -843,6 +846,18 @@ check_required_ports() {
 configure_database() {
   show_progress 8 10 "Configuring database connection..."
   
+  # Local/headless setup: use internal DB with defaults, no prompts
+  if [[ -n "${PAYRAM_LOCAL_SETUP:-}" ]]; then
+    log "INFO" "Local setup: using containerized PostgreSQL with defaults"
+    DB_HOST="localhost"
+    DB_PORT="5432"
+    DB_NAME="payram"
+    DB_USER="payram"
+    DB_PASSWORD="payram123"
+    print_color "green" "✅ Local setup: internal database (payram/payram123)"
+    return 0
+  fi
+  
   echo
   print_color "bold" "📊 Database Configuration"
   echo
@@ -993,6 +1008,15 @@ configure_internal_database() {
 # Enhanced SSL configuration
 configure_ssl() {
   show_progress 9 10 "Configuring SSL certificates..."
+  
+  # Local/headless setup: skip SSL (HTTP on localhost only)
+  if [[ -n "${PAYRAM_LOCAL_SETUP:-}" ]]; then
+    SSL_CERT_PATH=""
+    SSL_MODE="external"
+    log "INFO" "Local setup: skipping SSL (HTTP on localhost)"
+    print_color "green" "✅ Local setup: SSL skipped (use http://localhost:8080)"
+    return 0
+  fi
   
   echo
   print_color "bold" "🔒 SSL Certificate Setup"
@@ -1671,15 +1695,23 @@ deploy_payram_container() {
   log "INFO" "Cleaning up old PayRam images..."
   docker images --filter=reference='payramapp/payram' -q | xargs -r docker rmi -f &>/dev/null || true
   
+  # Apple Silicon/ARM64: image has no arm64 manifest, use amd64 emulation
+  local pull_image="payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  local platform_args=()
+  if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
+    platform_args=(--platform linux/amd64)
+    log "INFO" "ARM64 detected: using linux/amd64 platform for compatibility"
+  fi
+
   # Pull latest image with progress
-  log "INFO" "Pulling PayRam image: payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
+  log "INFO" "Pulling PayRam image: $pull_image..."
   echo
   print_color "blue" "📥 Downloading Docker image..."
   print_color "gray" "   This may take several minutes depending on your connection"
   echo
   
   # Pull with progress monitoring
-  if ! docker pull "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
+  if ! docker pull "${platform_args[@]}" "$pull_image" 2>&1 | while IFS= read -r line; do
     if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
       echo "   $line"
     elif [[ "$line" =~ Status:.*Downloaded ]]; then
@@ -1700,6 +1732,7 @@ deploy_payram_container() {
   # Deploy container
   log "INFO" "Starting PayRam container..."
   docker run -d \
+    "${platform_args[@]}" \
     --name payram \
     --restart unless-stopped \
     --publish 8080:8080 \
@@ -1721,7 +1754,7 @@ deploy_payram_container() {
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+    "$pull_image"
   
   # Verify deployment
   sleep 5
@@ -2040,15 +2073,23 @@ deploy_payram_container_update() {
     fi
   } &>/dev/null || true
   
+  # Apple Silicon/ARM64: image has no arm64 manifest, use amd64 emulation
+  local pull_image="payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  local platform_args=()
+  if [[ "$(uname -m)" == "arm64" || "$(uname -m)" == "aarch64" ]]; then
+    platform_args=(--platform linux/amd64)
+    log "INFO" "ARM64 detected: using linux/amd64 platform for compatibility"
+  fi
+
   # Pull latest image with progress
-  log "INFO" "Pulling PayRam image: payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
+  log "INFO" "Pulling PayRam image: $pull_image..."
   echo
   print_color "blue" "📥 Downloading Docker image..."
   print_color "gray" "   This may take several minutes depending on your connection"
   echo
   
   # Pull with progress monitoring
-  if ! docker pull "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
+  if ! docker pull "${platform_args[@]}" "$pull_image" 2>&1 | while IFS= read -r line; do
     if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
       echo "   $line"
     elif [[ "$line" =~ Status:.*Downloaded ]]; then
@@ -2066,6 +2107,7 @@ deploy_payram_container_update() {
   # Deploy container with update-specific volume mounts
   log "INFO" "Starting updated PayRam container..."
   docker run -d \
+    "${platform_args[@]}" \
     --name payram \
     --restart unless-stopped \
     --publish 8080:8080 \
@@ -2087,7 +2129,7 @@ deploy_payram_container_update() {
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+    "$pull_image"
   
   # Verify deployment
   sleep 5
@@ -2915,44 +2957,38 @@ check_existing_installation() {
   
   if [[ "$container_running" == true ]]; then
     print_color "red" "🔥 PayRam is currently RUNNING!"
-    print_color "yellow" "   • To deploy a new instance, first reset the environment:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
-    print_color "yellow" "   • To keep data and upgrade, use update:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
-    echo
-    exit 0
-  else
-    print_color "blue" "💡 Recommended Actions:"
-    print_color "gray" "   • Use --update flag to restart/update installation:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
-    print_color "gray" "   • Use --reset flag to completely remove existing installation:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
-    print_color "gray" "   • Manual container restart: docker start payram"
-    echo
   fi
   
-  print_color "yellow" "💾 Before Continuing - Backup Commands:"
-  print_color "gray" "  # Complete backup (RECOMMENDED)"
-  print_color "gray" "  tar -czf payram-backup-$(date +%Y%m%d-%H%M%S).tar.gz \\"
-  print_color "gray" "      ~/.payraminfo ~/.payram-core 2>/dev/null"
-  print_color "gray" "  "
-  if [[ "$container_running" == true ]]; then
-    print_color "gray" "  # Database backup (while running)"
-    print_color "gray" "  docker exec payram pg_dump -U payram payram > payram-db-backup-$(date +%Y%m%d-%H%M%S).sql"
-  elif [[ "$container_exists" == true ]]; then
-    print_color "gray" "  # Start container temporarily for backup"
-    print_color "gray" "  docker start payram && docker exec payram pg_dump -U payram payram > backup.sql && docker stop payram"
+  print_color "blue" "💡 Options:"
+  print_color "gray" "   • Use --update to restart/update: $0 --update --tag=<version>"
+  print_color "gray" "   • Use --reset to remove everything: $0 --reset"
+  if [[ "$container_exists" == true && "$container_running" == false ]]; then
+    print_color "gray" "   • Start existing container: docker start payram"
   fi
   echo
   
-  print_color "blue" "📋 What you can do instead:"
-  print_color "gray" "  • Update existing installation: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
-  print_color "gray" "  • Reset environment to start fresh: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
-  print_color "gray" "  • Check current status: docker ps | grep payram"
-  print_color "gray" "  • View logs: docker logs payram"
-  if [[ "$container_exists" == true && "$container_running" == false ]]; then
-    print_color "gray" "  • Start existing container: docker start payram"
+  read -p "Clear existing data and start from scratch here? (y/N): " do_clear
+  if [[ "$do_clear" =~ ^[Yy] ]]; then
+    log "INFO" "User chose to clear and start from scratch"
+    print_color "yellow" "Stopping container and removing config/data..."
+    docker stop payram 2>/dev/null || true
+    docker rm -f payram 2>/dev/null || true
+    if [[ -d "$PAYRAM_CORE_DIR" ]]; then
+      rm -rf "$PAYRAM_CORE_DIR"
+      log "INFO" "Removed data directory: $PAYRAM_CORE_DIR"
+      print_color "green" "  ✅ Removed $PAYRAM_CORE_DIR"
+    fi
+    if [[ -d "$PAYRAM_INFO_DIR" ]]; then
+      rm -rf "$PAYRAM_INFO_DIR"
+      log "INFO" "Removed config directory: $PAYRAM_INFO_DIR"
+      print_color "green" "  ✅ Removed $PAYRAM_INFO_DIR"
+    fi
+    print_color "green" "✅ Cleared. Proceeding with fresh setup..."
+    echo
+    return 0
   fi
+  
+  print_color "yellow" "Exiting. Use --update, --reset, or 'docker start payram' as needed."
   echo
   exit 0
 }
