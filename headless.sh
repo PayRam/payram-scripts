@@ -309,7 +309,7 @@ cmd_create_payment_link() {
 # Ensure payram.frontend and payram.backend config exist (required by backend for payment creation).
 # In the normal UI flow these are set implicitly on signin/signup from the request (Origin + Host);
 # there is no migration or seed for them. Headless signin has no Origin so payram.frontend is never set.
-# See docs/CONFIG_FRONTEND_BACKEND.md. Seeds config for local API when missing. Requires admin token.
+# Seeds config for local API when missing. Requires admin token.
 ensure_config() {
   ensure_token || return 1
   local base_url="${PAYRAM_API_URL}"
@@ -835,8 +835,8 @@ usage() {
   echo "Default API: $PAYRAM_API_URL"
   echo ""
   echo "Wallet: Payment links need a deposit wallet. ensure-wallet = BTC (or link existing)."
-  echo "        deploy-scw = ETH/EVM SCW (sign with mnemonic in .payraminfo). See docs/FRONTEND_DEPLOY_AND_HEADLESS.md"
-  echo "Config:  ensure-config seeds payram.frontend/backend for local. See docs/PAYMENT_LINK_URL.md if page hangs."
+  echo "        deploy-scw = ETH/EVM SCW (sign with mnemonic in .payraminfo)."
+  echo "        Full context and env: docs/PAYRAM_HEADLESS_AGENT.md"
 }
 
 main() {
