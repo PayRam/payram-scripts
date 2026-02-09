@@ -2,9 +2,6 @@
   "image": {
     "repo": "payramapp/payram"
   },
-  "defaults": {
-    "container_name": "payram"
-  },
   "health_check": {
     "endpoint": "/api/v1/health"
   }
