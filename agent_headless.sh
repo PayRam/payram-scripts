@@ -840,6 +840,20 @@ usage() {
 }
 
 main() {
+  echo ""
+  echo "============================================================"
+  echo "  PayRam Agent CLI (BETA)"
+  echo "============================================================"
+  echo "  This tool is currently in BETA and under active testing."
+  echo "  If you encounter any bugs or unexpected behavior, please"
+  echo "  open an issue on the repo for our Bug Bounty program:"
+  echo ""
+  echo "    https://github.com/PayRam/payram-scripts/issues"
+  echo ""
+  echo "  We appreciate your help in making PayRam better!"
+  echo "============================================================"
+  echo ""
+
   local cmd="${1:-menu}"
   shift 2>/dev/null || true
   case "$cmd" in
