@@ -224,6 +224,34 @@ dig +short yourdomain.com
 - **Docker Logs**: `docker logs payram-core`
 
 
+## 🤖 Agent / Headless CLI
+
+> **For AI agents and automated workflows only.** These scripts are currently in testing and are not intended for regular client use.
+
+If you are an AI agent (or building agent-based integrations), the following scripts provide a headless CLI for PayRam operations:
+
+| Script | Purpose |
+|--------|---------|
+| `agent_run_local.sh` | Start PayRam locally for agent use (wraps the setup script) |
+| `agent_headless.sh` | Headless CLI — wallet generation, auth, payment links, deployment |
+| `agent_script.sh` | Full automation script used by `agent_run_local.sh` internally |
+
+### Quick Start (Agents)
+
+```bash
+# 1. Start PayRam locally
+./agent_run_local.sh
+
+# 2. Sign in or set up
+./agent_headless.sh setup      # first time
+./agent_headless.sh signin     # subsequent times
+
+# 3. Create a payment link
+./agent_headless.sh create-payment-link
+```
+
+For full agent documentation, see [`docs/PAYRAM_HEADLESS_AGENT.md`](docs/PAYRAM_HEADLESS_AGENT.md).
+
 ## 🤝 Contributing
 
 1. Fork the repository
