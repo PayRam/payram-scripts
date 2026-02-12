@@ -1,0 +1,11 @@
+{
+  "name": "payram-headless-wallet-gen",
+  "private": true,
+  "description": "Generate mnemonic + Bitcoin/ETH XPUB and deploy ETH SCW from headless",
+  "dependencies": {
+    "bip39": "^3.1.0",
+    "bip32": "^4.0.0",
+    "ethers": "^6.13.0",
+    "tiny-secp256k1": "^2.2.3"
+  }
+}

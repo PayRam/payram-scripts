@@ -1,0 +1,5 @@
+# Local PayRam setup (when using run_local.sh)
+.payraminfo/
+.payram-core/
+.payram-setup.log
+scripts/node_modules/
