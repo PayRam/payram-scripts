@@ -1,6 +1,17 @@
 # PayRam Self-Hosted Crypto Payment Gateway
 
-🚀 **One-Line Setup** - Copy, paste, and run:
+Choose one of two paths:
+
+- **Standard setup** (full install + UI)
+- **Agent setup** (single CLI flow for AI agents automation)
+
+**Agent One-Line Setup** - Copy, paste, and run:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram_agents.sh)"
+```
+
+🚀 **Standard One-Line Setup** - Copy, paste, and run:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
@@ -232,22 +243,20 @@ If you are an AI agent (or building agent-based integrations), the following scr
 
 | Script | Purpose |
 |--------|---------|
-| `agent_run_local.sh` | Start PayRam locally for agent use (wraps the setup script) |
-| `agent_headless.sh` | Headless CLI — wallet generation, auth, payment links, deployment |
-| `agent_script.sh` | Full automation script used by `agent_run_local.sh` internally |
+| `setup_payram_agents.sh` | Single agent entrypoint for install and headless operations |
 
 ### Quick Start (Agents)
 
 ```bash
-# 1. Start PayRam locally
-./agent_run_local.sh
+# 1. Start PayRam locally (one-step flow)
+./setup_payram_agents.sh
 
 # 2. Sign in or set up
-./agent_headless.sh setup      # first time
-./agent_headless.sh signin     # subsequent times
+./setup_payram_agents.sh setup      # first time
+./setup_payram_agents.sh signin     # subsequent times
 
 # 3. Create a payment link
-./agent_headless.sh create-payment-link
+./setup_payram_agents.sh create-payment-link
 ```
 
 For full agent documentation, see [`docs/PAYRAM_HEADLESS_AGENT.md`](docs/PAYRAM_HEADLESS_AGENT.md).
