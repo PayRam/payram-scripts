@@ -21,7 +21,7 @@ Run from repo root: `./setup_payram_agents.sh [command]`
 - **One-step flow (install + headless):**
 	- `./setup_payram_agents.sh` (prompts for network, then runs setup/signin/config/wallet/payment)
 - **Headless-only commands:**
-	- `./setup_payram_agents.sh status|setup|signin|ensure-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|reset-local|menu|run`
+	- `./setup_payram_agents.sh status|setup|signin|ensure-config|ensure-wallet|deploy-scw|deploy-scw-flow|setup-eth|setup-base|create-payment-link|reset-local|menu|run`
 
 | Command | Purpose |
 |--------|---------|
@@ -33,6 +33,8 @@ Run from repo root: `./setup_payram_agents.sh [command]`
 | `ensure-wallet` | Create random BTC wallet or link existing to project (for payment links) |
 | `deploy-scw` | Deploy ETH/EVM smart-contract deposit wallet; then auto-link to project |
 | `deploy-scw-flow` | Generate mnemonic -> fund deployer -> balance check -> deploy SCW |
+| `setup-eth` | Setup Ethereum payments (after initial setup) — prompts for funding, deploys SCW |
+| `setup-base` | Setup Base payments (after initial setup) — prompts for funding, deploys SCW |
 | `create-payment-link [projectId] [email] [amountUSD]` | Create payment link; outputs single URL to open |
 | `run` | Full flow: setup/signin → ensure-config/ensure-wallet → create payment link (prompts) |
 | `reset-local [-y]` | Wipe local DB and API data; then run `./setup_payram_agents.sh` again |
@@ -54,6 +56,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_CUSTOMER_ID` | from signin | Usually from token file after signin |
 | `PAYRAM_FRONTEND_URL` | `http://localhost` | Used by ensure-config (local) |
 | `PAYRAM_NETWORK` | `testnet` | One-step flow network selection (`testnet` or `mainnet`) |
+| `PAYRAM_BLOCKCHAIN_SETUP` | `skip` | Non-interactive blockchain choice: `eth`, `base`, or `skip` |
 | `PAYRAM_NODE_MODE` | `docker` | JS runtime: `docker` or `host` |
 | `PAYRAM_NODE_DOCKER_IMAGE` | `node:20-bullseye-slim` | Docker image used for JS scripts |
 | **deploy-scw** | | |
@@ -71,9 +74,10 @@ Token is read from `.payraminfo/headless-tokens.env` (created by signin). Deploy
 
 **Non-interactive defaults:**
 
-- One-step flow defaults to `deploy-scw` for wallet creation.
+- BTC payments are configured by default (no user action required).
+- After initial setup, you'll be prompted to setup ETH or Base (interactive) or use `PAYRAM_BLOCKCHAIN_SETUP=eth|base|skip` (non-interactive).
 - If `PAYRAM_WALLET_CHOICE` is set, prompts are suppressed and that choice is used.
-- If running in non-interactive mode (no TTY), the script will use defaults and continue without prompts.
+- If running in non-interactive mode (no TTY), the script defaults to skipping blockchain setup unless `PAYRAM_BLOCKCHAIN_SETUP` is explicitly set.
 
 ---
 
@@ -94,10 +98,13 @@ The one-step flow does:
 3. Waits for API readiness (`/api/v1/member/root/exist`).
 4. Auth (`setup` if no root user, else `signin`).
 5. `ensure-config` for local frontend/backend settings.
-6. Wallet flow:
-	- Default: `deploy-scw-flow` (ETH SCW).
-	- Optional: `ensure-wallet` (BTC).
-7. Optional payment link creation.
+6. **Blockchain setup prompt:**  
+   After BTC payments are configured, you'll be asked:
+   - Setup ETH payments (Ethereum)
+   - Setup Base payments
+   - Skip and use BTC only (default)
+7. If ETH/Base selected: runs `deploy-scw-flow` (generate mnemonic → fund → deploy SCW).
+8. Optional payment link creation.
 
 ## Deploy-scw flow details
 
@@ -150,9 +157,37 @@ The one-step flow does:
 - **Token / secrets:** `.payraminfo/headless-tokens.env`, `.payraminfo/headless-wallet-secret.txt` (mnemonic). Do not commit.
 - **Scripts:** `scripts/generate-deposit-wallet.js` (BTC), `scripts/generate-deposit-wallet-eth.js` (ETH xpub), `scripts/deploy-scw-eth.js` (SCW deploy). Run via headless commands; deploy-scw is invoked by `./setup_payram_agents.sh deploy-scw`.
 
+## Setting up blockchains after initial setup
+
+After initial PayRam setup (which includes BTC payments), you can add ETH or Base payments using:
+
+**Setup Ethereum payments:**
+```bash
+./setup_payram_agents.sh setup-eth
+```
+
+**Setup Base payments:**
+```bash
+./setup_payram_agents.sh setup-base
+```
+
+Both commands will:
+1. Check authentication (ensure you're signed in)
+2. Set appropriate RPC URL for the network (testnet or mainnet based on `PAYRAM_NETWORK`)
+3. Run the full `deploy-scw-flow` (generate mnemonic → prompt for funding → deploy SCW)
+
+**Network-specific RPC URLs:**
+- **ETH testnet:** Sepolia (`https://eth-sepolia.g.alchemy.com/v2/demo`)
+- **ETH mainnet:** Mainnet (requires your own Alchemy/Infura key)
+- **Base testnet:** Base Sepolia (`https://sepolia.base.org`)
+- **Base mainnet:** Base mainnet (`https://mainnet.base.org`)
+
+You can override the RPC URL by setting `PAYRAM_ETH_RPC_URL` before running the command.
+
 ## Agent automation tips
 
 - Always set `PAYRAM_EMAIL`, `PAYRAM_PASSWORD`, and `PAYRAM_CUSTOMER_ID` for fully non-interactive runs.
+- Use `PAYRAM_BLOCKCHAIN_SETUP=eth|base|skip` to control blockchain setup non-interactively (default: `skip`).
 - Use `PAYRAM_WALLET_CHOICE=1` and `PAYRAM_WALLET_QUIET=1` to avoid wallet prompts.
 - For SCW, set `PAYRAM_SCW_MIN_BALANCE_ETH` to a known safe threshold if your RPC has delayed balance reporting.
 - When using Docker node runtime, ensure Docker is running and has access to host networking.

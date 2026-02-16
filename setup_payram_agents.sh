@@ -28,6 +28,7 @@ One-step options:
 
 Headless commands:
 	status | setup | signin | ensure-config | ensure-wallet | deploy-scw | deploy-scw-flow
+	setup-eth | setup-base
 	create-payment-link [projectId] [email] [amountUSD]
 	reset-local [-y]
 	menu | run
@@ -38,6 +39,7 @@ Env vars:
 	PAYRAM_PAYMENT_EMAIL, PAYRAM_PAYMENT_AMOUNT, PAYRAM_CUSTOMER_ID
 	PAYRAM_FRONTEND_URL
 	PAYRAM_ETH_RPC_URL, PAYRAM_FUND_COLLECTOR, PAYRAM_SCW_NAME, PAYRAM_BLOCKCHAIN_CODE, PAYRAM_MNEMONIC
+	PAYRAM_BLOCKCHAIN_SETUP (eth|base|skip) - for non-interactive blockchain setup
 	PAYRAM_NODE_DOCKER_IMAGE (default node:20-bullseye-slim)
 	PAYRAM_SCRIPTS_REF (default main)
 EOF
@@ -498,21 +500,18 @@ ensure_eth_mnemonic() {
 		return 1
 	fi
 	ensure_node_deps "$script_dir" || return 1
-	local gen parsed mnemonic
+	local gen mnemonic
 	if ! gen=$(run_node "$script_dir" generate-deposit-wallet-eth.js 2>&1); then
 		echo "Failed to generate ETH wallet mnemonic."
 		echo "$gen"
 		return 1
 	fi
-	parsed=$(echo "$gen" | run_node "$script_dir" -e "
-		let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
-			try { const j=JSON.parse(d); console.log('MNEMONIC', j.mnemonic); }
-			catch(e) { process.exit(1); }
-		});
-	" 2>/dev/null)
-	mnemonic=$(echo "$parsed" | grep '^MNEMONIC ' | sed 's/^MNEMONIC //')
+	# Parse JSON output using grep/sed instead of nested node call
+	mnemonic=$(echo "$gen" | grep -o '"mnemonic":"[^"]*"' | head -1 | cut -d'"' -f4)
 	if [[ -z "$mnemonic" ]]; then
 		echo "Failed to parse generated ETH mnemonic."
+		echo "Output was:"
+		echo "$gen"
 		return 1
 	fi
 	mkdir -p "$PAYRAM_INFO_DIR"
@@ -629,17 +628,14 @@ ensure_wallet() {
 			echo "$gen"
 			return 1
 		fi
-		local mnemonic xpub parsed
-		parsed=$(echo "$gen" | run_node "$script_dir/scripts" -e "
-			let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
-				try { const j=JSON.parse(d); console.log('MNEMONIC', j.mnemonic); console.log('XPUB', j.xpub); }
-				catch(e) { process.exit(1); }
-			});
-		" 2>/dev/null)
-		mnemonic=$(echo "$parsed" | grep '^MNEMONIC ' | sed 's/^MNEMONIC //')
-		xpub=$(echo "$parsed" | grep '^XPUB ' | sed 's/^XPUB //')
+		local mnemonic xpub
+		# Parse JSON output using grep/sed instead of nested node call
+		mnemonic=$(echo "$gen" | grep -o '"mnemonic":"[^"]*"' | head -1 | cut -d'"' -f4)
+		xpub=$(echo "$gen" | grep -o '"xpub":"[^"]*"' | head -1 | cut -d'"' -f4)
 		if [[ -z "$xpub" ]]; then
 			echo "Failed to parse generated wallet."
+			echo "Output was:"
+			echo "$gen"
 			return 1
 		fi
 		mkdir -p "$PAYRAM_INFO_DIR"
@@ -683,24 +679,9 @@ ensure_wallet() {
 			return 1
 		fi
 		local wallet_id family
-		parsed=$(echo "$HTTP_BODY" | run_node "$SCRIPT_DIR/scripts" -e "
-			let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
-				try {
-					const list=JSON.parse(d);
-					if(!Array.isArray(list)||list.length===0) { console.log('NONE'); process.exit(0); }
-					const x=list.find(w=>w.walletType==='deposit_wallet')||list[0];
-					const fam=(x.walletxpubs&&x.walletxpubs[0]&&x.walletxpubs[0].family)||'BTC_Family';
-					console.log('WALLET_ID', x.id);
-					console.log('FAMILY', fam);
-				} catch(e) { process.exit(1); }
-			});
-		" 2>/dev/null)
-		wallet_id=$(echo "$parsed" | grep '^WALLET_ID ' | sed 's/^WALLET_ID //')
-		family=$(echo "$parsed" | grep '^FAMILY ' | sed 's/^FAMILY //')
-		if [[ -z "$wallet_id" ]]; then
-			wallet_id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
-			family=$(echo "$HTTP_BODY" | grep -o '"family":"[^"]*"' | head -1 | cut -d'"' -f4)
-		fi
+		# Parse JSON response using grep/sed instead of nested node call
+		wallet_id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
+		family=$(echo "$HTTP_BODY" | grep -o '"family":"[^"]*"' | head -1 | cut -d'"' -f4)
 		if [[ -z "$wallet_id" ]]; then
 			echo "No wallets found. Create one in the dashboard or use option (1) to create a random wallet."
 			return 1
@@ -803,6 +784,109 @@ cmd_deploy_scw() {
 			fi
 		fi
 	fi
+}
+
+prompt_blockchain_setup() {
+	local blockchain_setup="${PAYRAM_BLOCKCHAIN_SETUP:-}"
+	
+	echo "DEBUG: In prompt_blockchain_setup, blockchain_setup=$blockchain_setup" >&2
+	
+	if [[ -n "$blockchain_setup" ]]; then
+		case "$blockchain_setup" in
+			eth|1) echo "DEBUG: Returning 1 for eth" >&2; return 1 ;;
+			base|2) echo "DEBUG: Returning 2 for base" >&2; return 2 ;;
+			skip|3|no) echo "DEBUG: Returning 0 for skip" >&2; return 0 ;;
+			*) echo "Invalid PAYRAM_BLOCKCHAIN_SETUP: $blockchain_setup"; return 0 ;;
+		esac
+	fi
+	
+	if [[ ! -t 0 ]]; then
+		# Non-interactive, skip blockchain setup by default
+		echo "DEBUG: Non-interactive, returning 0" >&2
+		return 0
+	fi
+	
+	echo ""
+	echo "==============================================="
+	echo "  BTC payments are already configured!"
+	echo "==============================================="
+	echo "Would you like to setup additional blockchain payments?"
+	echo ""
+	echo "  1) Setup ETH (Ethereum) payments"
+	echo "  2) Setup Base payments"
+	echo "  3) Skip (use BTC only)"
+	echo ""
+	read -p "Choice [3]: " choice
+	choice="${choice:-3}"
+	
+	echo "DEBUG: User chose: $choice" >&2
+	
+	case "$choice" in
+		1|eth|ETH) echo "DEBUG: Returning 1 for eth" >&2; return 1 ;;
+		2|base|BASE|Base) echo "DEBUG: Returning 2 for base" >&2; return 2 ;;
+		3|skip|no|"") echo "DEBUG: Returning 0 for skip" >&2; return 0 ;;
+		*) echo "Invalid choice, skipping blockchain setup."; echo "DEBUG: Returning 0 for invalid" >&2; return 0 ;;
+	esac
+}
+
+setup_blockchain_rpc() {
+	local blockchain="$1"
+	local network="${PAYRAM_NETWORK:-testnet}"
+	
+	case "$blockchain" in
+		eth)
+			if [[ "$network" == "mainnet" ]]; then
+				export PAYRAM_ETH_RPC_URL="${PAYRAM_ETH_RPC_URL:-https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY_HERE}"
+				export PAYRAM_BLOCKCHAIN_CODE="${PAYRAM_BLOCKCHAIN_CODE:-ETH}"
+				export PAYRAM_SCW_NAME="${PAYRAM_SCW_NAME:-ETH Mainnet Wallet}"
+				echo "Setting up ETH Mainnet payments..."
+			else
+				export PAYRAM_ETH_RPC_URL="${PAYRAM_ETH_RPC_URL:-https://eth-sepolia.g.alchemy.com/v2/demo}"
+				export PAYRAM_BLOCKCHAIN_CODE="${PAYRAM_BLOCKCHAIN_CODE:-ETH}"
+				export PAYRAM_SCW_NAME="${PAYRAM_SCW_NAME:-Sepolia Test Wallet}"
+				echo "Setting up ETH Sepolia (testnet) payments..."
+			fi
+			;;
+		base)
+			if [[ "$network" == "mainnet" ]]; then
+				export PAYRAM_ETH_RPC_URL="${PAYRAM_ETH_RPC_URL:-https://mainnet.base.org}"
+				export PAYRAM_BLOCKCHAIN_CODE="${PAYRAM_BLOCKCHAIN_CODE:-BASE}"
+				export PAYRAM_SCW_NAME="${PAYRAM_SCW_NAME:-Base Mainnet Wallet}"
+				echo "Setting up Base Mainnet payments..."
+			else
+				export PAYRAM_ETH_RPC_URL="${PAYRAM_ETH_RPC_URL:-https://sepolia.base.org}"
+				export PAYRAM_BLOCKCHAIN_CODE="${PAYRAM_BLOCKCHAIN_CODE:-BSEP}"
+				export PAYRAM_SCW_NAME="${PAYRAM_SCW_NAME:-Base Sepolia Wallet}"
+				echo "Setting up Base Sepolia (testnet) payments..."
+			fi
+			;;
+	esac
+	
+	if [[ "${PAYRAM_ETH_RPC_URL}" =~ YOUR_KEY|YOUR_ACTUAL ]]; then
+		echo ""
+		echo "Warning: Default RPC URL detected. For production use, set PAYRAM_ETH_RPC_URL to your own RPC endpoint."
+		if [[ "$network" == "mainnet" ]]; then
+			echo "Get an RPC key from: https://www.alchemy.com/ or https://infura.io/"
+			echo ""
+			return 1
+		fi
+		echo ""
+	fi
+	return 0
+}
+
+cmd_setup_eth() {
+	echo "Setting up ETH payments..."
+	ensure_token || { echo "Sign in first: $0 signin"; return 1; }
+	setup_blockchain_rpc "eth" || return 1
+	cmd_deploy_scw_flow
+}
+
+cmd_setup_base() {
+	echo "Setting up Base payments..."
+	ensure_token || { echo "Sign in first: $0 signin"; return 1; }
+	setup_blockchain_rpc "base" || return 1
+	cmd_deploy_scw_flow
 }
 
 cmd_deploy_scw_flow() {
@@ -998,6 +1082,8 @@ cmd_menu() {
 	echo "  5) ensure-wallet      - Create BTC wallet or link existing (for payment links)"
 	echo "  6) deploy-scw         - Deploy ETH/EVM smart-contract deposit wallet (admin)"
 	echo " 10) deploy-scw-flow    - Generate mnemonic -> fund -> deploy SCW"
+	echo " 11) setup-eth          - Setup ETH blockchain payments"
+	echo " 12) setup-base         - Setup Base blockchain payments"
 	echo "  7) create-payment-link - Create a payment link"
 	echo "  8) run                - Full flow: setup/signin -> wallet -> payment link"
 	echo "  9) reset-local        - Clear database and API data; re-run install"
@@ -1013,6 +1099,8 @@ cmd_menu() {
 		5) ensure_wallet ;;
 		6) cmd_deploy_scw ;;
 		10) cmd_deploy_scw_flow ;;
+		11) cmd_setup_eth ;;
+		12) cmd_setup_base ;;
 		7) cmd_create_payment_link "$@" ;;
 		8) cmd_run ;;
 		9) cmd_reset_local ;;
@@ -1187,6 +1275,8 @@ headless_main() {
 		ensure-wallet) ensure_wallet ;;
 		deploy-scw) cmd_deploy_scw ;;
 		deploy-scw-flow) cmd_deploy_scw_flow ;;
+		setup-eth) cmd_setup_eth ;;
+		setup-base) cmd_setup_base ;;
 		create-payment-link) cmd_create_payment_link "$@" ;;
 		reset-local) cmd_reset_local "$@" ;;
 		menu)     cmd_menu "$@" ;;
@@ -1330,11 +1420,34 @@ flow_main() {
 	log "Ensuring config..."
 	ensure_config
 
+	local setup_blockchain=""
 	if [[ "$wallet_mode" == "deploy-scw" ]]; then
-		log "Deploying SCW wallet..."
+		# Ask user if they want to setup ETH/Base in addition to BTC
+		# Temporarily disable set -e to capture non-zero return codes
+		set +e
+		prompt_blockchain_setup
+		choice_code=$?
+		echo "DEBUG: choice_code=$choice_code" >&2
+		case $choice_code in
+			0) setup_blockchain="skip" ;;
+			1) setup_blockchain="eth" ;;
+			2) setup_blockchain="base" ;;
+		esac
+		echo "DEBUG: setup_blockchain=$setup_blockchain" >&2
+		set -e
+	else
+		# ensure-wallet mode, just do BTC
+		setup_blockchain="skip"
+	fi
+
+	echo "DEBUG: About to check if setup_blockchain != skip" >&2
+	if [[ "$setup_blockchain" != "skip" ]]; then
+		echo "DEBUG: Calling setup_blockchain_rpc $setup_blockchain" >&2
+		setup_blockchain_rpc "$setup_blockchain" || exit 1
+		log "Setting up $setup_blockchain payments..."
 		cmd_deploy_scw_flow
 	else
-		log "Ensuring deposit wallet..."
+		log "Setting up BTC wallet for payments..."
 		ensure_wallet
 	fi
 
