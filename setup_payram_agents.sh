@@ -905,7 +905,7 @@ cmd_create_payment_link() {
 	fi
 	if [[ -z "$amount_usd" ]]; then
 		amount_usd="${PAYRAM_PAYMENT_AMOUNT:-10}"
-		read -p "Amount (USD) [$amount_usd]: " amount_in
+		read -p "Generate a test payment link, Amount (USD) [$amount_usd]: " amount_in
 		[[ -n "$amount_in" ]] && amount_usd="$amount_in"
 	fi
 	local customer_id="${CUSTOMER_ID:-${PAYRAM_CUSTOMER_ID:-}}"
