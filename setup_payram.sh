@@ -1717,6 +1717,7 @@ deploy_payram_container() {
     -e POSTGRES_USERNAME="$DB_USER" \
     -e POSTGRES_PASSWORD="$DB_PASSWORD" \
     -e SSL_CERT_PATH="$SSL_CERT_PATH" \
+    -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
     -v "$PAYRAM_CORE_DIR":/root/payram \
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
@@ -2083,6 +2084,7 @@ deploy_payram_container_update() {
     -e POSTGRES_USERNAME="$DB_USER" \
     -e POSTGRES_PASSWORD="$DB_PASSWORD" \
     -e SSL_CERT_PATH="$SSL_CERT_PATH" \
+    -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
     -v "$PAYRAM_CORE_DIR":/root/payram \
     -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
     -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
