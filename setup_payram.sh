@@ -2596,10 +2596,10 @@ install_payram_updater() {
     return 0
   fi
 
-  local updater_tmp install_log
+  local updater_tmp="" install_log=""
   updater_tmp="$(mktemp)"
   install_log="$(mktemp)"
-  trap 'rm -f "$updater_tmp" "$install_log"' RETURN
+  trap '[[ -n "$updater_tmp" ]] && rm -f "$updater_tmp"; [[ -n "$install_log" ]] && rm -f "$install_log"' RETURN
 
   print_color "gray" "   Downloading updater installer..."
   if ! curl --fail --location --connect-timeout 10 --max-time 60 \
