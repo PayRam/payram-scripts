@@ -1,18 +1,41 @@
 {
   "schema_version": 1,
-  "latest": "feat-updater3",
-  "updater_api_init_version": "feat-updater1",
-  "dashboard_max": "feat-updater2",
-  "breakpoints": [
-    {
-      "version": "feat-updater3",
-      "reason": "Breaking change: manual step required before upgrading to feat-updater3 (example breakpoint for testing).",
-      "docs": "https://docs.payram.com/upgrades/feat-updater3"
-    }
-  ],
+  "latest": "1.8.3",
+  "updater_api_init_version": "1.8.3",
+  "dashboard_max": "1.8.3",
+  "breakpoints": [],
   "releases": [
-    "feat-updater3",
-    "feat-updater2",
-    "feat-updater1"
+    "1.8.2",
+    "1.8.1",
+    "1.8.0",
+    "1.7.9",
+    "1.7.8",
+    "1.7.7",
+    "1.7.6",
+    "1.7.5",
+    "1.7.4",
+    "1.7.0",
+    "1.6.9",
+    "1.2.6",
+    "1.2.5",
+    "1.2.4",
+    "1.2.3",
+    "1.2.2",
+    "1.2.1",
+    "1.2.0",
+    "1.1.6",
+    "1.1.5",
+    "1.1.4",
+    "1.1.3",
+    "1.1.2",
+    "1.1.1",
+    "1.1.0",
+    "1.0.8",
+    "1.0.7",
+    "1.0.6",
+    "1.0.3",
+    "1.0.2",
+    "1.0.1",
+    "1.0.0"
   ]
 }
