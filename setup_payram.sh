@@ -2596,11 +2596,26 @@ install_payram_updater() {
     return 0
   fi
 
-  if FORCE_REINSTALL=false bash <(curl -fsSL "$updater_script_url"); then
+  local updater_tmp
+  updater_tmp="$(mktemp)"
+  trap 'rm -f "$updater_tmp"' RETURN
+
+  if ! curl --fail --show-error --silent --location \
+      --connect-timeout 10 --max-time 60 \
+      "$updater_script_url" -o "$updater_tmp"; then
+    log "WARN" "Failed to download updater installer, skipping"
+    print_color "yellow" "   Install manually: curl -fsSL $updater_script_url | sudo bash"
+    return 0
+  fi
+
+  local install_output
+  if install_output=$(FORCE_REINSTALL=false QUIET=true ENABLE_SERVICE=false INIT_FLAGS="--no-autoupdate" \
+      bash "$updater_tmp" 2>&1); then
     log "SUCCESS" "PayRam Updater installed successfully!"
-    print_color "green" "✅ PayRam Updater is running (port 2567)"
+    print_color "green" "✅ PayRam Updater installed (port 2567)"
   else
     log "WARN" "PayRam Updater installation failed - you can install it manually later:"
+    echo "$install_output" >&2
     print_color "yellow" "   curl -fsSL $updater_script_url | sudo bash"
   fi
   echo
