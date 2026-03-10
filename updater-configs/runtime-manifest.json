@@ -1,0 +1,8 @@
+{
+  "image": {
+    "repo": "payramapp/payram"
+  },
+  "health_check": {
+    "endpoint": "/api/v1/health"
+  }
+}
