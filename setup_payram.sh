@@ -2582,6 +2582,30 @@ display_welcome_banner() {
   sleep 3
 }
 
+# Install PayRam Updater after successful PayRam deployment
+install_payram_updater() {
+  echo
+  print_color "blue" "🔄 Installing PayRam Updater..."
+  print_color "gray" "   The updater service keeps PayRam up-to-date automatically."
+  echo
+
+  local updater_script_url="https://raw.githubusercontent.com/PayRam/payram-updates/main/setup_payram_updater.sh"
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log "WARN" "curl not found, skipping updater installation"
+    return 0
+  fi
+
+  if FORCE_REINSTALL=false bash <(curl -fsSL "$updater_script_url"); then
+    log "SUCCESS" "PayRam Updater installed successfully!"
+    print_color "green" "✅ PayRam Updater is running (port 2567)"
+  else
+    log "WARN" "PayRam Updater installation failed - you can install it manually later:"
+    print_color "yellow" "   curl -fsSL $updater_script_url | sudo bash"
+  fi
+  echo
+}
+
 # Success completion banner
 display_success_banner() {
   echo
@@ -3161,7 +3185,10 @@ main() {
     
     # Display access URLs with both local and public options
     display_access_urls
-    
+
+    # Install the updater service
+    install_payram_updater
+
     print_color "green" "📋 Next Steps:"
     print_color "gray" "  1. Complete setup via web interface"
     print_color "gray" "  2. Configure payment methods"
