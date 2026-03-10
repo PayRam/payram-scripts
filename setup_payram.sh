@@ -2586,7 +2586,7 @@ display_welcome_banner() {
 install_payram_updater() {
   echo
   print_color "blue" "🔄 Installing PayRam Updater..."
-  print_color "gray" "   The updater service keeps PayRam up-to-date automatically."
+  print_color "gray" "   The updater service helps in upgrading PayRam easily from the dashboard."
   echo
 
   local updater_script_url="https://raw.githubusercontent.com/PayRam/payram-updates/main/setup_payram_updater.sh"
