@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install semantic-release
+        run: npm install --no-save semantic-release@25.0.3 @semantic-release/commit-analyzer@13.0.1 @semantic-release/release-notes-generator@14.1.0 @semantic-release/github@12.0.6
+
+      - name: Run semantic-release
+        id: semantic
+        run: |
+          npx semantic-release 2>&1 | tee /tmp/sr-output.txt
+          if grep -qE "Published release [0-9]+\.[0-9]+\.[0-9]+" /tmp/sr-output.txt; then
+            VERSION=$(grep -oE "Published release [0-9]+\.[0-9]+\.[0-9]+" /tmp/sr-output.txt \
+              | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+            echo "released=true" >> $GITHUB_OUTPUT
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "released=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify Slack
+        if: steps.semantic.outputs.released == 'true'
+        run: |
+          VERSION="v${{ steps.semantic.outputs.version }}"
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          RELEASE_URL="${REPO_URL}/releases/tag/${VERSION}"
+
+          NOTES=$(gh release view "$VERSION" --json body --jq '.body')
+          MAX_NOTES=2900
+          if [ ${#NOTES} -gt $MAX_NOTES ]; then
+            NOTES="${NOTES:0:$((MAX_NOTES - 3))}..."
+          fi
+
+          PAYLOAD=$(jq -n \
+            --arg version "$VERSION" \
+            --arg notes "$NOTES" \
+            --arg release_url "$RELEASE_URL" \
+            --arg repo "${{ github.repository }}" \
+            --arg repo_url "$REPO_URL" \
+            --arg branch "${{ github.ref_name }}" \
+            '{
+              "text": ("🚀 New Release: " + $version),
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": ("🚀 New Release: " + $version),
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": ("*Repository:*\n<" + $repo_url + "|" + $repo + ">")
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": ("*Branch:*\n" + $branch)
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": ("*Version:*\n`" + $version + "`")
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": ("*Release:*\n<" + $release_url + "|View on GitHub>")
+                    }
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": $notes
+                  }
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Release on GitHub",
+                        "emoji": true
+                      },
+                      "url": $release_url,
+                      "style": "primary"
+                    }
+                  ]
+                }
+              ]
+            }')
+
+          curl -fsSL -X POST -H 'Content-type: application/json' \
+            --data "$PAYLOAD" \
+            "$SLACK_WEBHOOK_URL"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
