@@ -1004,7 +1004,10 @@ cmd_start_mcp_server() {
 
 	# Re-download when the cached binary is from a different version
 	local mcp_version_file="${PAYRAM_INFO_DIR}/mcp.bin.version"
-	if [[ -f "$mcp_bin" && -f "$mcp_version_file" ]]; then
+	if [[ -f "$mcp_bin" && ! -f "$mcp_version_file" ]]; then
+		log "No version file for cached MCP binary; re-downloading..."
+		rm -f "$mcp_bin" "${mcp_bin}.sha256"
+	elif [[ -f "$mcp_bin" && -f "$mcp_version_file" ]]; then
 		local cached_version
 		cached_version=$(cat "$mcp_version_file" 2>/dev/null || echo "")
 		if [[ "$cached_version" != "$mcp_version" ]]; then
@@ -1055,7 +1058,15 @@ cmd_start_mcp_server() {
 			if [[ "$old_cmd" == *"$mcp_bin"* ]]; then
 				log "Stopping existing MCP server (PID $old_pid)..."
 				kill "$old_pid" 2>/dev/null || true
-				sleep 1
+				for ((w=0; w<5; w++)); do
+					kill -0 "$old_pid" 2>/dev/null || break
+					sleep 1
+				done
+				if kill -0 "$old_pid" 2>/dev/null; then
+					log "MCP server did not exit gracefully; sending SIGKILL..."
+					kill -9 "$old_pid" 2>/dev/null || true
+					sleep 1
+				fi
 			else
 				log "Ignoring stale MCP PID file; PID $old_pid is not the MCP server."
 			fi
@@ -1098,6 +1109,11 @@ cmd_start_mcp_server() {
 	local max_tries=15
 	for ((i=1; i<=max_tries; i++)); do
 		sleep 1
+		if ! kill -0 "$mcp_pid" 2>/dev/null; then
+			echo "MCP server process exited unexpectedly. Check logs: $log_file"
+			rm -f "$pid_file"
+			return 1
+		fi
 		if curl -s "http://localhost:${port}/health" 2>/dev/null | grep -q "ok"; then
 			log "Analytics MCP server running (PID $mcp_pid)"
 			echo "  Endpoint: http://localhost:${port}/"
@@ -1382,6 +1398,10 @@ flow_main() {
 				;;
 			--mcp-port=*)
 				mcp_port="${1#*=}"
+				if ! [[ "$mcp_port" =~ ^[0-9]+$ ]] || (( mcp_port < 1 || mcp_port > 65535 )); then
+					echo "Invalid port: $mcp_port (must be 1-65535)"
+					exit 1
+				fi
 				shift
 				;;
 			--node-mode=*)
