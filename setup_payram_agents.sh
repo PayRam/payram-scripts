@@ -994,6 +994,10 @@ cmd_reset_local() {
 
 cmd_start_mcp_server() {
 	local port="${PAYRAM_MCP_PORT:-3333}"
+	if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+		echo "Invalid MCP server port: '$port' (must be 1-65535)."
+		return 1
+	fi
 	local mcp_bin="${PAYRAM_INFO_DIR}/mcp.bin"
 	local pid_file="${PAYRAM_INFO_DIR}/mcp-server.pid"
 	local log_file="${PAYRAM_INFO_DIR}/mcp-server.log"
@@ -1114,7 +1118,7 @@ cmd_start_mcp_server() {
 			rm -f "$pid_file"
 			return 1
 		fi
-		if curl -s "http://localhost:${port}/health" 2>/dev/null | grep -q "ok"; then
+		if curl -s --connect-timeout 1 --max-time 2 "http://localhost:${port}/health" 2>/dev/null | grep -q "ok"; then
 			log "Analytics MCP server running (PID $mcp_pid)"
 			echo "  Endpoint: http://localhost:${port}/"
 			echo "  Health:   http://localhost:${port}/health"
@@ -1142,7 +1146,7 @@ cmd_menu() {
 	echo " 10) deploy-scw-flow    - Generate mnemonic -> fund -> deploy SCW"
 	echo "  7) create-payment-link - Create a payment link"
 	echo " 11) start-mcp-server   - Start the Analytics MCP server"
-	echo "  8) run                - Full flow: setup/signin -> wallet -> payment link -> MCP server"
+	echo "  8) run                - Full flow: setup/signin -> wallet -> payment link -> MCP server (set PAYRAM_SKIP_MCP_SERVER=1 to omit)"
 	echo "  9) reset-local        - Clear database and API data; re-run install"
 	echo "  0) exit"
 	echo ""
@@ -1304,6 +1308,11 @@ cmd_run() {
 		echo "--- API response (url not found; raw response below) ---"
 	fi
 	echo "$HTTP_BODY"
+
+	if [[ -z "${PAYRAM_SKIP_MCP_SERVER:-}" ]]; then
+		echo ""
+		cmd_start_mcp_server || true
+	fi
 }
 
 headless_main() {
