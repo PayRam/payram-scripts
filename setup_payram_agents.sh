@@ -23,12 +23,15 @@ One-step options:
 	--wallet-choice=1|2|3   Wallet flow choice (1=create, 2=link, 3=skip)
 	--skip-payment-link     Do not create a payment link
 	--create-payment-link   Create a payment link (default)
+	--skip-mcp-server       Do not start the Analytics MCP server
+	--mcp-port=NUMBER       MCP server HTTP port (default 3333)
 	--node-mode=host|docker Node runtime for JS (default docker)
 	-h, --help              Show help
 
 Headless commands:
 	status | setup | signin | ensure-config | ensure-wallet | deploy-scw | deploy-scw-flow
 	create-payment-link [projectId] [email] [amountUSD]
+	start-mcp-server
 	reset-local [-y]
 	menu | run
 
@@ -40,6 +43,8 @@ Env vars:
 	PAYRAM_ETH_RPC_URL, PAYRAM_FUND_COLLECTOR, PAYRAM_SCW_NAME, PAYRAM_BLOCKCHAIN_CODE, PAYRAM_MNEMONIC
 	PAYRAM_NODE_DOCKER_IMAGE (default node:20-bullseye-slim)
 	PAYRAM_SCRIPTS_REF (default main)
+	PAYRAM_MCP_VERSION (default v1.1.0)
+	PAYRAM_MCP_PORT (default 3333)
 EOF
 }
 
@@ -987,6 +992,147 @@ cmd_reset_local() {
 	fi
 }
 
+cmd_start_mcp_server() {
+	local port="${PAYRAM_MCP_PORT:-3333}"
+	if ! [[ "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
+		echo "Invalid MCP server port: '$port' (must be 1-65535)."
+		return 1
+	fi
+	local mcp_bin="${PAYRAM_INFO_DIR}/mcp.bin"
+	local pid_file="${PAYRAM_INFO_DIR}/mcp-server.pid"
+	local log_file="${PAYRAM_INFO_DIR}/mcp-server.log"
+
+	mkdir -p "$PAYRAM_INFO_DIR"
+
+	local mcp_version="${PAYRAM_MCP_VERSION:-v1.1.0}"
+
+	# Re-download when the cached binary is from a different version
+	local mcp_version_file="${PAYRAM_INFO_DIR}/mcp.bin.version"
+	if [[ -f "$mcp_bin" && ! -f "$mcp_version_file" ]]; then
+		log "No version file for cached MCP binary; re-downloading..."
+		rm -f "$mcp_bin" "${mcp_bin}.sha256"
+	elif [[ -f "$mcp_bin" && -f "$mcp_version_file" ]]; then
+		local cached_version
+		cached_version=$(cat "$mcp_version_file" 2>/dev/null || echo "")
+		if [[ "$cached_version" != "$mcp_version" ]]; then
+			log "Cached MCP binary version ($cached_version) differs from requested ($mcp_version); re-downloading..."
+			rm -f "$mcp_bin" "${mcp_bin}.sha256" "$mcp_version_file"
+		fi
+	fi
+
+	if [[ ! -f "$mcp_bin" ]]; then
+		local mcp_base_url="https://github.com/PayRam/analytics-mcp-server/releases/download/${mcp_version}"
+		log "Downloading Analytics MCP server binary (${mcp_version})..."
+		if ! fetch_file "${mcp_base_url}/mcp.bin" "$mcp_bin"; then
+			echo "Failed to download MCP server binary."
+			return 1
+		fi
+		if ! fetch_file "${mcp_base_url}/mcp.bin.sha256" "${mcp_bin}.sha256"; then
+			rm -f "$mcp_bin"
+			echo "Failed to download MCP server checksum."
+			return 1
+		fi
+		log "Verifying MCP server binary checksum..."
+		(
+			cd "$(dirname "$mcp_bin")" &&
+			if command -v sha256sum >/dev/null 2>&1; then
+				sha256sum -c "$(basename "$mcp_bin").sha256"
+			elif command -v shasum >/dev/null 2>&1; then
+				shasum -a 256 -c "$(basename "$mcp_bin").sha256"
+			else
+				echo "Neither sha256sum nor shasum is available; cannot verify binary."
+				exit 1
+			fi
+		) || {
+			rm -f "$mcp_bin" "${mcp_bin}.sha256"
+			echo "MCP server checksum verification failed. Binary removed."
+			return 1
+		}
+		chmod +x "$mcp_bin"
+		echo "$mcp_version" > "$mcp_version_file"
+	fi
+
+	# Stop any previously started instance managed by this script
+	if [[ -f "$pid_file" ]]; then
+		local old_pid
+		old_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+		if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+			local old_cmd
+			old_cmd=$(ps -p "$old_pid" -o args= 2>/dev/null || true)
+			if [[ "$old_cmd" == *"$mcp_bin"* ]]; then
+				log "Stopping existing MCP server (PID $old_pid)..."
+				kill "$old_pid" 2>/dev/null || true
+				for ((w=0; w<5; w++)); do
+					kill -0 "$old_pid" 2>/dev/null || break
+					sleep 1
+				done
+				if kill -0 "$old_pid" 2>/dev/null; then
+					log "MCP server did not exit gracefully; sending SIGKILL..."
+					kill -9 "$old_pid" 2>/dev/null || true
+					sleep 1
+				fi
+			else
+				log "Ignoring stale MCP PID file; PID $old_pid is not the MCP server."
+			fi
+		fi
+		rm -f "$pid_file"
+	fi
+
+	local base_url="${PAYRAM_API_URL}"
+	# Prefer env vars; fall back to whatever the signin/setup flow saved in the token file
+	local email="${PAYRAM_EMAIL:-${MEMBER_EMAIL:-}}"
+	local password="${PAYRAM_PASSWORD:-}"
+
+	if [[ -z "$email" ]]; then
+		load_tokens
+		email="${MEMBER_EMAIL:-}"
+	fi
+
+	if [[ -z "$email" && -t 0 ]]; then
+		read -p "Email for MCP server: " email
+	fi
+	if [[ -z "$password" && -t 0 ]]; then
+		read -s -p "Password for MCP server: " password
+		echo
+	fi
+
+	if [[ -z "$email" || -z "$password" ]]; then
+		echo "MCP server requires credentials. Set PAYRAM_EMAIL/PAYRAM_PASSWORD or run interactively."
+		return 1
+	fi
+
+	log "Starting Analytics MCP server on port $port..."
+	PAYRAM_ANALYTICS_BASE_URL="$base_url" \
+	USER_EMAIL="$email" \
+	USER_PASSWORD="$password" \
+	nohup "$mcp_bin" --http ":${port}" >> "$log_file" 2>&1 &
+	local mcp_pid=$!
+	disown "$mcp_pid"
+	echo "$mcp_pid" > "$pid_file"
+
+	local max_tries=15
+	for ((i=1; i<=max_tries; i++)); do
+		sleep 1
+		if ! kill -0 "$mcp_pid" 2>/dev/null; then
+			echo "MCP server process exited unexpectedly. Check logs: $log_file"
+			rm -f "$pid_file"
+			return 1
+		fi
+		if curl -s --connect-timeout 1 --max-time 2 "http://localhost:${port}/health" 2>/dev/null | grep -q "ok"; then
+			log "Analytics MCP server running (PID $mcp_pid)"
+			echo "  Endpoint: http://localhost:${port}/"
+			echo "  Health:   http://localhost:${port}/health"
+			echo "  Logs:     $log_file"
+			return 0
+		fi
+	done
+
+	kill "$mcp_pid" 2>/dev/null || true
+	rm -f "$pid_file"
+	echo "MCP server did not respond within ${max_tries}s. Check logs: $log_file"
+	return 1
+}
+
 cmd_menu() {
 	echo "PayRam Agent - choose a step"
 	echo "API: $PAYRAM_API_URL"
@@ -999,7 +1145,8 @@ cmd_menu() {
 	echo "  6) deploy-scw         - Deploy ETH/EVM smart-contract deposit wallet (admin)"
 	echo " 10) deploy-scw-flow    - Generate mnemonic -> fund -> deploy SCW"
 	echo "  7) create-payment-link - Create a payment link"
-	echo "  8) run                - Full flow: setup/signin -> wallet -> payment link"
+	echo " 11) start-mcp-server   - Start the Analytics MCP server"
+	echo "  8) run                - Full flow: setup/signin -> wallet -> payment link -> MCP server (set PAYRAM_SKIP_MCP_SERVER=1 to omit)"
 	echo "  9) reset-local        - Clear database and API data; re-run install"
 	echo "  0) exit"
 	echo ""
@@ -1014,6 +1161,7 @@ cmd_menu() {
 		6) cmd_deploy_scw ;;
 		10) cmd_deploy_scw_flow ;;
 		7) cmd_create_payment_link "$@" ;;
+		11) cmd_start_mcp_server ;;
 		8) cmd_run ;;
 		9) cmd_reset_local ;;
 		0) echo "Bye." ; return 0 ;;
@@ -1160,6 +1308,11 @@ cmd_run() {
 		echo "--- API response (url not found; raw response below) ---"
 	fi
 	echo "$HTTP_BODY"
+
+	if [[ -z "${PAYRAM_SKIP_MCP_SERVER:-}" ]]; then
+		echo ""
+		cmd_start_mcp_server || true
+	fi
 }
 
 headless_main() {
@@ -1188,6 +1341,7 @@ headless_main() {
 		deploy-scw) cmd_deploy_scw ;;
 		deploy-scw-flow) cmd_deploy_scw_flow ;;
 		create-payment-link) cmd_create_payment_link "$@" ;;
+		start-mcp-server) cmd_start_mcp_server ;;
 		reset-local) cmd_reset_local "$@" ;;
 		menu)     cmd_menu "$@" ;;
 		run)      cmd_run ;;
@@ -1208,6 +1362,8 @@ flow_main() {
 	local restart_mode="false"
 	local wallet_mode="deploy-scw"
 	local create_payment_link="true"
+	local start_mcp_server="true"
+	local mcp_port="${PAYRAM_MCP_PORT:-3333}"
 	local node_mode="${PAYRAM_NODE_MODE:-docker}"
 	local wallet_choice="${PAYRAM_WALLET_CHOICE:-}"
 
@@ -1243,6 +1399,18 @@ flow_main() {
 				;;
 			--create-payment-link)
 				create_payment_link="true"
+				shift
+				;;
+			--skip-mcp-server)
+				start_mcp_server="false"
+				shift
+				;;
+			--mcp-port=*)
+				mcp_port="${1#*=}"
+				if ! [[ "$mcp_port" =~ ^[0-9]+$ ]] || (( mcp_port < 1 || mcp_port > 65535 )); then
+					echo "Invalid port: $mcp_port (must be 1-65535)"
+					exit 1
+				fi
 				shift
 				;;
 			--node-mode=*)
@@ -1345,13 +1513,21 @@ flow_main() {
 		log "Skipping payment link creation."
 	fi
 
+	if [[ "$start_mcp_server" == "true" ]]; then
+		export PAYRAM_MCP_PORT="$mcp_port"
+		log "Starting Analytics MCP server..."
+		cmd_start_mcp_server || log "MCP server start failed (non-fatal; run 'start-mcp-server' manually)."
+	else
+		log "Skipping Analytics MCP server."
+	fi
+
 	log "Done."
 }
 
 main() {
 	local cmd="${1:-}"
 	case "$cmd" in
-		status|setup|signin|ensure-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|reset-local|menu|run)
+		status|setup|signin|ensure-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|start-mcp-server|reset-local|menu|run)
 			MODE="headless"
 			;;
 		-h|--help)
