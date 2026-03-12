@@ -43,6 +43,7 @@ Env vars:
 	PAYRAM_ETH_RPC_URL, PAYRAM_FUND_COLLECTOR, PAYRAM_SCW_NAME, PAYRAM_BLOCKCHAIN_CODE, PAYRAM_MNEMONIC
 	PAYRAM_NODE_DOCKER_IMAGE (default node:20-bullseye-slim)
 	PAYRAM_SCRIPTS_REF (default main)
+	PAYRAM_MCP_VERSION (default v1.1.0)
 	PAYRAM_MCP_PORT (default 3333)
 EOF
 }
@@ -999,13 +1000,49 @@ cmd_start_mcp_server() {
 
 	mkdir -p "$PAYRAM_INFO_DIR"
 
+	local mcp_version="${PAYRAM_MCP_VERSION:-v1.1.0}"
+
+	# Re-download when the cached binary is from a different version
+	local mcp_version_file="${PAYRAM_INFO_DIR}/mcp.bin.version"
+	if [[ -f "$mcp_bin" && -f "$mcp_version_file" ]]; then
+		local cached_version
+		cached_version=$(cat "$mcp_version_file" 2>/dev/null || echo "")
+		if [[ "$cached_version" != "$mcp_version" ]]; then
+			log "Cached MCP binary version ($cached_version) differs from requested ($mcp_version); re-downloading..."
+			rm -f "$mcp_bin" "${mcp_bin}.sha256" "$mcp_version_file"
+		fi
+	fi
+
 	if [[ ! -f "$mcp_bin" ]]; then
-		log "Downloading Analytics MCP server binary..."
-		if ! fetch_file "https://github.com/PayRam/analytics-mcp-server/releases/latest/download/mcp.bin" "$mcp_bin"; then
+		local mcp_base_url="https://github.com/PayRam/analytics-mcp-server/releases/download/${mcp_version}"
+		log "Downloading Analytics MCP server binary (${mcp_version})..."
+		if ! fetch_file "${mcp_base_url}/mcp.bin" "$mcp_bin"; then
 			echo "Failed to download MCP server binary."
 			return 1
 		fi
+		if ! fetch_file "${mcp_base_url}/mcp.bin.sha256" "${mcp_bin}.sha256"; then
+			rm -f "$mcp_bin"
+			echo "Failed to download MCP server checksum."
+			return 1
+		fi
+		log "Verifying MCP server binary checksum..."
+		(
+			cd "$(dirname "$mcp_bin")" &&
+			if command -v sha256sum >/dev/null 2>&1; then
+				sha256sum -c "$(basename "$mcp_bin").sha256"
+			elif command -v shasum >/dev/null 2>&1; then
+				shasum -a 256 -c "$(basename "$mcp_bin").sha256"
+			else
+				echo "Neither sha256sum nor shasum is available; cannot verify binary."
+				exit 1
+			fi
+		) || {
+			rm -f "$mcp_bin" "${mcp_bin}.sha256"
+			echo "MCP server checksum verification failed. Binary removed."
+			return 1
+		}
 		chmod +x "$mcp_bin"
+		echo "$mcp_version" > "$mcp_version_file"
 	fi
 
 	# Stop any previously started instance managed by this script
@@ -1013,19 +1050,39 @@ cmd_start_mcp_server() {
 		local old_pid
 		old_pid=$(cat "$pid_file" 2>/dev/null || echo "")
 		if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-			log "Stopping existing MCP server (PID $old_pid)..."
-			kill "$old_pid" 2>/dev/null || true
-			sleep 1
+			local old_cmd
+			old_cmd=$(ps -p "$old_pid" -o args= 2>/dev/null || true)
+			if [[ "$old_cmd" == *"$mcp_bin"* ]]; then
+				log "Stopping existing MCP server (PID $old_pid)..."
+				kill "$old_pid" 2>/dev/null || true
+				sleep 1
+			else
+				log "Ignoring stale MCP PID file; PID $old_pid is not the MCP server."
+			fi
 		fi
 		rm -f "$pid_file"
 	fi
 
 	local base_url="${PAYRAM_API_URL}"
-	local email="${PAYRAM_EMAIL:-}"
+	# Prefer env vars; fall back to whatever the signin/setup flow saved in the token file
+	local email="${PAYRAM_EMAIL:-${MEMBER_EMAIL:-}}"
 	local password="${PAYRAM_PASSWORD:-}"
 
+	if [[ -z "$email" ]]; then
+		load_tokens
+		email="${MEMBER_EMAIL:-}"
+	fi
+
+	if [[ -z "$email" && -t 0 ]]; then
+		read -p "Email for MCP server: " email
+	fi
+	if [[ -z "$password" && -t 0 ]]; then
+		read -s -p "Password for MCP server: " password
+		echo
+	fi
+
 	if [[ -z "$email" || -z "$password" ]]; then
-		echo "MCP server requires PAYRAM_EMAIL and PAYRAM_PASSWORD to be set."
+		echo "MCP server requires credentials. Set PAYRAM_EMAIL/PAYRAM_PASSWORD or run interactively."
 		return 1
 	fi
 
@@ -1050,6 +1107,8 @@ cmd_start_mcp_server() {
 		fi
 	done
 
+	kill "$mcp_pid" 2>/dev/null || true
+	rm -f "$pid_file"
 	echo "MCP server did not respond within ${max_tries}s. Check logs: $log_file"
 	return 1
 }
