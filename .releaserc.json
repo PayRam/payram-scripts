@@ -1,8 +1,47 @@
 {
   "branches": ["main"],
   "plugins": [
-    "@semantic-release/commit-analyzer",
-    "@semantic-release/release-notes-generator",
-    "@semantic-release/github"
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "preset": "angular",
+        "releaseRules": [
+          { "type": "feat", "release": "minor" },
+          { "type": "fix", "release": "patch" },
+          { "type": "refactor", "release": "patch" },
+          { "breaking": true, "release": "major" },
+          { "type": "chore", "release": false },
+          { "type": "docs", "release": false },
+          { "type": "test", "release": false },
+          { "type": "ci", "release": false }
+        ]
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "angular",
+        "presetConfig": {
+          "types": [
+            { "type": "feat", "section": "Features" },
+            { "type": "fix", "section": "Bug Fixes" },
+            { "type": "refactor", "section": "Refactors" },
+            { "type": "chore", "hidden": true },
+            { "type": "docs", "hidden": true },
+            { "type": "test", "hidden": true },
+            { "type": "ci", "hidden": true }
+          ]
+        }
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "successComment": false,
+        "failComment": false,
+        "releasedLabels": false
+      }
+    ]
   ]
 }
+
