@@ -31,6 +31,7 @@ jobs:
       - name: Run semantic-release
         id: semantic
         run: |
+          set -o pipefail
           npx semantic-release 2>&1 | tee /tmp/sr-output.txt
           if grep -qE "Published release [0-9]+\.[0-9]+\.[0-9]+" /tmp/sr-output.txt; then
             VERSION=$(grep -oE "Published release [0-9]+\.[0-9]+\.[0-9]+" /tmp/sr-output.txt \
