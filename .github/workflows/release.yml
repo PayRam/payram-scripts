@@ -55,6 +55,13 @@ jobs:
           RELEASE_URL="${REPO_URL}/releases/tag/${VERSION}"
 
           NOTES=$(gh release view "$VERSION" --json body --jq '.body')
+          # Convert markdown to Slack mrkdwn, strip commit links
+          NOTES=$(echo "$NOTES" \
+            | sed '/^# [0-9]/d' \
+            | sed 's/^### \(.*\)/*\1*/g' \
+            | sed 's/^## \(.*\)/*\1*/g' \
+            | sed 's/^\* /• /g' \
+            | sed 's/ (\[.*\]([^)]*))//g')
           MAX_NOTES=2900
           if [ ${#NOTES} -gt $MAX_NOTES ]; then
             NOTES="${NOTES:0:$((MAX_NOTES - 3))}..."
@@ -108,24 +115,6 @@ jobs:
                     "type": "mrkdwn",
                     "text": $notes
                   }
-                },
-                {
-                  "type": "divider"
-                },
-                {
-                  "type": "actions",
-                  "elements": [
-                    {
-                      "type": "button",
-                      "text": {
-                        "type": "plain_text",
-                        "text": "View Release on GitHub",
-                        "emoji": true
-                      },
-                      "url": $release_url,
-                      "style": "primary"
-                    }
-                  ]
                 }
               ]
             }')
