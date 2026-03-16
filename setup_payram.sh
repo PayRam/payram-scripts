@@ -664,8 +664,7 @@ fetch_latest_payram_version() {
 
 # Configuration defaults
 set_configuration_defaults() {
-  # TODO: revert to fetch_latest_payram_version() once testing is complete
-  DEFAULT_IMAGE_TAG="feat-macos-build"
+  DEFAULT_IMAGE_TAG=$(fetch_latest_payram_version)
   NETWORK_TYPE="mainnet"
   SERVER="PRODUCTION"
   IMAGE_TAG=""
@@ -3121,12 +3120,6 @@ main() {
         ;;
     esac
   done
-  
-  # Validate --update: if no --tag given, default to feat-macos-build for testing
-  if [[ "$update_mode" == true && -z "$NEW_IMAGE_TAG" ]]; then
-    NEW_IMAGE_TAG="feat-macos-build"
-    log "INFO" "No --tag specified, defaulting to feat-macos-build for testing"
-  fi
   
   # If no arguments were provided, show interactive menu
   if [[ $args_processed -eq 0 ]]; then
