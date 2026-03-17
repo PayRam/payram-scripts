@@ -641,24 +641,28 @@ install_all_dependencies() {
 
 # Fetch latest PayRam version from Docker Hub
 fetch_latest_payram_version() {
-  local latest_version=""
-  
-  # Try to fetch from Docker Hub API
+  local arch latest_version all_tags
+  arch=$(uname -m)
+
   if command -v curl >/dev/null 2>&1; then
-    latest_version=$(curl -s --connect-timeout 5 --max-time 10 \
+    all_tags=$(curl -s --connect-timeout 5 --max-time 10 \
       "https://registry.hub.docker.com/v2/repositories/payramapp/payram/tags/?page_size=100" 2>/dev/null \
       | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
-      | sed 's/.*"\([^"]*\)".*/\1/' \
-      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-      | sort -V \
-      | tail -1)
+      | sed 's/.*"\([^"]*\)".*/\1/')
+
+    if [[ "$arch" == "arm64" || "$arch" == "aarch64" ]]; then
+      # arm64: tags like 1.8.3-arm64
+      latest_version=$(echo "$all_tags" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-arm64$' | sort -V | tail -1)
+      [[ -z "$latest_version" ]] && latest_version="latest-arm64"
+    else
+      # amd64: tags like 1.8.3 (no suffix)
+      latest_version=$(echo "$all_tags" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+      [[ -z "$latest_version" ]] && latest_version="latest"
+    fi
+  else
+    [[ "$arch" == "arm64" || "$arch" == "aarch64" ]] && latest_version="latest-arm64" || latest_version="latest"
   fi
-  
-  # Fallback to latest tag if fetch fails
-  if [[ -z "$latest_version" ]]; then
-    latest_version="latest"
-  fi
-  
+
   echo "$latest_version"
 }
 
