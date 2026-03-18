@@ -651,12 +651,20 @@ fetch_latest_payram_version() {
       | sed 's/.*"\([^"]*\)".*/\1/')
 
     if [[ "$arch" == "arm64" || "$arch" == "aarch64" ]]; then
-      # arm64: tags like 1.8.3-arm64
-      latest_version=$(echo "$all_tags" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-arm64$' | sort -V | tail -1)
-      [[ -z "$latest_version" ]] && latest_version="latest-arm64"
+      # arm64: strip -arm64, sort numerically (portable), re-append suffix
+      local base
+      base=$(echo "$all_tags" \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-arm64$' \
+        | sed 's/-arm64$//' \
+        | sort -t. -k1,1n -k2,2n -k3,3n \
+        | tail -1)
+      [[ -n "$base" ]] && latest_version="${base}-arm64" || latest_version="latest-arm64"
     else
-      # amd64: tags like 1.8.3 (no suffix)
-      latest_version=$(echo "$all_tags" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+      # amd64: sort numerically (portable)
+      latest_version=$(echo "$all_tags" \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -t. -k1,1n -k2,2n -k3,3n \
+        | tail -1)
       [[ -z "$latest_version" ]] && latest_version="latest"
     fi
   else
