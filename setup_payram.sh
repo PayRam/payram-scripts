@@ -215,7 +215,7 @@ detect_system_info() {
 
   # macOS: root can't reach Colima's user-owned socket without DOCKER_HOST
   if [[ "$OS_FAMILY" == "macos" ]]; then
-    local colima_socket="/Users/$ORIGINAL_USER/.colima/default/docker.sock"
+    local colima_socket="$ORIGINAL_HOME/.colima/default/docker.sock"
     if [[ -S "$colima_socket" ]]; then
       export DOCKER_HOST="unix://$colima_socket"
       log "INFO" "macOS: DOCKER_HOST set to Colima socket ($colima_socket)"
