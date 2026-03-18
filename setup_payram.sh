@@ -2107,7 +2107,10 @@ deploy_payram_container_update() {
     docker ps --filter name=payram
     log "INFO" "Container logs: docker logs payram"
     log "INFO" "Container shell: docker exec -it payram bash"
-    
+
+    # Install/update the updater service for existing deployments
+    install_payram_updater
+
     return 0
   else
     log "ERROR" "PayRam container failed to start"
