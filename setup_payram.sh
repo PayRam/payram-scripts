@@ -520,6 +520,10 @@ install_docker_homebrew() {
   # Enable Colima to auto-start on login
   su - "$ORIGINAL_USER" -c "brew services start colima" || true
 
+  # Homebrew installs to /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel).
+  # Root's PATH doesn't include these — prepend both so docker/colima are findable.
+  export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
   log "SUCCESS" "Colima is running and Docker daemon is ready"
 }
 
@@ -827,6 +831,16 @@ check_disk_space_requirements_silent() {
     fi
   else
     return 0  # Can't check, assume OK
+  fi
+}
+
+# Portable TCP connectivity check: nc if available, bash /dev/tcp fallback
+tcp_check() {
+  local host="$1" port="$2" timeout="${3:-5}"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w"$timeout" "$host" "$port" >/dev/null 2>&1
+  else
+    ( echo >/dev/tcp/"$host"/"$port" ) >/dev/null 2>&1
   fi
 }
 
@@ -1856,7 +1870,7 @@ perform_health_check() {
       print_color "green" "   ✅ Application startup detected in logs"
       
       # Additional check: Try to connect to port 8080
-      if nc -z -w5 127.0.0.1 8080 >/dev/null 2>&1; then
+      if tcp_check 127.0.0.1 8080 5; then
         print_color "green" "   ✅ Port 8080 is accepting connections"
         print_color "green" "   🎉 Health check passed - PayRam is healthy!"
         echo
@@ -1963,7 +1977,7 @@ validate_upgrade_readiness() {
   # Check 7: Database connectivity (if external)
   print_color "yellow" "🗄️  7/7 Checking database connectivity..."
   if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" ]]; then
-    if nc -z -w5 "$DB_HOST" "$DB_PORT" >/dev/null 2>&1; then
+    if tcp_check "$DB_HOST" "$DB_PORT" 5; then
       print_color "green" "   ✅ External database is reachable"
       ((checks_passed++))
     else
