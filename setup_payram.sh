@@ -1436,9 +1436,12 @@ setup_certbot_renewal() {
   fi
 
   if [[ "$OS_FAMILY" == "macos" ]]; then
-    # macOS: /etc/cron.d/ does not exist; add to the original user's crontab instead
-    local cron_line="$rand_min $rand_hour * * * certbot renew --quiet --deploy-hook \"docker restart payram 2>/dev/null || true\""
-    ( su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null"; echo "$cron_line" ) \
+    # macOS: resolve absolute paths for certbot and docker — cron runs with minimal PATH
+    local certbot_bin docker_bin
+    certbot_bin=$(su - "$ORIGINAL_USER" -c "command -v certbot 2>/dev/null || echo /opt/homebrew/bin/certbot")
+    docker_bin=$(su - "$ORIGINAL_USER" -c "command -v docker 2>/dev/null || echo /usr/local/bin/docker")
+    local cron_line="$rand_min $rand_hour * * * $certbot_bin renew --quiet --deploy-hook \"$docker_bin restart payram 2>/dev/null || true\""
+    ( su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" || true; echo "$cron_line" ) \
       | su - "$ORIGINAL_USER" -c "crontab -"
     log "SUCCESS" "Auto-renewal added to user crontab"
   else
