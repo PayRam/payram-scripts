@@ -1055,7 +1055,15 @@ configure_internal_database() {
 # Enhanced SSL configuration
 configure_ssl() {
   show_progress 9 10 "Configuring SSL certificates..."
-  
+
+  # SSL is not supported on macOS — skip entirely
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    print_color "yellow" "⚠️  SSL configuration is not supported on macOS — skipping."
+    print_color "gray" "   PayRam will run on HTTP (port 8080) for local testing."
+    SSL_CERT_PATH=""
+    return 0
+  fi
+
   echo
   print_color "bold" "🔒 SSL Certificate Setup"
   print_color "yellow" "HTTPS is essential for PayRam's security - it protects:"
@@ -1063,29 +1071,26 @@ configure_ssl() {
   print_color "gray" "  • Dashboard access and authentication"
   print_color "gray" "  • Customer payment pages and transactions"
   echo
-  
+
   print_color "blue" "1) Let's Encrypt - Auto-Generate Free SSL (2 minutes)"
   print_color "gray" "   • Automatic certificate generation and installation"
   print_color "gray" "   • Free SSL certificates trusted by all browsers"
   print_color "gray" "   • Auto-renewal every 90 days (with cron job)"
-  print_color "gray" "   • ✅ Perfect for production and development"
   print_color "gray" "   • Requires: Domain name pointing to this server"
   echo
-  
-  print_color "blue" "2) Custom Certificates - Upload Your Own SSL"
-  print_color "gray" "   • Upload your own commercial or internal certificates"
-  print_color "gray" "   • Supports: Wildcard, EV, custom CA certificates"
-  print_color "gray" "   • Files needed: fullchain.pem + privkey.pem"
-  print_color "gray" "   • ✅ Ideal for enterprise and scaled production"
+
+  print_color "blue" "2) Custom Certificates - Use Your Own SSL"
+  print_color "gray" "   • Provide the domain name your certificates are for"
+  print_color "gray" "   • Place fullchain.pem + privkey.pem in /etc/letsencrypt/live/<domain>/"
+  print_color "gray" "   • PayRam will verify the files before proceeding"
   echo
-  
-  print_color "blue" "3) External SSL - Use Cloud/Proxy Services (Often Easiest!)"
-  print_color "gray" "   • Cloudflare SSL (5-min setup, free tier available)"
-  print_color "gray" "   • AWS ALB, Google LB, Azure Gateway, Nginx, Apache"
-  print_color "gray" "   • PayRam runs HTTP behind your SSL termination"
-  print_color "gray" "   • ✅ Great for cloud deployments and existing infrastructure"
+
+  print_color "blue" "3) No SSL for now — I'll configure it later"
+  print_color "gray" "   • PayRam starts on HTTP (port 8080) immediately"
+  print_color "gray" "   • No domain or certificate needed to get started"
+  print_color "gray" "   • You can add SSL certificates anytime when ready"
   echo
-  
+
   while true; do
     read -p "Select option (1-3): " choice
     case $choice in
@@ -1213,86 +1218,45 @@ configure_ssl_letsencrypt() {
 configure_ssl_custom() {
   echo
   print_color "bold" "📁 Custom SSL Certificate Setup"
-  print_color "yellow" "Upload your own SSL certificates (commercial, wildcard, or internal CA)."
+  print_color "yellow" "Provide the domain name your certificates are for."
+  print_color "gray" "  PayRam expects your cert files at: /etc/letsencrypt/live/<domain>/"
+  print_color "gray" "  Required files: fullchain.pem and privkey.pem"
   echo
-  print_color "blue" "Required files in certificate directory:"
-  print_color "gray" "  • fullchain.pem - Complete certificate chain"
-  print_color "gray" "  • privkey.pem - Private key file"
-  echo
-  print_color "blue" "Common certificate locations:"
-  print_color "gray" "  • Let's Encrypt: /etc/letsencrypt/live/yourdomain.com/"
-  print_color "gray" "  • Custom location: /etc/ssl/certs/payram/"
-  print_color "gray" "  • Uploaded files: /opt/ssl-certificates/"
-  echo
-  
+
   while true; do
-    read -p "SSL certificate directory path: " SSL_CERT_PATH
-    
-    if [[ -z "$SSL_CERT_PATH" ]]; then
-      print_color "red" "SSL certificate path cannot be empty"
+    read -p "Enter your domain name (e.g. pay.example.com): " custom_domain
+
+    if [[ -z "$custom_domain" ]]; then
+      print_color "red" "Domain name cannot be empty"
       continue
     fi
-    
-    # Expand tilde to home directory
-    SSL_CERT_PATH="${SSL_CERT_PATH/#\~/$HOME}"
-    
-    if [[ ! -d "$SSL_CERT_PATH" ]]; then
-      print_color "red" "Directory '$SSL_CERT_PATH' does not exist"
-      print_color "yellow" "Create the directory first and copy your certificate files there"
-      continue
+
+    local cert_dir="/etc/letsencrypt/live/$custom_domain"
+
+    if [[ ! -d "$cert_dir" ]]; then
+      print_color "red" "❌ Directory not found: $cert_dir"
+      print_color "yellow" "Make sure you have created the directory and placed your cert files there."
+      read -p "Try a different domain? (y/N): " retry
+      [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
-    
-    if [[ ! -r "$SSL_CERT_PATH" ]]; then
-      print_color "red" "Directory '$SSL_CERT_PATH' is not readable"
-      continue
-    fi
-    
-    # Check for required certificate files
-    local required_files=("fullchain.pem" "privkey.pem")
+
     local missing_files=()
-    
-    for file in "${required_files[@]}"; do
-      if [[ ! -f "$SSL_CERT_PATH/$file" ]]; then
-        missing_files+=("$file")
-      elif [[ ! -r "$SSL_CERT_PATH/$file" ]]; then
-        missing_files+=("$file (not readable)")
-      fi
-    done
-    
+    [[ ! -f "$cert_dir/fullchain.pem" ]] && missing_files+=("fullchain.pem")
+    [[ ! -f "$cert_dir/privkey.pem" ]]   && missing_files+=("privkey.pem")
+
     if [[ ${#missing_files[@]} -gt 0 ]]; then
-      print_color "red" "Missing or unreadable certificate files: ${missing_files[*]}"
-      echo
-      print_color "yellow" "How to fix:"
-      print_color "gray" "  1. Copy your certificate files to: $SSL_CERT_PATH"
-      print_color "gray" "  2. Rename certificate to: fullchain.pem"
-      print_color "gray" "  3. Rename private key to: privkey.pem"
-      print_color "gray" "  4. Set proper permissions: chmod 644 fullchain.pem && chmod 600 privkey.pem"
-      echo
-      
-      read -p "Would you like to try a different path? (y/N): " retry
-      if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-        SSL_CERT_PATH=""
-        print_color "yellow" "Continuing without SSL certificates..."
-        return 0
-      fi
-      continue
+      print_color "red" "❌ Missing files in $cert_dir: ${missing_files[*]}"
+      print_color "yellow" "Make sure fullchain.pem and privkey.pem are present in $cert_dir"
+      read -p "Try a different domain? (y/N): " retry
+      [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
-    
-    # Validate certificate
-    if validate_ssl_certificate "$SSL_CERT_PATH"; then
-      SSL_MODE="custom"
-      print_color "green" "✅ SSL certificates validated successfully!"
-      print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
-      print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
-      break
-    else
-      print_color "red" "❌ Certificate validation failed"
-      read -p "Continue anyway? (y/N): " force_continue
-      if [[ "$force_continue" =~ ^[Yy]$ ]]; then
-        print_color "yellow" "⚠️  Using certificates without validation"
-        break
-      fi
-    fi
+
+    SSL_CERT_PATH="$cert_dir"
+    SSL_MODE="custom"
+    print_color "green" "✅ SSL certificates found for $custom_domain"
+    print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
+    print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
+    break
   done
 }
 
@@ -2702,6 +2666,18 @@ display_welcome_banner() {
   echo
   print_color "yellow" "💡 PayRam Philosophy: Minimal key storage = Maximum security"
   echo
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo
+    print_color "red" "╔══════════════════════════════════════════════════════════╗"
+    print_color "red" "║                !!! IMPORTANT WARNING !!!                 ║"
+    print_color "red" "║                                                          ║"
+    print_color "red" "║           macOS is for TESTING PURPOSES ONLY.            ║"
+    print_color "red" "║    For production: use a dedicated Ubuntu/Debian VPS.    ║"
+    print_color "red" "╚══════════════════════════════════════════════════════════╝"
+    echo
+  fi
+
   sleep 3
 }
 
