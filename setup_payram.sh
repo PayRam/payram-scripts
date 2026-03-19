@@ -391,7 +391,7 @@ get_docker_prerequisites() {
       echo "ca-certificates curl gnupg lsb-release apt-transport-https"
       ;;
     rhel|fedora)
-      echo "yum-utils device-mapper-persistent-data lvm2"
+      echo "curl yum-utils device-mapper-persistent-data lvm2"
       ;;
     arch)
       echo ""  # No prerequisites needed
@@ -839,8 +839,12 @@ tcp_check() {
   local host="$1" port="$2" timeout="${3:-5}"
   if command -v nc >/dev/null 2>&1; then
     nc -z -w"$timeout" "$host" "$port" >/dev/null 2>&1
+  elif command -v curl >/dev/null 2>&1; then
+    # curl telnet:// is curl's own built-in TCP probe — does NOT need the telnet command
+    curl -s --connect-timeout "$timeout" --max-time "$timeout" \
+      "telnet://$host:$port" >/dev/null 2>&1
   else
-    ( echo >/dev/tcp/"$host"/"$port" ) >/dev/null 2>&1
+    return 1
   fi
 }
 
