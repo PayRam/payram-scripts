@@ -1252,8 +1252,15 @@ configure_ssl_custom() {
     fi
 
     SSL_CERT_PATH="$cert_dir"
+    if ! validate_ssl_certificate "$SSL_CERT_PATH"; then
+      print_color "red" "❌ Certificate validation failed for $custom_domain (expired, mismatched key, or invalid format)"
+      SSL_CERT_PATH=""
+      read -p "Try a different domain? (y/N): " retry
+      [[ "$retry" =~ ^[Yy]$ ]] && continue || { print_color "yellow" "Skipping SSL..."; return 0; }
+    fi
     SSL_MODE="custom"
-    print_color "green" "✅ SSL certificates found for $custom_domain"
+    DOMAIN_NAME="$custom_domain"
+    print_color "green" "✅ SSL certificates validated for $custom_domain"
     print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
     print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
     break
