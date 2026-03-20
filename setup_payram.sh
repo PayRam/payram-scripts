@@ -142,7 +142,7 @@ detect_system_info() {
     
     # Determine OS family and capabilities
     case "$OS_DISTRO" in
-      ubuntu|debian|mint|pop|elementary|kali)
+      ubuntu|debian|raspbian|mint|pop|elementary|kali|linuxmint)
         OS_FAMILY="debian"
         PACKAGE_MANAGER="apt"
         INSTALL_METHOD="official"
@@ -179,9 +179,23 @@ detect_system_info() {
         INSTALL_METHOD="fallback"
         ;;
       *)
-        OS_FAMILY="linux"
-        PACKAGE_MANAGER="unknown"
-        INSTALL_METHOD="fallback"
+        # Fallback: check ID_LIKE for derivative distros (e.g. raspbian has ID_LIKE=debian)
+        local id_like="${ID_LIKE:-}"
+        if [[ "$id_like" == *"debian"* || "$id_like" == *"ubuntu"* ]]; then
+          OS_FAMILY="debian"
+          PACKAGE_MANAGER="apt"
+          INSTALL_METHOD="official"
+        elif [[ "$id_like" == *"rhel"* || "$id_like" == *"centos"* || "$id_like" == *"fedora"* ]]; then
+          OS_FAMILY="rhel"
+          PACKAGE_MANAGER="dnf"
+          [[ -x "$(command -v yum)" ]] && PACKAGE_MANAGER="yum"
+          [[ -x "$(command -v dnf)" ]] && PACKAGE_MANAGER="dnf"
+          INSTALL_METHOD="official"
+        else
+          OS_FAMILY="linux"
+          PACKAGE_MANAGER="unknown"
+          INSTALL_METHOD="fallback"
+        fi
         ;;
     esac
     
