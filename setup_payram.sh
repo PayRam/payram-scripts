@@ -2107,7 +2107,10 @@ deploy_payram_container_update() {
     docker ps --filter name=payram
     log "INFO" "Container logs: docker logs payram"
     log "INFO" "Container shell: docker exec -it payram bash"
-    
+
+    # Install/update the updater service for existing deployments
+    install_payram_updater
+
     return 0
   else
     log "ERROR" "PayRam container failed to start"
@@ -2580,6 +2583,46 @@ display_welcome_banner() {
   print_color "yellow" "💡 PayRam Philosophy: Minimal key storage = Maximum security"
   echo
   sleep 3
+}
+
+# Install PayRam Updater after successful PayRam deployment
+install_payram_updater() {
+  echo
+  print_color "blue" "🔄 Installing PayRam Updater..."
+  print_color "gray" "   The updater service helps in upgrading PayRam easily from the dashboard."
+  echo
+
+  local updater_script_url="https://raw.githubusercontent.com/PayRam/payram-updates/main/setup_payram_updater.sh"
+
+  if ! command -v curl >/dev/null 2>&1; then
+    log "WARN" "curl not found, skipping updater installation"
+    return 0
+  fi
+
+  local updater_tmp
+  updater_tmp="$(mktemp)"
+
+  print_color "gray" "   Downloading updater installer..."
+  if ! curl --fail --location --connect-timeout 10 --max-time 60 \
+      "$updater_script_url" -o "$updater_tmp" 2>&1; then
+    rm -f "$updater_tmp"
+    log "WARN" "Failed to download updater installer, skipping"
+    print_color "yellow" "   Install manually: curl -fsSL $updater_script_url | sudo bash"
+    return 0
+  fi
+  print_color "gray" "   Running updater installer..."
+
+  if FORCE_REINSTALL=false QUIET=true ENABLE_SERVICE=true INIT_FLAGS="--no-autoupdate" \
+      bash "$updater_tmp"; then
+    rm -f "$updater_tmp"
+    log "SUCCESS" "PayRam Updater installed successfully!"
+    print_color "green" "✅ PayRam Updater installed (port 2567)"
+  else
+    rm -f "$updater_tmp"
+    log "WARN" "PayRam Updater installation failed - you can install it manually later:"
+    print_color "yellow" "   curl -fsSL $updater_script_url | sudo bash"
+  fi
+  echo
 }
 
 # Success completion banner
@@ -3161,7 +3204,10 @@ main() {
     
     # Display access URLs with both local and public options
     display_access_urls
-    
+
+    # Install the updater service
+    install_payram_updater
+
     print_color "green" "📋 Next Steps:"
     print_color "gray" "  1. Complete setup via web interface"
     print_color "gray" "  2. Configure payment methods"
