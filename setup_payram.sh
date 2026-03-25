@@ -9,10 +9,11 @@ set -euo pipefail
 # =============================================================================
 
 # --- GLOBAL SYSTEM INFORMATION ---
-declare -g OS_FAMILY=""
-declare -g OS_DISTRO=""
-declare -g OS_VERSION=""
-declare -g PACKAGE_MANAGER=""
+# Note: declare -g (bash 4.2+) is not used here; plain assignments work on bash 3.2+ (macOS default)
+OS_FAMILY=""
+OS_DISTRO=""
+OS_VERSION=""
+PACKAGE_MANAGER=""
 
 # Initialize original user information early
 if [[ -n "${SUDO_USER:-}" ]]; then
@@ -22,13 +23,13 @@ else
   ORIGINAL_USER="$(whoami)"
   ORIGINAL_HOME="$HOME"
 fi
-declare -g SERVICE_MANAGER=""
-declare -g INSTALL_METHOD=""
-declare -g SCRIPT_DIR="${PWD}"
-declare -g LOG_FILE="/tmp/payram-setup.log"
+SERVICE_MANAGER=""
+INSTALL_METHOD=""
+SCRIPT_DIR="${PWD}"
+LOG_FILE="/tmp/payram-setup.log"
 # Initialize directory variables with defaults
-declare -g PAYRAM_INFO_DIR="${HOME}/.payraminfo"
-declare -g PAYRAM_CORE_DIR="${HOME}/.payram-core"
+PAYRAM_INFO_DIR="${HOME}/.payraminfo"
+PAYRAM_CORE_DIR="${HOME}/.payram-core"
 
 # --- CORE UTILITY FUNCTIONS ---
 
@@ -141,7 +142,7 @@ detect_system_info() {
     
     # Determine OS family and capabilities
     case "$OS_DISTRO" in
-      ubuntu|debian|mint|pop|elementary|kali)
+      ubuntu|debian|raspbian|mint|pop|elementary|kali|linuxmint)
         OS_FAMILY="debian"
         PACKAGE_MANAGER="apt"
         INSTALL_METHOD="official"
@@ -178,9 +179,23 @@ detect_system_info() {
         INSTALL_METHOD="fallback"
         ;;
       *)
-        OS_FAMILY="linux"
-        PACKAGE_MANAGER="unknown"
-        INSTALL_METHOD="fallback"
+        # Fallback: check ID_LIKE for derivative distros (e.g. raspbian has ID_LIKE=debian)
+        local id_like="${ID_LIKE:-}"
+        if [[ "$id_like" == *"debian"* || "$id_like" == *"ubuntu"* ]]; then
+          OS_FAMILY="debian"
+          PACKAGE_MANAGER="apt"
+          INSTALL_METHOD="official"
+        elif [[ "$id_like" == *"rhel"* || "$id_like" == *"centos"* || "$id_like" == *"fedora"* ]]; then
+          OS_FAMILY="rhel"
+          PACKAGE_MANAGER="dnf"
+          [[ -x "$(command -v yum)" ]] && PACKAGE_MANAGER="yum"
+          [[ -x "$(command -v dnf)" ]] && PACKAGE_MANAGER="dnf"
+          INSTALL_METHOD="official"
+        else
+          OS_FAMILY="linux"
+          PACKAGE_MANAGER="unknown"
+          INSTALL_METHOD="fallback"
+        fi
         ;;
     esac
     
@@ -211,7 +226,18 @@ detect_system_info() {
   fi
   
   show_progress 3 10 "System detection complete"
-  
+
+  # macOS: root can't reach Colima's user-owned socket without DOCKER_HOST
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    local colima_socket="$ORIGINAL_HOME/.colima/default/docker.sock"
+    if [[ -S "$colima_socket" ]]; then
+      export DOCKER_HOST="unix://$colima_socket"
+      log "INFO" "macOS: DOCKER_HOST set to Colima socket ($colima_socket)"
+    else
+      log "WARN" "macOS: Colima socket not found at $colima_socket — Docker commands may fail if Colima is not running"
+    fi
+  fi
+
   # Display results
   log "SUCCESS" "System Detection Results:"
   log "INFO" "  OS Family: $OS_FAMILY"
@@ -379,7 +405,7 @@ get_docker_prerequisites() {
       echo "ca-certificates curl gnupg lsb-release apt-transport-https"
       ;;
     rhel|fedora)
-      echo "yum-utils device-mapper-persistent-data lvm2"
+      echo "curl yum-utils device-mapper-persistent-data lvm2"
       ;;
     arch)
       echo ""  # No prerequisites needed
@@ -496,11 +522,23 @@ install_docker_homebrew() {
     log "INFO" "Installing Homebrew first..."
     su - "$ORIGINAL_USER" -c '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
   fi
-  
-  su - "$ORIGINAL_USER" -c "brew install --cask docker"
-  
-  log "INFO" "Please start Docker Desktop and wait for it to be ready..."
-  wait_for_docker_macos
+
+  # Install Colima (lightweight headless Docker runtime - no GUI needed) and Docker CLI
+  log "INFO" "Installing Colima and Docker CLI..."
+  su - "$ORIGINAL_USER" -c "brew install colima docker"
+
+  # Start Colima - this blocks until the Docker daemon is fully ready (no manual steps needed)
+  log "INFO" "Starting Colima Docker runtime..."
+  su - "$ORIGINAL_USER" -c "colima start"
+
+  # Enable Colima to auto-start on login
+  su - "$ORIGINAL_USER" -c "brew services start colima" || true
+
+  # Homebrew installs to /opt/homebrew/bin (Apple Silicon) or /usr/local/bin (Intel).
+  # Root's PATH doesn't include these — prepend both so docker/colima are findable.
+  export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+  log "SUCCESS" "Colima is running and Docker daemon is ready"
 }
 
 install_docker_distribution_packages() {
@@ -621,24 +659,36 @@ install_all_dependencies() {
 
 # Fetch latest PayRam version from Docker Hub
 fetch_latest_payram_version() {
-  local latest_version=""
-  
-  # Try to fetch from Docker Hub API
+  local arch latest_version all_tags
+  arch=$(uname -m)
+
   if command -v curl >/dev/null 2>&1; then
-    latest_version=$(curl -s --connect-timeout 5 --max-time 10 \
+    all_tags=$(curl -s --connect-timeout 5 --max-time 10 \
       "https://registry.hub.docker.com/v2/repositories/payramapp/payram/tags/?page_size=100" 2>/dev/null \
       | grep -o '"name"[[:space:]]*:[[:space:]]*"[^"]*"' \
-      | sed 's/.*"\([^"]*\)".*/\1/' \
-      | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-      | sort -V \
-      | tail -1)
+      | sed 's/.*"\([^"]*\)".*/\1/')
+
+    if [[ "$arch" == "arm64" || "$arch" == "aarch64" ]]; then
+      # arm64: strip -arm64, sort numerically (portable), re-append suffix
+      local base
+      base=$(echo "$all_tags" \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+-arm64$' \
+        | sed 's/-arm64$//' \
+        | sort -t. -k1,1n -k2,2n -k3,3n \
+        | tail -1)
+      [[ -n "$base" ]] && latest_version="${base}-arm64" || latest_version="latest-arm64"
+    else
+      # amd64: sort numerically (portable)
+      latest_version=$(echo "$all_tags" \
+        | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        | sort -t. -k1,1n -k2,2n -k3,3n \
+        | tail -1)
+      [[ -z "$latest_version" ]] && latest_version="latest"
+    fi
+  else
+    [[ "$arch" == "arm64" || "$arch" == "aarch64" ]] && latest_version="latest-arm64" || latest_version="latest"
   fi
-  
-  # Fallback to latest tag if fetch fails
-  if [[ -z "$latest_version" ]]; then
-    latest_version="latest"
-  fi
-  
+
   echo "$latest_version"
 }
 
@@ -798,6 +848,20 @@ check_disk_space_requirements_silent() {
   fi
 }
 
+# Portable TCP connectivity check: nc if available, bash /dev/tcp fallback
+tcp_check() {
+  local host="$1" port="$2" timeout="${3:-5}"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w"$timeout" "$host" "$port" >/dev/null 2>&1
+  elif command -v curl >/dev/null 2>&1; then
+    # curl telnet:// is curl's own built-in TCP probe — does NOT need the telnet command
+    curl -s --connect-timeout "$timeout" --max-time "$timeout" \
+      "telnet://$host:$port" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
+
 # Check required ports for PayRam installation
 check_required_ports() {
   local ports=(5432 80 443 8080 8443)
@@ -805,32 +869,48 @@ check_required_ports() {
   
   log "INFO" "Checking required ports for PayRam..."
   
-  # Check if ss command is available, fallback to netstat
-  local check_cmd=()
-  if command -v ss >/dev/null 2>&1; then
-    check_cmd=(ss -tuln)
-  elif command -v netstat >/dev/null 2>&1; then
-    check_cmd=(netstat -tuln)
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    # macOS: use nc (netcat, pre-installed on macOS) to attempt a real TCP connection
+    # on each port. This catches everything — OS listeners, Colima SSH tunnels,
+    # existing Docker containers — regardless of who owns the process or socket.
+    # lsof/docker ps both fail here because Colima uses per-user SSH tunnels that
+    # root cannot see, and the Docker socket is not at /var/run/docker.sock.
+    for port in "${ports[@]}"; do
+      if nc -z -w1 127.0.0.1 "$port" >/dev/null 2>&1; then
+        log "ERROR" "Port $port is already in use"
+        print_color "red" "❌ Port $port is already in use by another service"
+        port_in_use=true
+      else
+        log "INFO" "Port $port is available"
+      fi
+    done
   else
-    log "WARN" "Neither 'ss' nor 'netstat' available - skipping port check"
-    return 0
-  fi
-  
-  for port in "${ports[@]}"; do
-    if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
-      log "ERROR" "Port $port is already in use"
-      print_color "red" "❌ Port $port is already in use by another service"
-      port_in_use=true
+    # Linux: use ss, fallback to netstat
+    local check_cmd=()
+    if command -v ss >/dev/null 2>&1; then
+      check_cmd=(ss -tuln)
+    elif command -v netstat >/dev/null 2>&1; then
+      check_cmd=(netstat -tuln)
     else
-      log "INFO" "Port $port is available"
+      log "WARN" "Neither 'ss' nor 'netstat' available - skipping port check"
+      return 0
     fi
-  done
-  
+
+    for port in "${ports[@]}"; do
+      if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
+        log "ERROR" "Port $port is already in use"
+        print_color "red" "❌ Port $port is already in use by another service"
+        port_in_use=true
+      else
+        log "INFO" "Port $port is available"
+      fi
+    done
+  fi
+
   if [[ "$port_in_use" == true ]]; then
     echo
     print_color "red" "❌ CRITICAL: Required ports are in use. Please free them or modify the script to use different ports."
     print_color "yellow" "💡 To check what's using a port:"
-    print_color "gray" "   sudo $check_cmd | grep :PORT"
     print_color "gray" "   sudo lsof -i :PORT"
     echo
     exit 1
@@ -993,7 +1073,15 @@ configure_internal_database() {
 # Enhanced SSL configuration
 configure_ssl() {
   show_progress 9 10 "Configuring SSL certificates..."
-  
+
+  # SSL is not supported on macOS — skip entirely
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    print_color "yellow" "⚠️  SSL configuration is not supported on macOS — skipping."
+    print_color "gray" "   PayRam will run on HTTP (port 8080) for local testing."
+    SSL_CERT_PATH=""
+    return 0
+  fi
+
   echo
   print_color "bold" "🔒 SSL Certificate Setup"
   print_color "yellow" "HTTPS is essential for PayRam's security - it protects:"
@@ -1001,29 +1089,26 @@ configure_ssl() {
   print_color "gray" "  • Dashboard access and authentication"
   print_color "gray" "  • Customer payment pages and transactions"
   echo
-  
+
   print_color "blue" "1) Let's Encrypt - Auto-Generate Free SSL (2 minutes)"
   print_color "gray" "   • Automatic certificate generation and installation"
   print_color "gray" "   • Free SSL certificates trusted by all browsers"
   print_color "gray" "   • Auto-renewal every 90 days (with cron job)"
-  print_color "gray" "   • ✅ Perfect for production and development"
   print_color "gray" "   • Requires: Domain name pointing to this server"
   echo
-  
-  print_color "blue" "2) Custom Certificates - Upload Your Own SSL"
-  print_color "gray" "   • Upload your own commercial or internal certificates"
-  print_color "gray" "   • Supports: Wildcard, EV, custom CA certificates"
-  print_color "gray" "   • Files needed: fullchain.pem + privkey.pem"
-  print_color "gray" "   • ✅ Ideal for enterprise and scaled production"
+
+  print_color "blue" "2) Custom Certificates - Use Your Own SSL"
+  print_color "gray" "   • Provide the domain name your certificates are for"
+  print_color "gray" "   • Place fullchain.pem + privkey.pem in /etc/letsencrypt/live/<domain>/"
+  print_color "gray" "   • PayRam will verify the files before proceeding"
   echo
-  
-  print_color "blue" "3) External SSL - Use Cloud/Proxy Services (Often Easiest!)"
-  print_color "gray" "   • Cloudflare SSL (5-min setup, free tier available)"
-  print_color "gray" "   • AWS ALB, Google LB, Azure Gateway, Nginx, Apache"
-  print_color "gray" "   • PayRam runs HTTP behind your SSL termination"
-  print_color "gray" "   • ✅ Great for cloud deployments and existing infrastructure"
+
+  print_color "blue" "3) No SSL for now — I'll configure it later"
+  print_color "gray" "   • PayRam starts on HTTP (port 8080) immediately"
+  print_color "gray" "   • No domain or certificate needed to get started"
+  print_color "gray" "   • You can add SSL certificates anytime when ready"
   echo
-  
+
   while true; do
     read -p "Select option (1-3): " choice
     case $choice in
@@ -1151,86 +1236,52 @@ configure_ssl_letsencrypt() {
 configure_ssl_custom() {
   echo
   print_color "bold" "📁 Custom SSL Certificate Setup"
-  print_color "yellow" "Upload your own SSL certificates (commercial, wildcard, or internal CA)."
+  print_color "yellow" "Provide the domain name your certificates are for."
+  print_color "gray" "  PayRam expects your cert files at: /etc/letsencrypt/live/<domain>/"
+  print_color "gray" "  Required files: fullchain.pem and privkey.pem"
   echo
-  print_color "blue" "Required files in certificate directory:"
-  print_color "gray" "  • fullchain.pem - Complete certificate chain"
-  print_color "gray" "  • privkey.pem - Private key file"
-  echo
-  print_color "blue" "Common certificate locations:"
-  print_color "gray" "  • Let's Encrypt: /etc/letsencrypt/live/yourdomain.com/"
-  print_color "gray" "  • Custom location: /etc/ssl/certs/payram/"
-  print_color "gray" "  • Uploaded files: /opt/ssl-certificates/"
-  echo
-  
+
   while true; do
-    read -p "SSL certificate directory path: " SSL_CERT_PATH
-    
-    if [[ -z "$SSL_CERT_PATH" ]]; then
-      print_color "red" "SSL certificate path cannot be empty"
+    read -p "Enter your domain name (e.g. pay.example.com): " custom_domain
+
+    if [[ -z "$custom_domain" ]]; then
+      print_color "red" "Domain name cannot be empty"
       continue
     fi
-    
-    # Expand tilde to home directory
-    SSL_CERT_PATH="${SSL_CERT_PATH/#\~/$HOME}"
-    
-    if [[ ! -d "$SSL_CERT_PATH" ]]; then
-      print_color "red" "Directory '$SSL_CERT_PATH' does not exist"
-      print_color "yellow" "Create the directory first and copy your certificate files there"
-      continue
+
+    local cert_dir="/etc/letsencrypt/live/$custom_domain"
+
+    if [[ ! -d "$cert_dir" ]]; then
+      print_color "red" "❌ Directory not found: $cert_dir"
+      print_color "yellow" "Make sure you have created the directory and placed your cert files there."
+      read -p "Try a different domain? (y/N): " retry
+      [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
-    
-    if [[ ! -r "$SSL_CERT_PATH" ]]; then
-      print_color "red" "Directory '$SSL_CERT_PATH' is not readable"
-      continue
-    fi
-    
-    # Check for required certificate files
-    local required_files=("fullchain.pem" "privkey.pem")
+
     local missing_files=()
-    
-    for file in "${required_files[@]}"; do
-      if [[ ! -f "$SSL_CERT_PATH/$file" ]]; then
-        missing_files+=("$file")
-      elif [[ ! -r "$SSL_CERT_PATH/$file" ]]; then
-        missing_files+=("$file (not readable)")
-      fi
-    done
-    
+    [[ ! -f "$cert_dir/fullchain.pem" ]] && missing_files+=("fullchain.pem")
+    [[ ! -f "$cert_dir/privkey.pem" ]]   && missing_files+=("privkey.pem")
+
     if [[ ${#missing_files[@]} -gt 0 ]]; then
-      print_color "red" "Missing or unreadable certificate files: ${missing_files[*]}"
-      echo
-      print_color "yellow" "How to fix:"
-      print_color "gray" "  1. Copy your certificate files to: $SSL_CERT_PATH"
-      print_color "gray" "  2. Rename certificate to: fullchain.pem"
-      print_color "gray" "  3. Rename private key to: privkey.pem"
-      print_color "gray" "  4. Set proper permissions: chmod 644 fullchain.pem && chmod 600 privkey.pem"
-      echo
-      
-      read -p "Would you like to try a different path? (y/N): " retry
-      if [[ ! "$retry" =~ ^[Yy]$ ]]; then
-        SSL_CERT_PATH=""
-        print_color "yellow" "Continuing without SSL certificates..."
-        return 0
-      fi
-      continue
+      print_color "red" "❌ Missing files in $cert_dir: ${missing_files[*]}"
+      print_color "yellow" "Make sure fullchain.pem and privkey.pem are present in $cert_dir"
+      read -p "Try a different domain? (y/N): " retry
+      [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
-    
-    # Validate certificate
-    if validate_ssl_certificate "$SSL_CERT_PATH"; then
-      SSL_MODE="custom"
-      print_color "green" "✅ SSL certificates validated successfully!"
-      print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
-      print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
-      break
-    else
-      print_color "red" "❌ Certificate validation failed"
-      read -p "Continue anyway? (y/N): " force_continue
-      if [[ "$force_continue" =~ ^[Yy]$ ]]; then
-        print_color "yellow" "⚠️  Using certificates without validation"
-        break
-      fi
+
+    SSL_CERT_PATH="$cert_dir"
+    if ! validate_ssl_certificate "$SSL_CERT_PATH"; then
+      print_color "red" "❌ Certificate validation failed for $custom_domain (expired, mismatched key, or invalid format)"
+      SSL_CERT_PATH=""
+      read -p "Try a different domain? (y/N): " retry
+      [[ "$retry" =~ ^[Yy]$ ]] && continue || { print_color "yellow" "Skipping SSL..."; return 0; }
     fi
+    SSL_MODE="custom"
+    DOMAIN_NAME="$custom_domain"
+    print_color "green" "✅ SSL certificates validated for $custom_domain"
+    print_color "gray" "  Certificate: $SSL_CERT_PATH/fullchain.pem"
+    print_color "gray" "  Private Key: $SSL_CERT_PATH/privkey.pem"
+    break
   done
 }
 
@@ -1374,22 +1425,42 @@ generate_letsencrypt_cert() {
 # Setup automatic renewal
 setup_certbot_renewal() {
   local domain="$1"
-  
+
   log "INFO" "Setting up automatic certificate renewal..."
-  
-  # Create renewal script
-  cat > /etc/cron.d/payram-certbot-renewal << EOF
+
+  # shuf is GNU coreutils (Linux only); fall back to bash built-in $RANDOM on macOS
+  local rand_min rand_hour
+  if command -v shuf >/dev/null 2>&1; then
+    rand_min=$(shuf -i 0-59 -n 1)
+    rand_hour=$(shuf -i 0-23 -n 1)
+  else
+    rand_min=$(( RANDOM % 60 ))
+    rand_hour=$(( RANDOM % 24 ))
+  fi
+
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    # macOS: resolve absolute paths for certbot and docker — cron runs with minimal PATH
+    local certbot_bin docker_bin
+    certbot_bin=$(su - "$ORIGINAL_USER" -c "command -v certbot 2>/dev/null || echo /opt/homebrew/bin/certbot")
+    docker_bin=$(su - "$ORIGINAL_USER" -c "command -v docker 2>/dev/null || echo /usr/local/bin/docker")
+    local cron_line="$rand_min $rand_hour * * * $certbot_bin renew --quiet --deploy-hook \"$docker_bin restart payram 2>/dev/null || true\""
+    ( su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" || true; echo "$cron_line" ) \
+      | su - "$ORIGINAL_USER" -c "crontab -"
+    log "SUCCESS" "Auto-renewal added to user crontab"
+  else
+    # Linux: write to /etc/cron.d/
+    cat > /etc/cron.d/payram-certbot-renewal << EOF
 # PayRam Let's Encrypt Certificate Renewal
-# Runs twice daily at random minutes to avoid load spikes
-$(shuf -i 0-59 -n 1) $(shuf -i 0-23 -n 1) * * * root certbot renew --quiet --deploy-hook "docker restart payram 2>/dev/null || true"
+# Runs once daily at a random time to avoid load spikes
+$rand_min $rand_hour * * * root certbot renew --quiet --deploy-hook "docker restart payram 2>/dev/null || true"
 EOF
-  
-  chmod 644 /etc/cron.d/payram-certbot-renewal
-  
+    chmod 644 /etc/cron.d/payram-certbot-renewal
+  fi
+
   # Test renewal (dry run)
   if certbot renew --dry-run --quiet; then
     print_color "green" "✅ Auto-renewal configured and tested successfully"
-    print_color "gray" "  • Renewal runs twice daily automatically"
+    print_color "gray" "  • Renewal runs once daily automatically"
     print_color "gray" "  • PayRam will restart after certificate updates"
     print_color "gray" "  • Check renewal status: certbot certificates"
   else
@@ -1691,13 +1762,23 @@ deploy_payram_container() {
   fi
   echo
   
-  # Create data directories
-  mkdir -p "$PAYRAM_CORE_DIR"/{log/supervisord,db/postgres}
+  # Create data directories (macOS: only log dir needed; postgres uses a named volume)
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    mkdir -p "$PAYRAM_CORE_DIR"/log/supervisord
+  else
+    mkdir -p "$PAYRAM_CORE_DIR"/{log/supervisord,db/postgres}
+  fi
   if [[ "$ORIGINAL_USER" != "root" ]]; then
     chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"
   fi
 
-  # Deploy container
+  # macOS: postgres uses a named volume (VirtioFS ownership conflict); Linux: bind mount
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
+  else
+    vol_postgres="$PAYRAM_CORE_DIR/db/postgres:/var/lib/payram/db/postgres"
+  fi
+  vol_logs="$PAYRAM_CORE_DIR/log/supervisord:/var/log"
   log "INFO" "Starting PayRam container..."
   docker run -d \
     --name payram \
@@ -1719,8 +1800,8 @@ deploy_payram_container() {
     -e SSL_CERT_PATH="$SSL_CERT_PATH" \
     -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
     -v "$PAYRAM_CORE_DIR":/root/payram \
-    -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
-    -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
+    -v "$vol_logs" \
+    -v "$vol_postgres" \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
     "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
@@ -1778,7 +1859,7 @@ perform_health_check() {
       print_color "green" "   ✅ Application startup detected in logs"
       
       # Additional check: Try to connect to port 8080
-      if timeout 5 bash -c "</dev/tcp/127.0.0.1/8080" >/dev/null 2>&1; then
+      if tcp_check 127.0.0.1 8080 5; then
         print_color "green" "   ✅ Port 8080 is accepting connections"
         print_color "green" "   🎉 Health check passed - PayRam is healthy!"
         echo
@@ -1865,7 +1946,7 @@ validate_upgrade_readiness() {
   
   # Check 5: Network connectivity
   print_color "yellow" "🌐 5/7 Checking network connectivity..."
-  if timeout 10 curl -s https://registry-1.docker.io >/dev/null 2>&1; then
+  if curl -s --connect-timeout 5 --max-time 10 https://registry-1.docker.io >/dev/null 2>&1; then
     print_color "green" "   ✅ Docker registry accessible"
     ((checks_passed++))
   else
@@ -1885,7 +1966,7 @@ validate_upgrade_readiness() {
   # Check 7: Database connectivity (if external)
   print_color "yellow" "🗄️  7/7 Checking database connectivity..."
   if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" ]]; then
-    if timeout 5 bash -c "</dev/tcp/$DB_HOST/$DB_PORT" >/dev/null 2>&1; then
+    if tcp_check "$DB_HOST" "$DB_PORT" 5; then
       print_color "green" "   ✅ External database is reachable"
       ((checks_passed++))
     else
@@ -1991,7 +2072,15 @@ update_payram_container() {
   log "INFO" "  Database: $DB_HOST:$DB_PORT/$DB_NAME"
   
   read -p "Press [Enter] to proceed with update..."
-  
+
+  # If staying on the same tag, just restart — no pull/redeploy needed
+  if [[ "$IMAGE_TAG" == "$current_tag" ]]; then
+    log "INFO" "Same version selected — restarting container without re-pulling..."
+    docker restart payram
+    log "SUCCESS" "PayRam restarted on $IMAGE_TAG"
+    return 0
+  fi
+
   # Validate Docker tag BEFORE stopping container
   if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
     log "ERROR" "Cannot proceed with invalid Docker tag: ${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
@@ -2065,6 +2154,12 @@ deploy_payram_container_update() {
   save_configuration
   
   # Deploy container with update-specific volume mounts
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
+  else
+    vol_postgres="$PAYRAM_CORE_DIR/db/postgres:/var/lib/payram/db/postgres"
+  fi
+  vol_logs="$PAYRAM_CORE_DIR/log/supervisord:/var/log"
   log "INFO" "Starting updated PayRam container..."
   docker run -d \
     --name payram \
@@ -2086,8 +2181,8 @@ deploy_payram_container_update() {
     -e SSL_CERT_PATH="$SSL_CERT_PATH" \
     -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
     -v "$PAYRAM_CORE_DIR":/root/payram \
-    -v "$PAYRAM_CORE_DIR/log/supervisord":/var/log \
-    -v "$PAYRAM_CORE_DIR/db/postgres":/var/lib/payram/db/postgres \
+    -v "$vol_logs" \
+    -v "$vol_postgres" \
     -v /etc/letsencrypt:/etc/letsencrypt:ro \
     "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
@@ -2283,14 +2378,25 @@ reset_payram_environment() {
   # Remove cron jobs
   log "INFO" "Step 5/6: Removing PayRam cron jobs..."
   local removed_cron=false
-  for cron_file in /etc/cron.d/payram-*; do
-    if [[ -f "$cron_file" ]]; then
-      rm -f "$cron_file" &>/dev/null || true
-      print_color "green" "  ✅ Removed cron job: $(basename "$cron_file")"
+
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    # macOS: renewal was written to user crontab (no /etc/cron.d/ on macOS)
+    if su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" | grep -q "certbot renew"; then
+      su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -"
+      print_color "green" "  ✅ Removed PayRam certbot renewal from user crontab"
       removed_cron=true
     fi
-  done
-  
+  else
+    # Linux: remove from /etc/cron.d/
+    for cron_file in /etc/cron.d/payram-*; do
+      if [[ -f "$cron_file" ]]; then
+        rm -f "$cron_file" &>/dev/null || true
+        print_color "green" "  ✅ Removed cron job: $(basename "$cron_file")"
+        removed_cron=true
+      fi
+    done
+  fi
+
   if [[ "$removed_cron" == false ]]; then
     print_color "yellow" "  ⚠️  No PayRam cron jobs found"
   fi
@@ -2302,6 +2408,12 @@ reset_payram_environment() {
     print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
   else
     print_color "yellow" "  ⚠️  Data directory not found: $PAYRAM_CORE_DIR"
+  fi
+  # macOS: also remove named Docker volumes used for postgres and logs
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    if docker volume rm payram-postgres-data 2>/dev/null; then
+      print_color "green" "  ✅ Named Docker volume removed (payram-postgres-data)"
+    fi
   fi
   
   if [[ -d "$PAYRAM_INFO_DIR" ]]; then
@@ -2397,10 +2509,10 @@ get_public_ip() {
   for service in "${ip_services[@]}"; do
     if [[ "$has_curl" == true ]]; then
       # Use curl with comprehensive error handling
-      public_ip=$(timeout 15 curl -s --connect-timeout 5 --max-time 10 --retry 1 --fail "$service" 2>/dev/null | head -1 | grep -oE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || echo "")
+      public_ip=$(curl -s --connect-timeout 5 --max-time 10 --retry 1 --fail "$service" 2>/dev/null | head -1 | grep -oE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || echo "")
     elif [[ "$has_wget" == true ]]; then
       # Use wget with comprehensive error handling  
-      public_ip=$(timeout 15 wget -qO- --timeout=10 --tries=1 "$service" 2>/dev/null | head -1 | grep -oE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || echo "")
+      public_ip=$(wget -qO- --timeout=10 --tries=1 "$service" 2>/dev/null | head -1 | grep -oE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || echo "")
     fi
     
     # Validate the IP format more strictly
@@ -2582,6 +2694,18 @@ display_welcome_banner() {
   echo
   print_color "yellow" "💡 PayRam Philosophy: Minimal key storage = Maximum security"
   echo
+
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo
+    print_color "red" "╔══════════════════════════════════════════════════════════╗"
+    print_color "red" "║                !!! IMPORTANT WARNING !!!                 ║"
+    print_color "red" "║                                                          ║"
+    print_color "red" "║           macOS is for TESTING PURPOSES ONLY.            ║"
+    print_color "red" "║    For production: use a dedicated Ubuntu/Debian VPS.    ║"
+    print_color "red" "╚══════════════════════════════════════════════════════════╝"
+    echo
+  fi
+
   sleep 3
 }
 
@@ -3070,14 +3194,6 @@ main() {
     esac
   done
   
-  # Validate --update requires --tag
-  if [[ "$update_mode" == true && -z "$NEW_IMAGE_TAG" ]]; then
-    log "ERROR" "--update requires --tag parameter to specify version"
-    print_color "red" "❌ Error: --update must be used with --tag=version"
-    print_color "yellow" "Example: $0 --update --tag=v1.2.0"
-    exit 1
-  fi
-  
   # If no arguments were provided, show interactive menu
   if [[ $args_processed -eq 0 ]]; then
     show_interactive_menu
@@ -3113,14 +3229,14 @@ main() {
   # Fresh installation workflow
   log "SUCCESS" "Starting PayRam setup..."
   
+  # Step 1: System detection FIRST — required before port check (OS_FAMILY must be set)
+  detect_system_info
+
   # Check for existing installation before proceeding
   check_existing_installation
   
-  # Check required ports
+  # Check required ports (uses OS_FAMILY set above)
   check_required_ports
-  
-  # Step 1: System detection
-  detect_system_info
   
   # Step 2: Install dependencies
   install_all_dependencies
