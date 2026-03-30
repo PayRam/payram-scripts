@@ -1540,10 +1540,11 @@ cleanup_letsencrypt_cert() {
     print_color "yellow" "   ⚠️  certbot not found — certificate files not deleted"
   fi
 
-  # Remove renewal cron
+  # Remove renewal cron — match on 'certbot.*restart payram' to avoid removing
+  # unrelated certbot renew entries the user may have for other domains
   if [[ "$OS_FAMILY" == "macos" ]]; then
-    if su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" | grep -q "certbot renew"; then
-      su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -"
+    if su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" | grep -qE 'certbot.*restart payram'; then
+      su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -vE 'certbot.*restart payram' | crontab -"
       print_color "green" "   ✅ Auto-renewal cron removed"
     fi
   else
@@ -2495,7 +2496,7 @@ configure_ssl_update_custom() {
       # Same domain but switching from LE to custom — remove cron only (user manages renewal now)
       print_color "yellow" "🗑️  Removing Let's Encrypt auto-renewal (you manage this cert manually)..."
       if [[ "$OS_FAMILY" == "macos" ]]; then
-        su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -" || true
+        su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -vE 'certbot.*restart payram' | crontab -" || true
       else
         rm -f /etc/cron.d/payram-certbot-renewal 2>/dev/null || true
       fi
@@ -2555,7 +2556,7 @@ configure_ssl_update_remove() {
     else
       # Still remove the cron so docker restart side-effect is gone
       if [[ "$OS_FAMILY" == "macos" ]]; then
-        su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -" || true
+        su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -vE 'certbot.*restart payram' | crontab -" || true
       else
         rm -f /etc/cron.d/payram-certbot-renewal 2>/dev/null || true
       fi
@@ -2817,8 +2818,9 @@ reset_payram_environment() {
 
   if [[ "$OS_FAMILY" == "macos" ]]; then
     # macOS: renewal was written to user crontab (no /etc/cron.d/ on macOS)
-    if su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" | grep -q "certbot renew"; then
-      su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -"
+    # Match on 'certbot.*restart payram' to avoid removing other certbot crons
+    if su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" | grep -qE 'certbot.*restart payram'; then
+      su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -vE 'certbot.*restart payram' | crontab -"
       print_color "green" "  ✅ Removed PayRam certbot renewal from user crontab"
       removed_cron=true
     fi
