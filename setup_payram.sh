@@ -1525,6 +1525,35 @@ validate_ssl_certificate() {
   return 0
 }
 
+# Remove Let's Encrypt certificate and renewal cron for a given domain
+cleanup_letsencrypt_cert() {
+  local domain="$1"
+  log "INFO" "Removing Let's Encrypt artifacts for: $domain"
+
+  if command -v certbot >/dev/null 2>&1; then
+    if certbot delete --cert-name "$domain" --non-interactive --quiet 2>/dev/null; then
+      print_color "green" "   ✅ Certificate deleted for $domain"
+    else
+      print_color "yellow" "   ⚠️  Could not delete certificate for $domain (may not exist)"
+    fi
+  else
+    print_color "yellow" "   ⚠️  certbot not found — certificate files not deleted"
+  fi
+
+  # Remove renewal cron
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    if su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null" | grep -q "certbot renew"; then
+      su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -"
+      print_color "green" "   ✅ Auto-renewal cron removed"
+    fi
+  else
+    if [[ -f /etc/cron.d/payram-certbot-renewal ]]; then
+      rm -f /etc/cron.d/payram-certbot-renewal
+      print_color "green" "   ✅ Auto-renewal cron removed"
+    fi
+  fi
+}
+
 test_postgres_connection() {
   log "INFO" "Testing database connection..."
   
@@ -1691,6 +1720,25 @@ load_configuration() {
   
   log "SUCCESS" "Configuration loaded successfully"
   return 0
+}
+
+# Get domain name from SSL_CERT_PATH (e.g. /etc/letsencrypt/live/pay.example.com → pay.example.com)
+get_current_ssl_domain() {
+  if [[ -n "${SSL_CERT_PATH:-}" ]]; then
+    basename "${SSL_CERT_PATH%/}"
+  else
+    echo ""
+  fi
+}
+
+# Update SSL fields in memory then persist full config to disk
+update_ssl_in_config() {
+  local new_ssl_cert_path="$1"
+  local new_ssl_mode="$2"
+  SSL_CERT_PATH="$new_ssl_cert_path"
+  SSL_MODE="$new_ssl_mode"
+  save_configuration
+  log "SUCCESS" "SSL configuration saved — mode=${SSL_MODE:-none} path=${SSL_CERT_PATH:-empty}"
 }
 
 # --- CONTAINER LIFECYCLE MANAGEMENT ---
@@ -2212,6 +2260,394 @@ deploy_payram_container_update() {
     log "INFO" "Check logs with: docker logs payram"
     return 1
   fi
+}
+
+# Recreate PayRam container with updated env — data is NEVER deleted (no docker rm -v)
+reconfigure_container() {
+  log "INFO" "Recreating PayRam container with updated configuration..."
+
+  local vol_postgres vol_logs
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
+  else
+    vol_postgres="$PAYRAM_CORE_DIR/db/postgres:/var/lib/payram/db/postgres"
+  fi
+  vol_logs="$PAYRAM_CORE_DIR/log/supervisord:/var/log"
+
+  print_color "yellow" "⏹️  Stopping PayRam container..."
+  docker stop payram 2>/dev/null || true
+  print_color "green" "   ✅ Stopped"
+
+  print_color "yellow" "🗑️  Removing container (volumes and data preserved)..."
+  docker rm payram 2>/dev/null || true
+  print_color "green" "   ✅ Removed"
+
+  print_color "yellow" "🚀 Starting PayRam with updated configuration..."
+  docker run -d \
+    --name payram \
+    --restart unless-stopped \
+    --publish 8080:8080 \
+    --publish 8443:8443 \
+    --publish 80:80 \
+    --publish 443:443 \
+    --publish 5432:5432 \
+    -e AES_KEY="$AES_KEY" \
+    -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
+    -e SERVER="$SERVER" \
+    -e POSTGRES_SSLMODE="$POSTGRES_SSLMODE" \
+    -e POSTGRES_HOST="$DB_HOST" \
+    -e POSTGRES_PORT="$DB_PORT" \
+    -e POSTGRES_DATABASE="$DB_NAME" \
+    -e POSTGRES_USERNAME="$DB_USER" \
+    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
+    -e SSL_CERT_PATH="$SSL_CERT_PATH" \
+    -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
+    -v "$PAYRAM_CORE_DIR":/root/payram \
+    -v "$vol_logs" \
+    -v "$vol_postgres" \
+    -v /etc/letsencrypt:/etc/letsencrypt:ro \
+    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+
+  sleep 5
+  if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
+    print_color "green" "   ✅ Container started"
+    return 0
+  else
+    log "ERROR" "Container failed to start after reconfiguration"
+    print_color "red" "   ❌ Failed — check: docker logs payram"
+    return 1
+  fi
+}
+
+# --- SSL UPDATE WIZARD ---
+
+configure_ssl_update_letsencrypt() {
+  local current_domain
+  current_domain=$(get_current_ssl_domain)
+
+  echo
+  print_color "bold" "🔒 Let's Encrypt SSL"
+  echo
+
+  # Domain input — default to current domain if one exists
+  local new_domain
+  if [[ -n "$current_domain" ]]; then
+    read -p "Enter domain name [$current_domain]: " new_domain
+    new_domain="${new_domain:-$current_domain}"
+  else
+    while true; do
+      read -p "Enter domain name (e.g. pay.example.com): " new_domain
+      [[ -n "$new_domain" ]] && break
+      print_color "red" "Domain cannot be empty"
+    done
+  fi
+
+  if [[ ! "$new_domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+    print_color "red" "❌ Invalid domain format"
+    return 1
+  fi
+
+  local new_cert_path="/etc/letsencrypt/live/$new_domain"
+
+  # Check if a valid cert already exists for this domain — avoid rate limit hits
+  local need_certbot=true
+  if [[ -f "$new_cert_path/fullchain.pem" ]] && \
+     openssl x509 -in "$new_cert_path/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
+    print_color "green" "ℹ️  Valid certificate already exists for $new_domain"
+    read -p "   Force-renew anyway? (y/N): " force_renew
+    [[ "$force_renew" =~ ^[Yy]$ ]] || need_certbot=false
+  fi
+
+  echo
+  print_color "yellow" "⚠️  PayRam will be unavailable for ~2-3 minutes (port 80 required for cert generation)"
+  read -p "Proceed? (y/N): " confirm
+  [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
+
+  # Email only needed when running certbot
+  local le_email=""
+  if [[ "$need_certbot" == true ]]; then
+    while true; do
+      read -p "Email for SSL notifications: " le_email
+      [[ -z "$le_email" ]] && { print_color "red" "Email cannot be empty"; continue; }
+      [[ "$le_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] && break
+      print_color "red" "Invalid email format"
+    done
+  fi
+
+  echo
+
+  # If domain changed from a previous LE setup, remove old cert + cron first
+  if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "$current_domain" && "$new_domain" != "$current_domain" ]]; then
+    print_color "yellow" "🗑️  Removing old certificate for $current_domain..."
+    cleanup_letsencrypt_cert "$current_domain"
+  fi
+
+  if [[ "$need_certbot" == true ]]; then
+    if ! command -v certbot >/dev/null 2>&1; then
+      print_color "yellow" "📦 Installing Certbot..."
+      if ! install_certbot; then
+        print_color "red" "❌ Certbot installation failed"
+        return 1
+      fi
+      print_color "green" "   ✅ Certbot installed"
+    fi
+
+    # Stop container to free port 80 before certbot standalone
+    print_color "yellow" "⏹️  Stopping PayRam (freeing port 80)..."
+    docker stop payram 2>/dev/null || true
+    print_color "green" "   ✅ Stopped"
+
+    print_color "yellow" "🔐 Generating certificate for $new_domain..."
+    local force_flag=""
+    [[ -f "$new_cert_path/fullchain.pem" ]] && force_flag="--force-renewal"
+    # shellcheck disable=SC2086
+    if ! certbot certonly --standalone --non-interactive --agree-tos \
+        --email "$le_email" --domains "$new_domain" $force_flag; then
+      print_color "red" "   ❌ Certificate generation failed"
+      print_color "yellow" "   Common causes: domain not pointing to this server, port 80 blocked"
+      print_color "yellow" "   Restarting PayRam on old configuration..."
+      docker start payram 2>/dev/null || true
+      return 1
+    fi
+    print_color "green" "   ✅ Certificate generated"
+
+    if ! validate_ssl_certificate "$new_cert_path"; then
+      print_color "red" "❌ Certificate validation failed"
+      docker start payram 2>/dev/null || true
+      return 1
+    fi
+    print_color "green" "   ✅ Certificate validated"
+
+    setup_certbot_renewal "$new_domain"
+  else
+    # Cert already valid — just stop before container recreation
+    print_color "yellow" "⏹️  Stopping PayRam..."
+    docker stop payram 2>/dev/null || true
+    print_color "green" "   ✅ Stopped"
+  fi
+
+  update_ssl_in_config "$new_cert_path" "letsencrypt"
+  if reconfigure_container; then
+    perform_health_check
+    echo
+    print_color "green" "✅ SSL updated successfully!"
+    print_color "gray" "   Mode:   Let's Encrypt"
+    print_color "gray" "   Domain: $new_domain"
+    print_color "gray" "   Path:   $new_cert_path"
+  fi
+}
+
+configure_ssl_update_custom() {
+  local current_domain
+  current_domain=$(get_current_ssl_domain)
+
+  echo
+  print_color "bold" "📁 Custom SSL Certificate"
+  echo
+
+  local new_domain
+  if [[ -n "$current_domain" ]]; then
+    read -p "Enter domain name [$current_domain]: " new_domain
+    new_domain="${new_domain:-$current_domain}"
+  else
+    while true; do
+      read -p "Enter domain name (e.g. pay.example.com): " new_domain
+      [[ -n "$new_domain" ]] && break
+      print_color "red" "Domain cannot be empty"
+    done
+  fi
+
+  local new_cert_path="/etc/letsencrypt/live/$new_domain"
+
+  # Same path + same mode = files replaced in-place, only a restart needed
+  local same_path=false
+  [[ "$new_cert_path" == "${SSL_CERT_PATH%/}" && "${SSL_MODE:-}" == "custom" ]] && same_path=true
+
+  echo
+  print_color "blue" "📋 Place your certificate files exactly here:"
+  print_color "gray" "   $new_cert_path/fullchain.pem"
+  print_color "gray" "   $new_cert_path/privkey.pem"
+  echo
+  mkdir -p "$new_cert_path"
+  read -p "Press [Enter] once your certificate files are in place..."
+
+  local missing_files=()
+  [[ ! -f "$new_cert_path/fullchain.pem" ]] && missing_files+=("fullchain.pem")
+  [[ ! -f "$new_cert_path/privkey.pem" ]]   && missing_files+=("privkey.pem")
+  if [[ ${#missing_files[@]} -gt 0 ]]; then
+    print_color "red" "❌ Missing files: ${missing_files[*]}"
+    print_color "gray" "   Copy them to $new_cert_path/ and try again"
+    return 1
+  fi
+
+  if ! validate_ssl_certificate "$new_cert_path"; then
+    print_color "red" "❌ Certificate validation failed (expired, key mismatch, or invalid format)"
+    return 1
+  fi
+  print_color "green" "   ✅ Certificate validated"
+
+  # Clean up LE artifacts when switching away from Let's Encrypt
+  if [[ "${SSL_MODE:-}" == "letsencrypt" ]]; then
+    if [[ -n "$current_domain" && "$new_domain" != "$current_domain" ]]; then
+      print_color "yellow" "🗑️  Removing old Let's Encrypt certificate for $current_domain..."
+      cleanup_letsencrypt_cert "$current_domain"
+    else
+      # Same domain but switching from LE to custom — remove cron only (user manages renewal now)
+      print_color "yellow" "🗑️  Removing Let's Encrypt auto-renewal (you manage this cert manually)..."
+      if [[ "$OS_FAMILY" == "macos" ]]; then
+        su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -" || true
+      else
+        rm -f /etc/cron.d/payram-certbot-renewal 2>/dev/null || true
+      fi
+      print_color "green" "   ✅ Auto-renewal cron removed"
+    fi
+  fi
+
+  # Same path + custom mode = cert rotated in-place, only restart needed (env unchanged)
+  if [[ "$same_path" == true ]]; then
+    print_color "yellow" "🔄 Certificate path unchanged — restarting container to apply new cert..."
+    docker restart payram
+    sleep 5
+    perform_health_check
+    echo
+    print_color "green" "✅ Certificate updated successfully!"
+    return 0
+  fi
+
+  echo
+  print_color "yellow" "⚠️  PayRam will be unavailable for ~1 minute"
+  read -p "Proceed? (y/N): " confirm
+  [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
+
+  update_ssl_in_config "$new_cert_path" "custom"
+  if reconfigure_container; then
+    perform_health_check
+    echo
+    print_color "green" "✅ SSL updated successfully!"
+    print_color "gray" "   Mode:   Custom Certificate"
+    print_color "gray" "   Domain: $new_domain"
+    print_color "gray" "   Path:   $new_cert_path"
+  fi
+}
+
+configure_ssl_update_remove() {
+  local current_domain
+  current_domain=$(get_current_ssl_domain)
+
+  echo
+  print_color "bold" "🌐 Remove SSL"
+  print_color "yellow" "PayRam will run on HTTP only (port 80 / port 8080)"
+  echo
+
+  local delete_cert="n"
+  if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "$current_domain" ]]; then
+    read -p "   Also delete the Let's Encrypt certificate for '$current_domain'? (y/N): " delete_cert
+  fi
+
+  print_color "yellow" "⚠️  PayRam will be unavailable for ~1 minute"
+  read -p "Proceed? (y/N): " confirm
+  [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
+
+  if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "$current_domain" ]]; then
+    if [[ "$delete_cert" =~ ^[Yy]$ ]]; then
+      print_color "yellow" "🗑️  Removing Let's Encrypt certificate for $current_domain..."
+      cleanup_letsencrypt_cert "$current_domain"
+    else
+      # Still remove the cron so docker restart side-effect is gone
+      if [[ "$OS_FAMILY" == "macos" ]]; then
+        su - "$ORIGINAL_USER" -c "crontab -l 2>/dev/null | grep -v 'certbot renew' | crontab -" || true
+      else
+        rm -f /etc/cron.d/payram-certbot-renewal 2>/dev/null || true
+      fi
+      print_color "green" "   ✅ Auto-renewal cron removed (certificate files kept)"
+    fi
+  fi
+
+  update_ssl_in_config "" ""
+  if reconfigure_container; then
+    perform_health_check
+    echo
+    print_color "green" "✅ SSL removed — PayRam running on HTTP"
+    print_color "gray" "   Access: http://<your-server>:8080"
+  fi
+}
+
+configure_ssl_update() {
+  # SSL configuration is not supported on macOS (testing only — runs HTTP)
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    print_color "yellow" "⚠️  SSL configuration is not supported on macOS."
+    print_color "gray" "   macOS is for testing only — PayRam runs on HTTP (port 8080)."
+    return 0
+  fi
+
+  get_payram_directories
+  if ! load_configuration; then
+    print_color "red" "❌ No PayRam installation found. Please install first (option 1)."
+    return 1
+  fi
+
+  local current_domain
+  current_domain=$(get_current_ssl_domain)
+  local current_mode="${SSL_MODE:-}"
+  local expiry=""
+
+  echo
+  print_color "blue" "╔═══════════════════════════════════════════════════════════╗"
+  print_color "blue" "║               🔒 Update SSL Configuration                 ║"
+  print_color "blue" "╚═══════════════════════════════════════════════════════════╝"
+  echo
+  print_color "bold" "Current SSL Status:"
+  case "$current_mode" in
+    letsencrypt)
+      print_color "gray" "   Mode:    Let's Encrypt"
+      print_color "gray" "   Domain:  $current_domain"
+      print_color "gray" "   Path:    $SSL_CERT_PATH"
+      if [[ -f "${SSL_CERT_PATH}/fullchain.pem" ]]; then
+        if openssl x509 -in "${SSL_CERT_PATH}/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
+          expiry=$(openssl x509 -in "${SSL_CERT_PATH}/fullchain.pem" -noout -enddate 2>/dev/null | cut -d= -f2)
+          print_color "green" "   Expires: $expiry ✅"
+        else
+          print_color "red" "   Status:  EXPIRED ❌ — renewal needed"
+        fi
+      fi
+      ;;
+    custom)
+      print_color "gray" "   Mode:    Custom Certificate"
+      print_color "gray" "   Domain:  $current_domain"
+      print_color "gray" "   Path:    $SSL_CERT_PATH"
+      if [[ -f "${SSL_CERT_PATH}/fullchain.pem" ]]; then
+        if openssl x509 -in "${SSL_CERT_PATH}/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
+          expiry=$(openssl x509 -in "${SSL_CERT_PATH}/fullchain.pem" -noout -enddate 2>/dev/null | cut -d= -f2)
+          print_color "green" "   Expires: $expiry ✅"
+        else
+          print_color "red" "   Status:  EXPIRED ❌"
+        fi
+      fi
+      ;;
+    *)
+      print_color "gray" "   Mode:    No SSL (HTTP only)"
+      ;;
+  esac
+
+  echo
+  print_color "green" "What do you want to do?"
+  echo
+  print_color "yellow" "1) 🔒 Let's Encrypt (auto certificate)"
+  print_color "yellow" "2) 📁 Custom certificate"
+  print_color "yellow" "3) 🌐 Remove SSL (HTTP only)"
+  print_color "yellow" "4) ↩️  Back"
+  echo
+
+  while true; do
+    read -p "Select option (1-4): " choice
+    case $choice in
+      1) configure_ssl_update_letsencrypt; break ;;
+      2) configure_ssl_update_custom; break ;;
+      3) configure_ssl_update_remove; break ;;
+      4) return 0 ;;
+      *) print_color "red" "Please select 1-4" ;;
+    esac
+  done
 }
 
 # Environment reset
@@ -2795,29 +3231,41 @@ show_interactive_menu() {
   print_color "gray" "   • Deploy new PayRam container"
   echo
   
-  print_color "yellow" "2) 🔄 Update PayRam instance to latest version"
+  print_color "yellow" "2) 🔄 Update PayRam to latest version"
   print_color "gray" "   • Update existing PayRam installation"
   print_color "gray" "   • Preserve configuration and data"
   print_color "gray" "   • Pull latest Docker image and restart"
   echo
-  
+
   print_color "yellow" "3) 🔄 Restart PayRam container"
   print_color "gray" "   • Restart existing PayRam container"
   print_color "gray" "   • Quick restart without updates"
   print_color "gray" "   • Useful for configuration changes"
   echo
-  
+
   print_color "yellow" "4) 🗑️  Reset PayRam environment"
   print_color "gray" "   • Completely remove PayRam installation"
   print_color "gray" "   • Delete containers, data, and configuration"
   print_color "gray" "   • ⚠️  WARNING: This will delete ALL PayRam data!"
   echo
-  
-  print_color "yellow" "5) ❌ Exit"
+
+  # SSL update option is only relevant on Linux — macOS runs HTTP-only for testing
+  local max_choice=5
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    print_color "yellow" "5) 🔒 Update SSL Configuration"
+    print_color "gray" "   • Add, change, or remove SSL certificate"
+    print_color "gray" "   • Switch between Let's Encrypt and custom certs"
+    print_color "gray" "   • Change domain name"
+    echo
+    print_color "yellow" "6) ❌ Exit"
+    max_choice=6
+  else
+    print_color "yellow" "5) ❌ Exit"
+  fi
   echo
-  
+
   while true; do
-    read -p "Enter your choice (1-5): " choice
+    read -p "Enter your choice (1-$max_choice): " choice
     case $choice in
       1)
         log "INFO" "User selected: Install PayRam"
@@ -2840,12 +3288,27 @@ show_interactive_menu() {
         return 0
         ;;
       5)
-        log "INFO" "User selected: Exit"
-        print_color "blue" "👋 Goodbye! Thank you for using PayRam setup script."
-        exit 0
+        if [[ "$(uname -s)" != "Darwin" ]]; then
+          log "INFO" "User selected: Update SSL Configuration"
+          MENU_CHOICE=5
+          return 0
+        else
+          log "INFO" "User selected: Exit"
+          print_color "blue" "👋 Goodbye! Thank you for using PayRam setup script."
+          exit 0
+        fi
+        ;;
+      6)
+        if [[ "$(uname -s)" != "Darwin" ]]; then
+          log "INFO" "User selected: Exit"
+          print_color "blue" "👋 Goodbye! Thank you for using PayRam setup script."
+          exit 0
+        else
+          print_color "red" "❌ Invalid option. Please select 1-$max_choice."
+        fi
         ;;
       *)
-        print_color "red" "❌ Invalid option. Please select 1, 2, 3, 4, or 5."
+        print_color "red" "❌ Invalid option. Please select 1-$max_choice."
         ;;
     esac
   done
@@ -3199,13 +3662,14 @@ main() {
     show_interactive_menu
     
     case $MENU_CHOICE in
-      1) 
+      1)
         install_mode=true
         show_network_selection
         ;;
       2) update_mode=true ;;
       3) restart_mode=true ;;
       4) reset_mode=true ;;
+      5) configure_ssl_mode=true ;;
     esac
   fi
   
@@ -3225,7 +3689,7 @@ main() {
     restart_payram_container
     exit 0
   fi
-  
+
   # Fresh installation workflow
   log "SUCCESS" "Starting PayRam setup..."
   
