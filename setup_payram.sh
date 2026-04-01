@@ -3131,7 +3131,8 @@ display_firewall_notice() {
   print_color "red" "   Until these ports are opened in your cloud provider's firewall,"
   print_color "red" "   PayRam will NOT be accessible from the internet."
   echo
-  print_color "blue" "💡 Need help opening these ports? Paste this into ChatGPT or Claude:"
+  print_color "blue" "💡 Copy the prompt below and paste it into ChatGPT or Claude:"
+  print_color "gray" "   (Select all the text inside the box)"
   echo
   print_color "gray" "   ┌──────────────────────────────────────────────────────────────┐"
   print_color "gray" "   │ I just installed PayRam (crypto payment gateway) on my VPS   │"
