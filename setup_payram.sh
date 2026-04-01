@@ -953,7 +953,7 @@ configure_database() {
   echo
   
   while true; do
-    read -p "Select option (1-2): " choice
+    read -e -p "Select option (1-2): " choice
     case $choice in
       1)
         configure_external_database
@@ -980,22 +980,22 @@ configure_external_database() {
   echo
   
   while true; do
-    read -p "Database Host [localhost]: " DB_HOST
+    read -e -p "Database Host [localhost]: " DB_HOST
     DB_HOST=${DB_HOST:-localhost}
     
-    read -p "Database Port [5432]: " DB_PORT
+    read -e -p "Database Port [5432]: " DB_PORT
     DB_PORT=${DB_PORT:-5432}
     
-    read -p "Database Name: " DB_NAME
+    read -e -p "Database Name: " DB_NAME
     while [[ -z "$DB_NAME" ]]; do
       print_color "red" "Database name cannot be empty"
-      read -p "Database Name: " DB_NAME
+      read -e -p "Database Name: " DB_NAME
     done
     
-    read -p "Database Username: " DB_USER
+    read -e -p "Database Username: " DB_USER
     while [[ -z "$DB_USER" ]]; do
       print_color "red" "Database username cannot be empty"
-      read -p "Database Username: " DB_USER
+      read -e -p "Database Username: " DB_USER
     done
     
     read -s -p "Database Password: " DB_PASSWORD
@@ -1019,7 +1019,7 @@ configure_external_database() {
       print_color "gray" "  • Confirm username/password are correct"
       print_color "gray" "  • Check firewall settings (port $DB_PORT)"
       echo
-      read -p "Would you like to try again? (y/N): " retry
+      read -e -p "Would you like to try again? (y/N): " retry
       [[ ! "$retry" =~ ^[Yy]$ ]] && exit 1
     fi
   done
@@ -1110,7 +1110,7 @@ configure_ssl() {
   echo
 
   while true; do
-    read -p "Select option (1-3): " choice
+    read -e -p "Select option (1-3): " choice
     case $choice in
       1)
         configure_ssl_letsencrypt
@@ -1144,7 +1144,7 @@ configure_ssl_letsencrypt() {
   
   # Domain input with validation
   while true; do
-    read -p "Enter your domain name (e.g., payram.example.com): " DOMAIN_NAME
+    read -e -p "Enter your domain name (e.g., payram.example.com): " DOMAIN_NAME
     
     if [[ -z "$DOMAIN_NAME" ]]; then
       print_color "red" "Domain name cannot be empty"
@@ -1162,7 +1162,7 @@ configure_ssl_letsencrypt() {
   
   # Email for Let's Encrypt notifications
   while true; do
-    read -p "Enter email for SSL notifications (certificate expiry alerts): " LE_EMAIL
+    read -e -p "Enter email for SSL notifications (certificate expiry alerts): " LE_EMAIL
     
     if [[ -z "$LE_EMAIL" ]]; then
       print_color "red" "Email cannot be empty"
@@ -1185,7 +1185,7 @@ configure_ssl_letsencrypt() {
   print_color "gray" "  • This process takes 1-3 minutes"
   echo
   
-  read -p "Ready to generate SSL certificate? (y/N): " confirm
+  read -e -p "Ready to generate SSL certificate? (y/N): " confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     print_color "yellow" "SSL setup cancelled. Continuing without SSL..."
     SSL_CERT_PATH=""
@@ -1223,7 +1223,7 @@ configure_ssl_letsencrypt() {
     print_color "gray" "  • Another web server is running"
     echo
     
-    read -p "Continue without SSL? (y/N): " continue_without_ssl
+    read -e -p "Continue without SSL? (y/N): " continue_without_ssl
     if [[ "$continue_without_ssl" =~ ^[Yy]$ ]]; then
       SSL_CERT_PATH=""
     else
@@ -1242,7 +1242,7 @@ configure_ssl_custom() {
   echo
 
   while true; do
-    read -p "Enter your domain name (e.g. pay.example.com): " custom_domain
+    read -e -p "Enter your domain name (e.g. pay.example.com): " custom_domain
 
     if [[ -z "$custom_domain" ]]; then
       print_color "red" "Domain name cannot be empty"
@@ -1254,7 +1254,7 @@ configure_ssl_custom() {
     if [[ ! -d "$cert_dir" ]]; then
       print_color "red" "❌ Directory not found: $cert_dir"
       print_color "yellow" "Make sure you have created the directory and placed your cert files there."
-      read -p "Try a different domain? (y/N): " retry
+      read -e -p "Try a different domain? (y/N): " retry
       [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
 
@@ -1265,7 +1265,7 @@ configure_ssl_custom() {
     if [[ ${#missing_files[@]} -gt 0 ]]; then
       print_color "red" "❌ Missing files in $cert_dir: ${missing_files[*]}"
       print_color "yellow" "Make sure fullchain.pem and privkey.pem are present in $cert_dir"
-      read -p "Try a different domain? (y/N): " retry
+      read -e -p "Try a different domain? (y/N): " retry
       [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
 
@@ -1273,7 +1273,7 @@ configure_ssl_custom() {
     if ! validate_ssl_certificate "$SSL_CERT_PATH"; then
       print_color "red" "❌ Certificate validation failed for $custom_domain (expired, mismatched key, or invalid format)"
       SSL_CERT_PATH=""
-      read -p "Try a different domain? (y/N): " retry
+      read -e -p "Try a different domain? (y/N): " retry
       [[ "$retry" =~ ^[Yy]$ ]] && continue || { print_color "yellow" "Skipping SSL..."; return 0; }
     fi
     SSL_MODE="custom"
@@ -1331,7 +1331,7 @@ configure_ssl_external() {
   print_color "red" "  • Restrict direct access to PayRam ports (firewall rules)"
   echo
   
-  read -p "Do you want to continue with external SSL management? (y/N): " confirm_external
+  read -e -p "Do you want to continue with external SSL management? (y/N): " confirm_external
   if [[ "$confirm_external" =~ ^[Yy]$ ]]; then
     SSL_CERT_PATH=""
     SSL_MODE="external"
@@ -1596,7 +1596,7 @@ generate_aes_key() {
   print_color "red" "  • Regular withdrawal of excess funds to cold wallet"
   echo
   
-  read -p "Press [Enter] to generate AES-256 encryption key for hot wallet..."
+  read -e -p "Press [Enter] to generate AES-256 encryption key for hot wallet..."
   
   print_color "cyan" "🔮 Summoning cryptographic magic..."
   print_color "yellow" "⚡ Generating quantum-secure randomness..."
@@ -1869,11 +1869,6 @@ deploy_payram_container() {
       log "WARN" "Container started but health check failed - may need time to initialize"
     fi
     
-    # Show container info
-    docker ps --filter name=payram
-    log "INFO" "Container logs: docker logs payram"
-    log "INFO" "Container shell: docker exec -it payram bash"
-    
     return 0
   else
     log "ERROR" "PayRam container failed to start"
@@ -2092,7 +2087,7 @@ update_payram_container() {
   print_color "yellow" "3) Cancel update"
   
   while true; do
-    read -p "Select option (1-3): " choice
+    read -e -p "Select option (1-3): " choice
     case $choice in
       1)
         IMAGE_TAG="$target_tag"
@@ -2120,7 +2115,7 @@ update_payram_container() {
   log "INFO" "  Server: $SERVER"
   log "INFO" "  Database: $DB_HOST:$DB_PORT/$DB_NAME"
   
-  read -p "Press [Enter] to proceed with update..."
+  read -e -p "Press [Enter] to proceed with update..."
 
   # If staying on the same tag, just restart — no pull/redeploy needed
   if [[ "$IMAGE_TAG" == "$current_tag" ]]; then
@@ -2246,11 +2241,6 @@ deploy_payram_container_update() {
     else
       log "WARN" "Container started but health check failed - may need time to initialize"
     fi
-    
-    # Show container info
-    docker ps --filter name=payram
-    log "INFO" "Container logs: docker logs payram"
-    log "INFO" "Container shell: docker exec -it payram bash"
 
     # Install/update the updater service for existing deployments
     install_payram_updater
@@ -2333,11 +2323,11 @@ configure_ssl_update_letsencrypt() {
   # Domain input — default to current domain if one exists
   local new_domain
   if [[ -n "$current_domain" ]]; then
-    read -p "Enter domain name [$current_domain]: " new_domain
+    read -e -p "Enter domain name [$current_domain]: " new_domain
     new_domain="${new_domain:-$current_domain}"
   else
     while true; do
-      read -p "Enter domain name (e.g. pay.example.com): " new_domain
+      read -e -p "Enter domain name (e.g. pay.example.com): " new_domain
       [[ -n "$new_domain" ]] && break
       print_color "red" "Domain cannot be empty"
     done
@@ -2355,20 +2345,20 @@ configure_ssl_update_letsencrypt() {
   if [[ -f "$new_cert_path/fullchain.pem" ]] && \
      openssl x509 -in "$new_cert_path/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
     print_color "green" "ℹ️  Valid certificate already exists for $new_domain"
-    read -p "   Force-renew anyway? (y/N): " force_renew
+    read -e -p "   Force-renew anyway? (y/N): " force_renew
     [[ "$force_renew" =~ ^[Yy]$ ]] || need_certbot=false
   fi
 
   echo
   print_color "yellow" "⚠️  PayRam will be unavailable for ~2-3 minutes (port 80 required for cert generation)"
-  read -p "Proceed? (y/N): " confirm
+  read -e -p "Proceed? (y/N): " confirm
   [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
   # Email only needed when running certbot
   local le_email=""
   if [[ "$need_certbot" == true ]]; then
     while true; do
-      read -p "Email for SSL notifications: " le_email
+      read -e -p "Email for SSL notifications: " le_email
       [[ -z "$le_email" ]] && { print_color "red" "Email cannot be empty"; continue; }
       [[ "$le_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] && break
       print_color "red" "Invalid email format"
@@ -2448,11 +2438,11 @@ configure_ssl_update_custom() {
 
   local new_domain
   if [[ -n "$current_domain" ]]; then
-    read -p "Enter domain name [$current_domain]: " new_domain
+    read -e -p "Enter domain name [$current_domain]: " new_domain
     new_domain="${new_domain:-$current_domain}"
   else
     while true; do
-      read -p "Enter domain name (e.g. pay.example.com): " new_domain
+      read -e -p "Enter domain name (e.g. pay.example.com): " new_domain
       [[ -n "$new_domain" ]] && break
       print_color "red" "Domain cannot be empty"
     done
@@ -2470,7 +2460,7 @@ configure_ssl_update_custom() {
   print_color "gray" "   $new_cert_path/privkey.pem"
   echo
   mkdir -p "$new_cert_path"
-  read -p "Press [Enter] once your certificate files are in place..."
+  read -e -p "Press [Enter] once your certificate files are in place..."
 
   local missing_files=()
   [[ ! -f "$new_cert_path/fullchain.pem" ]] && missing_files+=("fullchain.pem")
@@ -2517,7 +2507,7 @@ configure_ssl_update_custom() {
 
   echo
   print_color "yellow" "⚠️  PayRam will be unavailable for ~1 minute"
-  read -p "Proceed? (y/N): " confirm
+  read -e -p "Proceed? (y/N): " confirm
   [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
   update_ssl_in_config "$new_cert_path" "custom"
@@ -2542,11 +2532,11 @@ configure_ssl_update_remove() {
 
   local delete_cert="n"
   if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "$current_domain" ]]; then
-    read -p "   Also delete the Let's Encrypt certificate for '$current_domain'? (y/N): " delete_cert
+    read -e -p "   Also delete the Let's Encrypt certificate for '$current_domain'? (y/N): " delete_cert
   fi
 
   print_color "yellow" "⚠️  PayRam will be unavailable for ~1 minute"
-  read -p "Proceed? (y/N): " confirm
+  read -e -p "Proceed? (y/N): " confirm
   [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
   if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "$current_domain" ]]; then
@@ -2580,6 +2570,10 @@ configure_ssl_update() {
     print_color "gray" "   macOS is for testing only — PayRam runs on HTTP (port 8080)."
     return 0
   fi
+
+  # detect_system_info sets OS_FAMILY, PACKAGE_MANAGER, SERVICE_MANAGER etc.
+  # Required here because the SSL update flow bypasses the normal install workflow.
+  detect_system_info
 
   get_payram_directories
   if ! load_configuration; then
@@ -2640,7 +2634,7 @@ configure_ssl_update() {
   echo
 
   while true; do
-    read -p "Select option (1-4): " choice
+    read -e -p "Select option (1-4): " choice
     case $choice in
       1) configure_ssl_update_letsencrypt; break ;;
       2) configure_ssl_update_custom; break ;;
@@ -2731,7 +2725,7 @@ reset_payram_environment() {
   print_color "red" "⚠️  This is your FINAL WARNING - ALL DATA WILL BE PERMANENTLY LOST!"
   echo
   
-  read -p "Are you absolutely sure? Type 'DELETE' to confirm: " confirmation
+  read -e -p "Are you absolutely sure? Type 'DELETE' to confirm: " confirmation
   if [[ "$confirmation" != "DELETE" ]]; then
     log "INFO" "Reset cancelled by user"
     return 0
@@ -3051,17 +3045,6 @@ display_access_urls() {
       print_color "gray" "  • HTTP API: http://$public_ip:8080"
       print_color "gray" "  • Web Interface: http://$public_ip/login"
     fi
-    
-    echo
-    print_color "yellow" "⚠️  Security Note:"
-    if [[ "$ssl_enabled" == "true" ]]; then
-      print_color "gray" "  • Ensure firewall allows ports 443, 8443"
-      print_color "gray" "  • SSL is enabled - using secure HTTPS connections"
-    else
-      print_color "gray" "  • Ensure firewall allows ports 80, 8080"
-      print_color "gray" "  • Consider setting up SSL/domain name for production"
-    fi
-    print_color "gray" "  • Detected public IP: $public_ip"
   else
     print_color "yellow" "🔍 Public IP Detection:"
     print_color "gray" "  • Could not detect public IP automatically"
@@ -3098,6 +3081,81 @@ print_color() {
     "cyan") echo -e "\033[0;36m$2\033[0m" ;;
     *) echo "$2" ;;
   esac
+}
+
+# Post-install firewall notice with AI prompt
+display_firewall_notice() {
+  # Determine which ports to highlight based on SSL config
+  local port_list=""
+  local port_short=""
+  if [[ -n "${SSL_CERT_PATH:-}" ]]; then
+    port_list="443 and 8443"
+    port_short="443, 8443"
+  else
+    port_list="80 and 8080"
+    port_short="80, 8080"
+  fi
+
+  # DB context for AI prompt
+  local db_context=""
+  if [[ "${DB_HOST:-localhost}" == "localhost" || "${DB_HOST:-}" == "127.0.0.1" ]]; then
+    db_context="containerized PostgreSQL (runs inside Docker)"
+  else
+    db_context="external PostgreSQL at ${DB_HOST:-unknown}"
+  fi
+
+  # SSL context for AI prompt
+  local ssl_context=""
+  case "${SSL_MODE:-}" in
+    letsencrypt) ssl_context="Let's Encrypt SSL (auto-generated certificate)" ;;
+    custom)      ssl_context="custom SSL certificate" ;;
+    *)           ssl_context="no SSL (HTTP only)" ;;
+  esac
+
+  # Get public IP (reuse existing function)
+  local public_ip=""
+  set +e
+  public_ip=$(get_public_ip 2>/dev/null || echo "")
+  set -e
+  local ip_display="${public_ip:-<your-server-ip>}"
+
+  echo
+  print_color "blue" "╔═══════════════════════════════════════════════════════════╗"
+  print_color "blue" "║              🌐 Internet Accessibility Check              ║"
+  print_color "blue" "╚═══════════════════════════════════════════════════════════╝"
+  echo
+  print_color "green" "✅ PayRam is up and running on this server."
+  echo
+  print_color "red" "🚨 ACTION REQUIRED: Your VPS firewall may be blocking ports $port_short."
+  print_color "red" "   This is NOT a PayRam issue — PayRam is working correctly."
+  print_color "red" "   Until these ports are opened in your cloud provider's firewall,"
+  print_color "red" "   PayRam will NOT be accessible from the internet."
+  echo
+  print_color "blue" "💡 Need help opening these ports? Paste this into ChatGPT or Claude:"
+  echo
+  print_color "gray" "   ┌──────────────────────────────────────────────────────────────┐"
+  print_color "gray" "   │ I just installed PayRam (crypto payment gateway) on my VPS   │"
+  print_color "gray" "   │ at IP: $ip_display                                            │"
+  print_color "gray" "   │                                                              │"
+  print_color "gray" "   │ Setup details:                                               │"
+  print_color "gray" "   │  • SSL:      $ssl_context"
+  print_color "gray" "   │  • Database: $db_context"
+  print_color "gray" "   │  • Ports needed: $port_short                              │"
+  print_color "gray" "   │                                                              │"
+  print_color "gray" "   │ Can you ask me which VPS/cloud provider I'm using and guide  │"
+  print_color "gray" "   │ me step by step to open these ports so PayRam is reachable   │"
+  print_color "gray" "   │ from the internet?                                           │"
+  print_color "gray" "   │                                                              │"
+  print_color "gray" "   │ PayRam MCP (for AI tools): https://mcp.payram.com            │"
+  print_color "gray" "   └──────────────────────────────────────────────────────────────┘"
+  echo
+  print_color "blue" "   🔗 ChatGPT → https://chat.openai.com"
+  print_color "blue" "   🔗 Claude  → https://claude.ai"
+  echo
+  print_color "cyan" "   📌 Note: If you're testing on a local machine, you can safely ignore"
+  print_color "cyan" "      this message — local access works fine without opening firewall ports."
+  print_color "cyan" "      This only matters if you're deploying on a cloud VPS for production."
+  echo
 }
 
 # Welcome banner with ASCII art
@@ -3151,38 +3209,36 @@ display_welcome_banner() {
 install_payram_updater() {
   echo
   print_color "blue" "🔄 Installing PayRam Updater..."
-  print_color "gray" "   The updater service helps in upgrading PayRam easily from the dashboard."
-  echo
 
   local updater_script_url="https://raw.githubusercontent.com/PayRam/payram-updates/main/setup_payram_updater.sh"
 
   if ! command -v curl >/dev/null 2>&1; then
-    log "WARN" "curl not found, skipping updater installation"
+    print_color "yellow" "   ⚠️  curl not found — skipping updater installation"
     return 0
   fi
 
   local updater_tmp
   updater_tmp="$(mktemp)"
 
-  print_color "gray" "   Downloading updater installer..."
-  if ! curl --fail --location --connect-timeout 10 --max-time 60 \
-      "$updater_script_url" -o "$updater_tmp" 2>&1; then
+  print_color "gray" "   Downloading..."
+  if ! curl --fail --location --silent --connect-timeout 10 --max-time 60 \
+      "$updater_script_url" -o "$updater_tmp" 2>/dev/null; then
     rm -f "$updater_tmp"
-    log "WARN" "Failed to download updater installer, skipping"
-    print_color "yellow" "   Install manually: curl -fsSL $updater_script_url | sudo bash"
+    print_color "yellow" "   ⚠️  Download failed. Install manually:"
+    print_color "gray" "   curl -fsSL $updater_script_url | sudo bash"
+    echo
     return 0
   fi
-  print_color "gray" "   Running updater installer..."
 
+  print_color "gray" "   Installing..."
   if FORCE_REINSTALL=false QUIET=true ENABLE_SERVICE=true INIT_FLAGS="--no-autoupdate" \
-      bash "$updater_tmp"; then
+      bash "$updater_tmp" >/dev/null 2>&1; then
     rm -f "$updater_tmp"
-    log "SUCCESS" "PayRam Updater installed successfully!"
-    print_color "green" "✅ PayRam Updater installed (port 2567)"
+    print_color "green" "   ✅ PayRam Updater installed"
   else
     rm -f "$updater_tmp"
-    log "WARN" "PayRam Updater installation failed - you can install it manually later:"
-    print_color "yellow" "   curl -fsSL $updater_script_url | sudo bash"
+    print_color "yellow" "   ⚠️  Updater installation failed. Install manually:"
+    print_color "gray" "   curl -fsSL $updater_script_url | sudo bash"
   fi
   echo
 }
@@ -3267,7 +3323,7 @@ show_interactive_menu() {
   echo
 
   while true; do
-    read -p "Enter your choice (1-$max_choice): " choice
+    read -e -p "Enter your choice (1-$max_choice): " choice
     case $choice in
       1)
         log "INFO" "User selected: Install PayRam"
@@ -3340,7 +3396,7 @@ show_network_selection() {
   echo
   
   while true; do
-    read -p "Enter your choice (1-2): " choice
+    read -e -p "Enter your choice (1-2): " choice
     case $choice in
       1)
         log "INFO" "User selected: Mainnet installation"
@@ -3671,7 +3727,10 @@ main() {
       2) update_mode=true ;;
       3) restart_mode=true ;;
       4) reset_mode=true ;;
-      5) configure_ssl_mode=true ;;
+      5)
+        configure_ssl_update
+        exit 0
+        ;;
     esac
   fi
   
@@ -3776,7 +3835,7 @@ main() {
   print_color "gray" "  • Backup critical: AES key + database data"
   echo
   
-  read -p "Press [Enter] to deploy PayRam container..."
+  read -e -p "Press [Enter] to deploy PayRam container..."
   
   # Step 7: Deploy container
   if deploy_payram_container; then
@@ -3790,17 +3849,8 @@ main() {
     # Install the updater service
     install_payram_updater
 
-    print_color "green" "📋 Next Steps:"
-    print_color "gray" "  1. Complete setup via web interface"
-    print_color "gray" "  2. Configure payment methods"
-    print_color "gray" "  3. Set up merchant accounts"
-    echo
-    print_color "blue" "🛠️  Useful Commands:"
-    print_color "gray" "  • View logs: docker logs payram"
-    print_color "gray" "  • Update: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
-    print_color "gray" "  • Restart: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --restart"
-    print_color "gray" "  • Reset: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
-    echo
+    # Show firewall notice with AI prompt
+    display_firewall_notice
   else
     log "ERROR" "PayRam setup failed"
     log "INFO" "Check logs at: $LOG_FILE"
