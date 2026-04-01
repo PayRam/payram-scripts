@@ -2305,7 +2305,7 @@ reset_payram_environment() {
   echo
   
   # Stop and remove container
-  log "INFO" "Step 1/6: Stopping and removing PayRam container..."
+  log "INFO" "Step 1/7: Stopping and removing PayRam container..."
   if docker ps --filter "name=^payram$" --format "{{.Names}}" 2>/dev/null | grep -q "payram"; then
     docker stop payram &>/dev/null || true
     print_color "green" "  ✅ Container stopped"
@@ -2316,7 +2316,7 @@ reset_payram_environment() {
   fi
   
   # Remove Docker images
-  log "INFO" "Step 2/6: Removing PayRam Docker images..."
+  log "INFO" "Step 2/7: Removing PayRam Docker images..."
   {
     imgs="$(docker images --filter=reference='payramapp/payram' -q)"
     if [[ -n "$imgs" ]]; then
@@ -2329,10 +2329,10 @@ reset_payram_environment() {
   } || print_color "yellow" "  ⚠️  Some images may still be in use"
   
   # Skip removing data directories here; will remove at Step 6 after using config
-  log "INFO" "Step 3/6: Skipping data/config directory removal until Step 6..."
+  log "INFO" "Step 3/7: Skipping data/config directory removal until Step 7..."
   
   # Remove Let's Encrypt certificates (for configured domain only)
-  log "INFO" "Step 4/6: Removing Let's Encrypt certificates..."
+  log "INFO" "Step 4/7: Removing Let's Encrypt certificates..."
   local removed_certs=false
   # Try to source existing config to get SSL_MODE and SSL_CERT_PATH if available
   if [[ -f "$PAYRAM_INFO_DIR/config.env" ]]; then
@@ -2376,7 +2376,7 @@ reset_payram_environment() {
   fi
   
   # Remove cron jobs
-  log "INFO" "Step 5/6: Removing PayRam cron jobs..."
+  log "INFO" "Step 5/7: Removing PayRam cron jobs..."
   local removed_cron=false
 
   if [[ "$OS_FAMILY" == "macos" ]]; then
@@ -2401,8 +2401,42 @@ reset_payram_environment() {
     print_color "yellow" "  ⚠️  No PayRam cron jobs found"
   fi
   
+  # Remove PayRam Updater service
+  log "INFO" "Step 6/7: Removing PayRam Updater..."
+  local updater_uninstall_url="https://raw.githubusercontent.com/PayRam/payram-updates/main/setup_payram_updater.sh"
+  if curl -fsSL "$updater_uninstall_url" 2>/dev/null | bash -s -- --uninstall --yes --remove-backups 2>/dev/null; then
+    print_color "green" "  ✅ PayRam Updater removed"
+  else
+    # Manual fallback cleanup
+    local updater_removed=false
+    if [[ -f /usr/local/bin/payram-updater ]]; then
+      # Stop service (Linux systemd or macOS launchd)
+      if command -v systemctl &>/dev/null; then
+        systemctl stop payram-updater 2>/dev/null || true
+        systemctl disable payram-updater 2>/dev/null || true
+        rm -f /etc/systemd/system/payram-updater.service 2>/dev/null || true
+        systemctl daemon-reload 2>/dev/null || true
+      elif [[ -f /Library/LaunchDaemons/com.payram.updater.plist ]]; then
+        launchctl unload /Library/LaunchDaemons/com.payram.updater.plist 2>/dev/null || true
+        rm -f /Library/LaunchDaemons/com.payram.updater.plist 2>/dev/null || true
+      fi
+      # Remove binaries and config
+      rm -f /usr/local/bin/payram-updater /usr/local/bin/payram-updater-launcher 2>/dev/null || true
+      rm -rf /var/lib/payram-updater 2>/dev/null || true
+      rm -rf /var/lib/payram/backups 2>/dev/null || true
+      rm -f /etc/payram/updater.env 2>/dev/null || true
+      rmdir /etc/payram 2>/dev/null || true
+      rmdir /var/lib/payram 2>/dev/null || true
+      print_color "green" "  ✅ PayRam Updater removed (manual cleanup)"
+      updater_removed=true
+    fi
+    if [[ "$updater_removed" == false ]]; then
+      print_color "yellow" "  ⚠️  PayRam Updater not found or already removed"
+    fi
+  fi
+  
   # Remove PayRam data directories at the end (after cert cleanup and cron removal)
-  log "INFO" "Step 6/6: Removing PayRam data directories..."
+  log "INFO" "Step 7/7: Removing PayRam data directories..."
   if [[ -d "$PAYRAM_CORE_DIR" ]]; then
     rm -rf "$PAYRAM_CORE_DIR"
     print_color "green" "  ✅ Data directory removed: $PAYRAM_CORE_DIR"
