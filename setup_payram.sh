@@ -3663,7 +3663,6 @@ main() {
   local reset_mode=false
   local testnet_mode=false
   local mainnet_mode=false
-  local install_mode=false
   local restart_mode=false
   local args_processed=$#
   NEW_IMAGE_TAG=""
@@ -3690,14 +3689,12 @@ main() {
         testnet_mode=true
         NETWORK_TYPE="testnet"
         SERVER="DEVELOPMENT"
-        install_mode=true
         shift
         ;;
       --mainnet)
         mainnet_mode=true
         NETWORK_TYPE="mainnet"
         SERVER="PRODUCTION"
-        install_mode=true
         shift
         ;;
       --tag=*)
@@ -3722,7 +3719,6 @@ main() {
     
     case $MENU_CHOICE in
       1)
-        install_mode=true
         show_network_selection
         ;;
       2) update_mode=true ;;
