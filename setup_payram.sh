@@ -2404,13 +2404,23 @@ reset_payram_environment() {
   # Remove PayRam Updater service
   log "INFO" "Step 6/7: Removing PayRam Updater..."
   local updater_uninstall_url="https://raw.githubusercontent.com/PayRam/payram-updates/main/setup_payram_updater.sh"
-  if curl -fsSL "$updater_uninstall_url" 2>/dev/null | bash -s -- --uninstall --yes --remove-backups 2>/dev/null; then
+  if curl -fsSL --connect-timeout 10 --max-time 60 "$updater_uninstall_url" 2>/dev/null | bash -s -- --uninstall --yes --remove-backups 2>/dev/null; then
     print_color "green" "  ✅ PayRam Updater removed"
   else
-    # Manual fallback cleanup
-    local updater_removed=false
-    if [[ -f /usr/local/bin/payram-updater ]]; then
-      # Stop service (Linux systemd or macOS launchd)
+    # Manual fallback cleanup — check every known artifact, not just the main binary
+    local updater_artifacts_found=false
+    if [[ -f /usr/local/bin/payram-updater ]] || \
+       [[ -f /usr/local/bin/payram-updater-launcher ]] || \
+       [[ -f /etc/systemd/system/payram-updater.service ]] || \
+       [[ -f /Library/LaunchDaemons/com.payram.updater.plist ]] || \
+       [[ -d /var/lib/payram-updater ]] || \
+       [[ -d /var/lib/payram/backups ]] || \
+       [[ -f /etc/payram/updater.env ]]; then
+      updater_artifacts_found=true
+    fi
+
+    if [[ "$updater_artifacts_found" == true ]]; then
+      # Stop and disable service (Linux systemd or macOS launchd)
       if command -v systemctl &>/dev/null; then
         systemctl stop payram-updater 2>/dev/null || true
         systemctl disable payram-updater 2>/dev/null || true
@@ -2427,10 +2437,29 @@ reset_payram_environment() {
       rm -f /etc/payram/updater.env 2>/dev/null || true
       rmdir /etc/payram 2>/dev/null || true
       rmdir /var/lib/payram 2>/dev/null || true
-      print_color "green" "  ✅ PayRam Updater removed (manual cleanup)"
-      updater_removed=true
-    fi
-    if [[ "$updater_removed" == false ]]; then
+
+      # Verify all artifacts are actually gone
+      local updater_leftover=false
+      for artifact in \
+        /usr/local/bin/payram-updater \
+        /usr/local/bin/payram-updater-launcher \
+        /etc/systemd/system/payram-updater.service \
+        /Library/LaunchDaemons/com.payram.updater.plist \
+        /var/lib/payram-updater \
+        /var/lib/payram/backups \
+        /etc/payram/updater.env; do
+        if [[ -e "$artifact" ]]; then
+          print_color "red" "  ❌ Artifact still present after cleanup: $artifact"
+          updater_leftover=true
+        fi
+      done
+
+      if [[ "$updater_leftover" == true ]]; then
+        print_color "yellow" "  ⚠️  PayRam Updater partially removed — some artifacts remain"
+      else
+        print_color "green" "  ✅ PayRam Updater removed (manual cleanup)"
+      fi
+    else
       print_color "yellow" "  ⚠️  PayRam Updater not found or already removed"
     fi
   fi
