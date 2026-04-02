@@ -2404,7 +2404,7 @@ reset_payram_environment() {
   # Remove PayRam Updater service
   log "INFO" "Step 6/7: Removing PayRam Updater..."
   local updater_uninstall_url="https://raw.githubusercontent.com/PayRam/payram-updates/main/setup_payram_updater.sh"
-  if curl -fsSL --connect-timeout 10 --max-time 60 "$updater_uninstall_url" 2>/dev/null | bash -s -- --uninstall --yes --remove-backups 2>/dev/null; then
+  if curl -fsSL --connect-timeout 10 --max-time 60 "$updater_uninstall_url" 2>/dev/null | QUIET=true bash -s -- --uninstall --yes --remove-backups 2>/dev/null; then
     print_color "green" "  ✅ PayRam Updater removed"
   else
     # Manual fallback cleanup — check every known artifact, not just the main binary
