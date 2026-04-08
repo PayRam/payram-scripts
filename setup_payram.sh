@@ -772,7 +772,7 @@ check_disk_space_requirements() {
       
       while true; do
         print_color "yellow" "Do you want to continue anyway? (y/N): "
-        read -r response
+        read -r response </dev/tty
         case $response in
           [Yy]|[Yy][Ee][Ss])
             print_color "yellow" "⚠️  Proceeding with insufficient disk space - installation may fail..."
@@ -953,7 +953,7 @@ configure_database() {
   echo
   
   while true; do
-    read -e -p "Select option (1-2): " choice
+    read -e -p "Select option (1-2): " choice </dev/tty
     case $choice in
       1)
         configure_external_database
@@ -980,29 +980,29 @@ configure_external_database() {
   echo
   
   while true; do
-    read -e -p "Database Host [localhost]: " DB_HOST
+    read -e -p "Database Host [localhost]: " DB_HOST </dev/tty
     DB_HOST=${DB_HOST:-localhost}
     
-    read -e -p "Database Port [5432]: " DB_PORT
+    read -e -p "Database Port [5432]: " DB_PORT </dev/tty
     DB_PORT=${DB_PORT:-5432}
     
-    read -e -p "Database Name: " DB_NAME
+    read -e -p "Database Name: " DB_NAME </dev/tty
     while [[ -z "$DB_NAME" ]]; do
       print_color "red" "Database name cannot be empty"
-      read -e -p "Database Name: " DB_NAME
+      read -e -p "Database Name: " DB_NAME </dev/tty
     done
     
-    read -e -p "Database Username: " DB_USER
+    read -e -p "Database Username: " DB_USER </dev/tty
     while [[ -z "$DB_USER" ]]; do
       print_color "red" "Database username cannot be empty"
-      read -e -p "Database Username: " DB_USER
+      read -e -p "Database Username: " DB_USER </dev/tty
     done
     
-    read -s -p "Database Password: " DB_PASSWORD
+    read -s -p "Database Password: " DB_PASSWORD </dev/tty
     echo
     while [[ -z "$DB_PASSWORD" ]]; do
       print_color "red" "Database password cannot be empty"
-      read -s -p "Database Password: " DB_PASSWORD
+      read -s -p "Database Password: " DB_PASSWORD </dev/tty
       echo
     done
     
@@ -1019,7 +1019,7 @@ configure_external_database() {
       print_color "gray" "  • Confirm username/password are correct"
       print_color "gray" "  • Check firewall settings (port $DB_PORT)"
       echo
-      read -e -p "Would you like to try again? (y/N): " retry
+      read -e -p "Would you like to try again? (y/N): " retry </dev/tty
       [[ ! "$retry" =~ ^[Yy]$ ]] && exit 1
     fi
   done
@@ -1110,7 +1110,7 @@ configure_ssl() {
   echo
 
   while true; do
-    read -e -p "Select option (1-3): " choice
+    read -e -p "Select option (1-3): " choice </dev/tty
     case $choice in
       1)
         configure_ssl_letsencrypt
@@ -1144,7 +1144,7 @@ configure_ssl_letsencrypt() {
   
   # Domain input with validation
   while true; do
-    read -e -p "Enter your domain name (e.g., payram.example.com): " DOMAIN_NAME
+    read -e -p "Enter your domain name (e.g., payram.example.com): " DOMAIN_NAME </dev/tty
     
     if [[ -z "$DOMAIN_NAME" ]]; then
       print_color "red" "Domain name cannot be empty"
@@ -1162,7 +1162,7 @@ configure_ssl_letsencrypt() {
   
   # Email for Let's Encrypt notifications
   while true; do
-    read -e -p "Enter email for SSL notifications (certificate expiry alerts): " LE_EMAIL
+    read -e -p "Enter email for SSL notifications (certificate expiry alerts): " LE_EMAIL </dev/tty
     
     if [[ -z "$LE_EMAIL" ]]; then
       print_color "red" "Email cannot be empty"
@@ -1185,7 +1185,7 @@ configure_ssl_letsencrypt() {
   print_color "gray" "  • This process takes 1-3 minutes"
   echo
   
-  read -e -p "Ready to generate SSL certificate? (y/N): " confirm
+  read -e -p "Ready to generate SSL certificate? (y/N): " confirm </dev/tty
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     print_color "yellow" "SSL setup cancelled. Continuing without SSL..."
     SSL_CERT_PATH=""
@@ -1223,7 +1223,7 @@ configure_ssl_letsencrypt() {
     print_color "gray" "  • Another web server is running"
     echo
     
-    read -e -p "Continue without SSL? (y/N): " continue_without_ssl
+    read -e -p "Continue without SSL? (y/N): " continue_without_ssl </dev/tty
     if [[ "$continue_without_ssl" =~ ^[Yy]$ ]]; then
       SSL_CERT_PATH=""
     else
@@ -1242,7 +1242,7 @@ configure_ssl_custom() {
   echo
 
   while true; do
-    read -e -p "Enter your domain name (e.g. pay.example.com): " custom_domain
+    read -e -p "Enter your domain name (e.g. pay.example.com): " custom_domain </dev/tty
 
     if [[ -z "$custom_domain" ]]; then
       print_color "red" "Domain name cannot be empty"
@@ -1254,7 +1254,7 @@ configure_ssl_custom() {
     if [[ ! -d "$cert_dir" ]]; then
       print_color "red" "❌ Directory not found: $cert_dir"
       print_color "yellow" "Make sure you have created the directory and placed your cert files there."
-      read -e -p "Try a different domain? (y/N): " retry
+      read -e -p "Try a different domain? (y/N): " retry </dev/tty
       [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
 
@@ -1265,7 +1265,7 @@ configure_ssl_custom() {
     if [[ ${#missing_files[@]} -gt 0 ]]; then
       print_color "red" "❌ Missing files in $cert_dir: ${missing_files[*]}"
       print_color "yellow" "Make sure fullchain.pem and privkey.pem are present in $cert_dir"
-      read -e -p "Try a different domain? (y/N): " retry
+      read -e -p "Try a different domain? (y/N): " retry </dev/tty
       [[ "$retry" =~ ^[Yy]$ ]] && continue || { SSL_CERT_PATH=""; print_color "yellow" "Skipping SSL..."; return 0; }
     fi
 
@@ -1273,7 +1273,7 @@ configure_ssl_custom() {
     if ! validate_ssl_certificate "$SSL_CERT_PATH"; then
       print_color "red" "❌ Certificate validation failed for $custom_domain (expired, mismatched key, or invalid format)"
       SSL_CERT_PATH=""
-      read -e -p "Try a different domain? (y/N): " retry
+      read -e -p "Try a different domain? (y/N): " retry </dev/tty
       [[ "$retry" =~ ^[Yy]$ ]] && continue || { print_color "yellow" "Skipping SSL..."; return 0; }
     fi
     SSL_MODE="custom"
@@ -1331,7 +1331,7 @@ configure_ssl_external() {
   print_color "red" "  • Restrict direct access to PayRam ports (firewall rules)"
   echo
   
-  read -e -p "Do you want to continue with external SSL management? (y/N): " confirm_external
+  read -e -p "Do you want to continue with external SSL management? (y/N): " confirm_external </dev/tty
   if [[ "$confirm_external" =~ ^[Yy]$ ]]; then
     SSL_CERT_PATH=""
     SSL_MODE="external"
@@ -1596,7 +1596,7 @@ generate_aes_key() {
   print_color "red" "  • Regular withdrawal of excess funds to cold wallet"
   echo
   
-  read -e -p "Press [Enter] to generate AES-256 encryption key for hot wallet..."
+  read -e -p "Press [Enter] to generate AES-256 encryption key for hot wallet..." </dev/tty
   
   print_color "cyan" "🔮 Summoning cryptographic magic..."
   print_color "yellow" "⚡ Generating quantum-secure randomness..."
@@ -2037,7 +2037,7 @@ validate_upgrade_readiness() {
     print_color "blue" "╚════════════════════════════════════════════════════════════╝"
     echo
     print_color "yellow" "⚠️  Some non-critical issues were found. Continue? (y/N): "
-    read -r continue_choice
+    read -r continue_choice </dev/tty
     if [[ "$continue_choice" =~ ^[Yy]$ ]]; then
       return 0
     else
@@ -2087,7 +2087,7 @@ update_payram_container() {
   print_color "yellow" "3) Cancel update"
   
   while true; do
-    read -e -p "Select option (1-3): " choice
+    read -e -p "Select option (1-3): " choice </dev/tty
     case $choice in
       1)
         IMAGE_TAG="$target_tag"
@@ -2115,7 +2115,7 @@ update_payram_container() {
   log "INFO" "  Server: $SERVER"
   log "INFO" "  Database: $DB_HOST:$DB_PORT/$DB_NAME"
   
-  read -e -p "Press [Enter] to proceed with update..."
+  read -e -p "Press [Enter] to proceed with update..." </dev/tty
 
   # If staying on the same tag, just restart — no pull/redeploy needed
   if [[ "$IMAGE_TAG" == "$current_tag" ]]; then
@@ -2323,11 +2323,11 @@ configure_ssl_update_letsencrypt() {
   # Domain input — default to current domain if one exists
   local new_domain
   if [[ -n "$current_domain" ]]; then
-    read -e -p "Enter domain name [$current_domain]: " new_domain
+    read -e -p "Enter domain name [$current_domain]: " new_domain </dev/tty
     new_domain="${new_domain:-$current_domain}"
   else
     while true; do
-      read -e -p "Enter domain name (e.g. pay.example.com): " new_domain
+      read -e -p "Enter domain name (e.g. pay.example.com): " new_domain </dev/tty
       [[ -n "$new_domain" ]] && break
       print_color "red" "Domain cannot be empty"
     done
@@ -2345,20 +2345,20 @@ configure_ssl_update_letsencrypt() {
   if [[ -f "$new_cert_path/fullchain.pem" ]] && \
      openssl x509 -in "$new_cert_path/fullchain.pem" -noout -checkend 0 >/dev/null 2>&1; then
     print_color "green" "ℹ️  Valid certificate already exists for $new_domain"
-    read -e -p "   Force-renew anyway? (y/N): " force_renew
+    read -e -p "   Force-renew anyway? (y/N): " force_renew </dev/tty
     [[ "$force_renew" =~ ^[Yy]$ ]] || need_certbot=false
   fi
 
   echo
   print_color "yellow" "⚠️  PayRam will be unavailable for ~2-3 minutes (port 80 required for cert generation)"
-  read -e -p "Proceed? (y/N): " confirm
+  read -e -p "Proceed? (y/N): " confirm </dev/tty
   [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
   # Email only needed when running certbot
   local le_email=""
   if [[ "$need_certbot" == true ]]; then
     while true; do
-      read -e -p "Email for SSL notifications: " le_email
+      read -e -p "Email for SSL notifications: " le_email </dev/tty
       [[ -z "$le_email" ]] && { print_color "red" "Email cannot be empty"; continue; }
       [[ "$le_email" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]] && break
       print_color "red" "Invalid email format"
@@ -2438,11 +2438,11 @@ configure_ssl_update_custom() {
 
   local new_domain
   if [[ -n "$current_domain" ]]; then
-    read -e -p "Enter domain name [$current_domain]: " new_domain
+    read -e -p "Enter domain name [$current_domain]: " new_domain </dev/tty
     new_domain="${new_domain:-$current_domain}"
   else
     while true; do
-      read -e -p "Enter domain name (e.g. pay.example.com): " new_domain
+      read -e -p "Enter domain name (e.g. pay.example.com): " new_domain </dev/tty
       [[ -n "$new_domain" ]] && break
       print_color "red" "Domain cannot be empty"
     done
@@ -2460,7 +2460,7 @@ configure_ssl_update_custom() {
   print_color "gray" "   $new_cert_path/privkey.pem"
   echo
   mkdir -p "$new_cert_path"
-  read -e -p "Press [Enter] once your certificate files are in place..."
+  read -e -p "Press [Enter] once your certificate files are in place..." </dev/tty
 
   local missing_files=()
   [[ ! -f "$new_cert_path/fullchain.pem" ]] && missing_files+=("fullchain.pem")
@@ -2507,7 +2507,7 @@ configure_ssl_update_custom() {
 
   echo
   print_color "yellow" "⚠️  PayRam will be unavailable for ~1 minute"
-  read -e -p "Proceed? (y/N): " confirm
+  read -e -p "Proceed? (y/N): " confirm </dev/tty
   [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
   update_ssl_in_config "$new_cert_path" "custom"
@@ -2532,11 +2532,11 @@ configure_ssl_update_remove() {
 
   local delete_cert="n"
   if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "$current_domain" ]]; then
-    read -e -p "   Also delete the Let's Encrypt certificate for '$current_domain'? (y/N): " delete_cert
+    read -e -p "   Also delete the Let's Encrypt certificate for '$current_domain'? (y/N): " delete_cert </dev/tty
   fi
 
   print_color "yellow" "⚠️  PayRam will be unavailable for ~1 minute"
-  read -e -p "Proceed? (y/N): " confirm
+  read -e -p "Proceed? (y/N): " confirm </dev/tty
   [[ ! "$confirm" =~ ^[Yy]$ ]] && return 0
 
   if [[ "${SSL_MODE:-}" == "letsencrypt" && -n "$current_domain" ]]; then
@@ -2634,7 +2634,7 @@ configure_ssl_update() {
   echo
 
   while true; do
-    read -e -p "Select option (1-4): " choice
+    read -e -p "Select option (1-4): " choice </dev/tty
     case $choice in
       1) configure_ssl_update_letsencrypt; break ;;
       2) configure_ssl_update_custom; break ;;
@@ -2725,7 +2725,7 @@ reset_payram_environment() {
   print_color "red" "⚠️  This is your FINAL WARNING - ALL DATA WILL BE PERMANENTLY LOST!"
   echo
   
-  read -e -p "Are you absolutely sure? Type 'DELETE' to confirm: " confirmation
+  read -e -p "Are you absolutely sure? Type 'DELETE' to confirm: " confirmation </dev/tty
   if [[ "$confirmation" != "DELETE" ]]; then
     log "INFO" "Reset cancelled by user"
     return 0
@@ -3387,7 +3387,7 @@ show_interactive_menu() {
   echo
 
   while true; do
-    read -e -p "Enter your choice (1-$max_choice): " choice
+    read -e -p "Enter your choice (1-$max_choice): " choice </dev/tty
     case $choice in
       1)
         log "INFO" "User selected: Install PayRam"
@@ -3460,7 +3460,7 @@ show_network_selection() {
   echo
   
   while true; do
-    read -e -p "Enter your choice (1-2): " choice
+    read -e -p "Enter your choice (1-2): " choice </dev/tty
     case $choice in
       1)
         log "INFO" "User selected: Mainnet installation"
@@ -3713,10 +3713,6 @@ check_existing_installation() {
 
 # Main execution flow
 main() {
-  # When the script is piped (curl | bash), stdin is the pipe — not the terminal.
-  # Redirect stdin to /dev/tty so all interactive read commands work correctly.
-  [[ -t 0 ]] || exec < /dev/tty
-
   # Initialize logging safely
   init_logging
   
@@ -3899,7 +3895,7 @@ main() {
   print_color "gray" "  • Backup critical: AES key + database data"
   echo
   
-  read -e -p "Press [Enter] to deploy PayRam container..."
+  read -e -p "Press [Enter] to deploy PayRam container..." </dev/tty
   
   # Step 7: Deploy container
   if deploy_payram_container; then
