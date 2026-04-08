@@ -27,9 +27,30 @@ SERVICE_MANAGER=""
 INSTALL_METHOD=""
 SCRIPT_DIR="${PWD}"
 LOG_FILE="/tmp/payram-setup.log"
+PAYRAM_REMOTE_URL="https://payram.com/setup_payram.sh"
 # Initialize directory variables with defaults
 PAYRAM_INFO_DIR="${HOME}/.payraminfo"
 PAYRAM_CORE_DIR="${HOME}/.payram-core"
+
+build_remote_command() {
+  local mode="${1:-sudo}"
+  shift || true
+  local args="$*"
+
+  if [[ "$mode" == "sudo" ]]; then
+    if [[ -n "$args" ]]; then
+      printf "sudo bash -c 'bash <(curl -fsSL %s) %s'" "$PAYRAM_REMOTE_URL" "$args"
+    else
+      printf "sudo bash -c 'bash <(curl -fsSL %s)'" "$PAYRAM_REMOTE_URL"
+    fi
+  else
+    if [[ -n "$args" ]]; then
+      printf "bash <(curl -fsSL %s) %s" "$PAYRAM_REMOTE_URL" "$args"
+    else
+      printf "bash <(curl -fsSL %s)" "$PAYRAM_REMOTE_URL"
+    fi
+  fi
+}
 
 # --- CORE UTILITY FUNCTIONS ---
 
@@ -83,11 +104,13 @@ show_progress() {
 # Check if script is run as root (with better UX)
 check_privileges() {
   if [ "$(id -u)" -ne 0 ]; then
+    local rerun_command
+    rerun_command="$(build_remote_command sudo "$@")"
+
     log "ERROR" "This script requires root privileges for system modifications"
     echo
-    print_color "yellow" "Please run one of the following:"
-    print_color "blue" "  sudo $0 $*"
-    print_color "blue" "  su -c '$0 $*'"
+    print_color "yellow" "Please rerun with sudo at the beginning, for example:"
+    print_color "blue" "  $rerun_command"
     echo
     exit 1
   fi
@@ -2947,7 +2970,7 @@ reset_payram_environment() {
     print_color "gray" "  • Cron jobs cleaned up"
     echo
     print_color "yellow" "💡 To reinstall PayRam, run:"
-    print_color "gray" "   sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\""
+    print_color "gray" "   $(build_remote_command sudo)"
   else
     print_color "red" "❌ Reset completed with some issues"
     print_color "yellow" "Some components may need manual removal"
@@ -3540,14 +3563,19 @@ OPTIONS:
     -h, --help              Show this help message
 
 
-CURL Commands:
+REMOTE COMMANDS:
 
-    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --help
-    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --testnet
-    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --mainnet
-    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
-    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update --tag=v1.5.0
-    sudo /bin/bash -c "\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --reset
+  First run without sudo:
+    $(build_remote_command nosudo)
+
+  If you see a permissions error, rerun with:
+    $(build_remote_command sudo)
+    $(build_remote_command sudo --help)
+    $(build_remote_command sudo --testnet)
+    $(build_remote_command sudo --mainnet)
+    $(build_remote_command sudo --update)
+    $(build_remote_command sudo --update --tag=v1.5.0)
+    $(build_remote_command sudo --reset)
     
     
 
@@ -3565,11 +3593,13 @@ EOF
 
 # Initialize logging with proper error handling
 init_logging() {
+  local log_header="PayRam Setup Script v3 - $(date)"
+
   # Try to create log file, fallback if permission denied
-  if ! echo "PayRam Setup Script v3 - $(date)" > "$LOG_FILE" 2>/dev/null; then
+  if ! printf '%s\n' "$log_header" | tee "$LOG_FILE" >/dev/null 2>&1; then
     # Fallback to user's home directory if /tmp is not writable
     LOG_FILE="$HOME/payram-setup.log"
-    if ! echo "PayRam Setup Script v3 - $(date)" > "$LOG_FILE" 2>/dev/null; then
+    if ! printf '%s\n' "$log_header" | tee "$LOG_FILE" >/dev/null 2>&1; then
       # Final fallback: disable file logging
       LOG_FILE="/dev/null"
       echo "Warning: Could not create log file, logging to console only" >&2
@@ -3670,17 +3700,17 @@ check_existing_installation() {
   if [[ "$container_running" == true ]]; then
     print_color "red" "🔥 PayRam is currently RUNNING!"
     print_color "yellow" "   • To deploy a new instance, first reset the environment:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
+    print_color "gray" "     sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --reset'"
     print_color "yellow" "   • To keep data and upgrade, use update:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
+    print_color "gray" "     sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --update'"
     echo
     exit 0
   else
     print_color "blue" "💡 Recommended Actions:"
     print_color "gray" "   • Use --update flag to restart/update installation:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
+    print_color "gray" "     $(build_remote_command sudo --update)"
     print_color "gray" "   • Use --reset flag to completely remove existing installation:"
-    print_color "gray" "     sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
+    print_color "gray" "     $(build_remote_command sudo --reset)"
     print_color "gray" "   • Manual container restart: docker start payram"
     echo
   fi
@@ -3700,8 +3730,8 @@ check_existing_installation() {
   echo
   
   print_color "blue" "📋 What you can do instead:"
-  print_color "gray" "  • Update existing installation: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --update"
-  print_color "gray" "  • Reset environment to start fresh: sudo /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)\" bash --reset"
+  print_color "gray" "  • Update existing installation: sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --update'"
+  print_color "gray" "  • Reset environment to start fresh: sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --reset'"
   print_color "gray" "  • Check current status: docker ps | grep payram"
   print_color "gray" "  • View logs: docker logs payram"
   if [[ "$container_exists" == true && "$container_running" == false ]]; then
@@ -3718,7 +3748,7 @@ main() {
   
   # Check privileges early - all operations except help require root
   if [[ $# -eq 0 || ($# -eq 1 && "$1" != "-h" && "$1" != "--help") || ($# -gt 1) ]]; then
-    check_privileges
+    check_privileges "$@"
   fi
   
   # Parse command line arguments

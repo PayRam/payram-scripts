@@ -14,29 +14,35 @@ Choose one of two paths:
 🚀 **Standard One-Line Setup** - Copy, paste, and run:
 
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
+bash <(curl -fsSL https://payram.com/setup_payram.sh)
 ```
 
-💡 **One-Line with Arguments** - Add `bash` followed by options:
+If you see a permissions error, rerun with:
+
+```bash
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh)'
+```
+
+💡 **One-Line with Arguments** - Use the same pattern with flags:
 
 ```bash
 # Fresh installation (default)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
+bash <(curl -fsSL https://payram.com/setup_payram.sh)
 
 # Update existing installation
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --update'
 
 # Complete reset (removes all data)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --reset
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --reset'
 
 # Testnet deployment
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --testnet
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --testnet'
 
 # Specific Docker image tag
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --tag=latest
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --tag=latest'
 
 # Help and usage
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --help
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --help'
 ```
 
 ## 💎 What is PayRam?
@@ -57,13 +63,13 @@ PayRam is a **self-hosted cryptocurrency payment gateway** that enables business
 
 ### Option 1: Direct Install (Recommended)
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
+bash <(curl -fsSL https://payram.com/setup_payram.sh)
 ```
 
 ### Option 2: One-Line with Arguments
 ```bash
-# Add 'bash' followed by arguments for advanced options
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
+# If the script asks for root privileges, rerun with sudo at the beginning
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --update'
 ```
 
 ### Option 3: Download and Run
@@ -108,19 +114,19 @@ sudo ./setup_payram.sh --help
 #### One-Line Remote Execution:
 ```bash
 # Fresh installation (default)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)"
+bash <(curl -fsSL https://payram.com/setup_payram.sh)
 
 # Update existing installation
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --update
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --update'
 
 # Testnet deployment  
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --testnet
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --testnet'
 
 # Specific Docker image tag
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --tag=latest
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --tag=latest'
 
 # Complete reset (removes all data)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --reset
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --reset'
 ```
 
 ### Environment Variables
@@ -199,18 +205,18 @@ The script automatically installs:
 
 ### Common Issues
 
-**One-Line Command Arguments**: To pass arguments to the one-liner, add `bash` followed by options:
+**One-Line Command Arguments**: Use process substitution so the interactive menu still works:
 ```bash
 # Correct syntax for one-liner with arguments
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh)" bash --reset
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --reset'
 
 # Incorrect (won't work)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh) --reset"
+curl -fsSL https://payram.com/setup_payram.sh | bash
 ```
 
-**Permission Denied**: Make sure to run with `sudo`
+**Permission Denied**: Rerun with `sudo` at the beginning
 ```bash
-sudo ./setup_payram.sh
+sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh)'
 ```
 
 **Docker Not Found**: Script will install Docker automatically
