@@ -3297,8 +3297,10 @@ install_payram_updater() {
 
   print_color "gray" "   Installing..."
   local enable_svc="true"
-  [[ "$OS_FAMILY" == "macos" ]] && enable_svc="false"
-  if FORCE_REINSTALL=false QUIET=true ENABLE_SERVICE="$enable_svc" INIT_FLAGS="--no-autoupdate" \
+  if [[ "$OS_FAMILY" == "macos" || "$(uname -s)" == "Darwin" ]]; then
+    enable_svc="false"
+  fi
+  if FORCE_REINSTALL=true QUIET=true ENABLE_SERVICE="$enable_svc" INIT_FLAGS="--no-autoupdate" \
       bash "$updater_tmp" >/dev/null 2>&1; then
     rm -f "$updater_tmp"
     print_color "green" "   ✅ PayRam Updater installed"
