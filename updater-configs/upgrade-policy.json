@@ -1,13 +1,14 @@
 {
   "schema_version": 1,
-  "latest": "1.9.3",
+  "latest": "0.0.0-test",
   "updater_api_init_version": "1.9.3",
-  "dashboard_max": "1.9.3",
+  "dashboard_max": "0.0.0-test",
   "arch_support": {
     "arm64": "1.9.1"
   },
   "breakpoints": [],
   "releases": [
+    "0.0.0-test",
     "1.9.3",
     "1.9.2",
     "1.9.1",
