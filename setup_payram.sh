@@ -3713,6 +3713,10 @@ check_existing_installation() {
 
 # Main execution flow
 main() {
+  # When the script is piped (curl | bash), stdin is the pipe — not the terminal.
+  # Redirect stdin to /dev/tty so all interactive read commands work correctly.
+  [[ -t 0 ]] || exec < /dev/tty
+
   # Initialize logging safely
   init_logging
   
