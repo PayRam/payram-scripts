@@ -2122,6 +2122,7 @@ update_payram_container() {
     log "INFO" "Same version selected — restarting container without re-pulling..."
     docker restart payram
     log "SUCCESS" "PayRam restarted on $IMAGE_TAG"
+    install_payram_updater
     return 0
   fi
 
@@ -3295,7 +3296,11 @@ install_payram_updater() {
   fi
 
   print_color "gray" "   Installing..."
-  if FORCE_REINSTALL=false QUIET=true ENABLE_SERVICE=true INIT_FLAGS="--no-autoupdate" \
+  local enable_svc="true"
+  if [[ "$OS_FAMILY" == "macos" || "$(uname -s)" == "Darwin" ]]; then
+    enable_svc="false"
+  fi
+  if FORCE_REINSTALL=true QUIET=true ENABLE_SERVICE="$enable_svc" INIT_FLAGS="--no-autoupdate" \
       bash "$updater_tmp" >/dev/null 2>&1; then
     rm -f "$updater_tmp"
     print_color "green" "   ✅ PayRam Updater installed"
