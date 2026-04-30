@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "latest": "2.0.2",
+  "latest": "2.0.3",
   "updater_api_init_version": "1.9.6",
   "arch_support": {
     "arm64": "1.9.1"
@@ -12,6 +12,7 @@
     }
   ],
   "releases": [
+    "2.0.3",
     "2.0.2",
     "2.0.1",
     "2.0.0",
@@ -57,5 +58,5 @@
     "1.0.1",
     "1.0.0"
   ],
-  "dashboard_max": "2.0.2"
+  "dashboard_max": "2.0.3"
 }
