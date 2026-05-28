@@ -885,9 +885,13 @@ tcp_check() {
   fi
 }
 
-# Check required ports for PayRam installation
+# Check required ports for PayRam installation.
+# PayRam now ships with nginx fronting the backend (Go on :8080
+# loopback) and frontend (Next.js on :3000 loopback) — only 80 (HTTP)
+# and 443 (HTTPS) are exposed externally. Postgres runs inside the
+# container, not externalised.
 check_required_ports() {
-  local ports=(5432 80 443 8080 8443)
+  local ports=(80 443)
   local port_in_use=false
   
   log "INFO" "Checking required ports for PayRam..."
@@ -1100,7 +1104,7 @@ configure_ssl() {
   # SSL is not supported on macOS — skip entirely
   if [[ "$(uname -s)" == "Darwin" ]]; then
     print_color "yellow" "⚠️  SSL configuration is not supported on macOS — skipping."
-    print_color "gray" "   PayRam will run on HTTP (port 8080) for local testing."
+    print_color "gray" "   PayRam will run on HTTP (port 80) for local testing."
     SSL_CERT_PATH=""
     return 0
   fi
@@ -1127,7 +1131,7 @@ configure_ssl() {
   echo
 
   print_color "blue" "3) No SSL for now — I'll configure it later"
-  print_color "gray" "   • PayRam starts on HTTP (port 8080) immediately"
+  print_color "gray" "   • PayRam starts on HTTP (port 80) immediately"
   print_color "gray" "   • No domain or certificate needed to get started"
   print_color "gray" "   • You can add SSL certificates anytime when ready"
   echo
@@ -1343,8 +1347,7 @@ configure_ssl_external() {
   print_color "blue" "Setup Configuration:"
   print_color "gray" "  • PayRam will run HTTP-only (no SSL certificates needed)"
   print_color "gray" "  • Your external service handles HTTPS and forwards to PayRam"
-  print_color "gray" "  • PayRam API accessible at: http://localhost:8080"
-  print_color "gray" "  • PayRam Dashboard at: http://localhost"
+  print_color "gray" "  • PayRam API + Dashboard at: http://localhost (port 80)"
   echo
   
   print_color "yellow" "⚠️  Important Notes:"
@@ -1361,8 +1364,7 @@ configure_ssl_external() {
     print_color "green" "✅ External SSL management selected"
     print_color "blue" "Next steps after PayRam installation:"
     print_color "gray" "  1. Configure your reverse proxy to forward to:"
-    print_color "gray" "     - API: http://this-server:8080"
-    print_color "gray" "     - Dashboard: http://this-server:80"
+    print_color "gray" "     - http://this-server:80 (handles both API and dashboard)"
     print_color "gray" "  2. Test HTTPS connectivity through your proxy"
     print_color "gray" "  3. Configure firewall to block direct access"
     echo
@@ -1855,11 +1857,8 @@ deploy_payram_container() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 8080:8080 \
-    --publish 8443:8443 \
     --publish 80:80 \
     --publish 443:443 \
-    --publish 5432:5432 \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -1925,9 +1924,10 @@ perform_health_check() {
     if echo "$logs" | grep -qi "server.*start\|ready\|listening\|started\|running"; then
       print_color "green" "   ✅ Application startup detected in logs"
       
-      # Additional check: Try to connect to port 8080
-      if tcp_check 127.0.0.1 8080 5; then
-        print_color "green" "   ✅ Port 8080 is accepting connections"
+      # Additional check: Try to connect to port 80 (nginx fronts
+      # both backend and frontend now — :8080 is loopback-only).
+      if tcp_check 127.0.0.1 80 5; then
+        print_color "green" "   ✅ Port 80 is accepting connections"
         print_color "green" "   🎉 Health check passed - PayRam is healthy!"
         echo
         return 0
@@ -2232,11 +2232,8 @@ deploy_payram_container_update() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 8080:8080 \
-    --publish 8443:8443 \
     --publish 80:80 \
     --publish 443:443 \
-    --publish 5432:5432 \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -2301,11 +2298,8 @@ reconfigure_container() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 8080:8080 \
-    --publish 8443:8443 \
     --publish 80:80 \
     --publish 443:443 \
-    --publish 5432:5432 \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -2551,7 +2545,7 @@ configure_ssl_update_remove() {
 
   echo
   print_color "bold" "🌐 Remove SSL"
-  print_color "yellow" "PayRam will run on HTTP only (port 80 / port 8080)"
+  print_color "yellow" "PayRam will run on HTTP only (port 80)"
   echo
 
   local delete_cert="n"
@@ -2583,7 +2577,7 @@ configure_ssl_update_remove() {
     perform_health_check
     echo
     print_color "green" "✅ SSL removed — PayRam running on HTTP"
-    print_color "gray" "   Access: http://<your-server>:8080"
+    print_color "gray" "   Access: http://<your-server>"
   fi
 }
 
@@ -2591,7 +2585,7 @@ configure_ssl_update() {
   # SSL configuration is not supported on macOS (testing only — runs HTTP)
   if [[ "$(uname -s)" == "Darwin" ]]; then
     print_color "yellow" "⚠️  SSL configuration is not supported on macOS."
-    print_color "gray" "   macOS is for testing only — PayRam runs on HTTP (port 8080)."
+    print_color "gray" "   macOS is for testing only — PayRam runs on HTTP (port 80)."
     return 0
   fi
 
@@ -3126,11 +3120,9 @@ display_access_urls() {
     print_color "blue" "🌍 Public Access (from anywhere):"
     
     if [[ "$ssl_enabled" == "true" ]]; then
-      print_color "gray" "  • HTTPS API: https://$public_ip:8443"
-      print_color "gray" "  • Web Interface: https://$public_ip/login"
+      print_color "gray" "  • Web Interface + API: https://$public_ip/"
     else
-      print_color "gray" "  • HTTP API: http://$public_ip:8080"
-      print_color "gray" "  • Web Interface: http://$public_ip/login"
+      print_color "gray" "  • Web Interface + API: http://$public_ip/"
     fi
   else
     print_color "yellow" "🔍 Public IP Detection:"
@@ -3149,8 +3141,7 @@ display_access_urls() {
   # Domain access (if configured) - safely check for domain variable
   if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "" ]]; then
     print_color "blue" "🏷️  Domain Access (SSL enabled):"
-    print_color "gray" "  • HTTPS API: https://$DOMAIN_NAME:8443"
-    print_color "gray" "  • Web Interface: https://$DOMAIN_NAME/login"
+    print_color "gray" "  • Web Interface + API: https://$DOMAIN_NAME/"
     echo
   fi
 }
@@ -3176,11 +3167,11 @@ display_firewall_notice() {
   local port_list=""
   local port_short=""
   if [[ -n "${SSL_CERT_PATH:-}" ]]; then
-    port_list="443 and 8443"
-    port_short="443, 8443"
+    port_list="443"
+    port_short="443"
   else
-    port_list="80 and 8080"
-    port_short="80, 8080"
+    port_list="80"
+    port_short="80"
   fi
 
   # DB context for AI prompt
