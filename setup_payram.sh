@@ -1697,9 +1697,9 @@ SERVER="${SERVER:-PRODUCTION}"
 AES_KEY="${AES_KEY:-}"
 
 # Published host ports retained across updates (space-separated
-# host:container[/proto] tokens). Always includes 80/443; extra ports
-# detected on an existing container are preserved here forever.
-RETAINED_PORTS="${RETAINED_PORTS:-80:80 443:443}"
+# host:container[/proto] tokens). Set from the install-time port mapping;
+# extra ports detected on an existing container are preserved here forever.
+RETAINED_PORTS="${RETAINED_PORTS:-${PRIMARY_PORT_MAPPING:-80:80}}"
 
 # Database Configuration
 DB_HOST="${DB_HOST:-localhost}"
@@ -1789,24 +1789,71 @@ validate_docker_tag() {
   fi
 }
 
-# --- PORT-MAPPING RETENTION ---
-# Fresh installs publish only 80/443 (nginx fronts the backend and
-# frontend internally). But an existing install being UPDATED may have
-# extra/legacy ports published on its container (e.g. 8080, 8443, 5432,
-# or operator-added custom ports). Recreating the container would
-# silently drop those. We detect whatever the live container already
-# publishes, union it with the required ports, and persist the result
-# so it is retained on every future update — even after the original
-# container is gone.
+# --- PORT MAPPING + RETENTION ---
+# A fresh install publishes a single host port whose container side is
+# decided by the SSL choice: 443 when SSL is configured, 80 otherwise.
+# The operator may remap the host side (e.g. 3344 -> 443). That choice
+# is captured in PRIMARY_PORT_MAPPING at install time.
+#
+# An existing install being UPDATED may also have extra/legacy ports
+# published on its container (e.g. 8080, 8443, 5432, or operator-added
+# custom ports). Recreating the container would silently drop those, so
+# we detect whatever the live container already publishes, union it with
+# the install-time mapping, and persist the result (RETAINED_PORTS) so it
+# is kept on every future update — even after the original container is
+# gone.
 
-# Ports every PayRam deployment must publish.
-REQUIRED_PUBLISH_PORTS=("80:80" "443:443")
+# Set by configure_port_mapping at install time as "<host>:<container>"
+# (e.g. "443:443", "3344:443", "80:80", "1234:80"). Empty during updates
+# — the mapping is then recovered from RETAINED_PORTS / the live container.
+PRIMARY_PORT_MAPPING=""
+
+# Last-resort fallback for the update path: used only when there is NO
+# saved RETAINED_PORTS in config.env AND no container to read ports from
+# (e.g. an old install whose container was already removed). Matches the
+# historical production port set so an existing deployment is never
+# updated into having fewer ports than it had. Never reached on a fresh
+# install, where PRIMARY_PORT_MAPPING is always set.
+LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443" "5432:5432")
+
+# Ask the operator which host port to publish. The container's internal
+# port is fixed by the SSL choice (443 when SSL configured, else 80); the
+# operator may remap the host side or press Enter to keep the default.
+# Sets PRIMARY_PORT_MAPPING="<host>:<container>".
+configure_port_mapping() {
+  local container_port host_port
+
+  if [[ -n "${SSL_CERT_PATH:-}" || -n "${SSL_MODE:-}" ]]; then
+    container_port=443
+  else
+    container_port=80
+  fi
+
+  echo
+  print_color "bold" "🔌 Port Mapping"
+  print_color "gray" "  PayRam serves on container port $container_port (decided by your SSL choice)."
+  print_color "gray" "  Press Enter to publish on host port $container_port, or enter a different"
+  print_color "gray" "  host port to map <host>:$container_port (e.g. 8443 → 8443:$container_port)."
+  echo
+
+  while true; do
+    read -e -p "Host port [$container_port]: " host_port
+    host_port="${host_port:-$container_port}"
+    if [[ "$host_port" =~ ^[0-9]+$ ]] && (( host_port >= 1 && host_port <= 65535 )); then
+      break
+    fi
+    print_color "red" "Invalid port. Enter a number between 1 and 65535."
+  done
+
+  PRIMARY_PORT_MAPPING="${host_port}:${container_port}"
+  log "INFO" "Port mapping set to $PRIMARY_PORT_MAPPING"
+}
 
 # Echo the host:container[/proto] mappings currently published by the
 # running OR stopped `payram` container, one per line. A bind IP is
 # preserved (e.g. 127.0.0.1:5432:5432/tcp) so a loopback-only mapping
 # is never widened to all interfaces. The default /tcp proto is
-# stripped so the tokens dedupe cleanly against REQUIRED_PUBLISH_PORTS.
+# stripped so the tokens dedupe cleanly against the install-time mapping.
 # Silent (no output) when no container exists.
 detect_container_published_ports() {
   docker inspect payram >/dev/null 2>&1 || return 0
@@ -1820,25 +1867,29 @@ detect_container_published_ports() {
 # Populate the global PUBLISH_ARGS array (the docker `--publish` flags
 # for `docker run`) by unioning, in precedence order and deduping by the
 # whole token:
-#   1. REQUIRED_PUBLISH_PORTS — always present
+#   1. PRIMARY_PORT_MAPPING — the install-time host:container choice
 #   2. RETAINED_PORTS from config.env — survive forever once recorded
 #   3. ports the live/stopped container currently publishes
-# The union is written back to RETAINED_PORTS so save_configuration
-# persists it for all future updates. MUST be called BEFORE the existing
-# container is removed (docker rm), otherwise detection finds nothing.
+# If all three are empty (an update with no saved ports and no readable
+# container) it falls back to LEGACY_FALLBACK_PORTS. The union is written
+# back to RETAINED_PORTS so save_configuration persists it for all future
+# updates. MUST be called BEFORE the existing container is removed
+# (docker rm), otherwise detection finds nothing.
 build_publish_args() {
   local token seen=" "
   local all=() retained=()
   PUBLISH_ARGS=()
   RETAINED_PORTS="${RETAINED_PORTS:-}"
 
-  for token in "${REQUIRED_PUBLISH_PORTS[@]}"; do all+=("$token"); done
+  [[ -n "${PRIMARY_PORT_MAPPING:-}" ]] && all+=("$PRIMARY_PORT_MAPPING")
   for token in $RETAINED_PORTS; do all+=("$token"); done
   while IFS= read -r token; do
     [[ -n "$token" ]] && all+=("$token")
   done < <(detect_container_published_ports)
 
-  for token in "${all[@]}"; do
+  # ${all[@]+...} guard: iterating an empty array under `set -u` errors on
+  # bash < 4.4 (incl. macOS bash 3.2). Expands to nothing when empty.
+  for token in ${all[@]+"${all[@]}"}; do
     case "$seen" in
       *" $token "*) ;;
       *)
@@ -1848,6 +1899,17 @@ build_publish_args() {
         ;;
     esac
   done
+
+  # Safety net: nothing in env and no container to read from. Fall back to
+  # the historical production port set (see LEGACY_FALLBACK_PORTS) rather
+  # than guessing a single port, so an existing install is never updated
+  # into fewer ports than it had.
+  if [[ ${#PUBLISH_ARGS[@]} -eq 0 ]]; then
+    for token in "${LEGACY_FALLBACK_PORTS[@]}"; do
+      PUBLISH_ARGS+=("--publish" "$token")
+      retained+=("$token")
+    done
+  fi
 
   RETAINED_PORTS="${retained[*]}"
   log "INFO" "Publishing ports: ${retained[*]}"
@@ -3970,7 +4032,8 @@ main() {
   
   configure_database
   configure_ssl
-  
+  configure_port_mapping
+
   # Step 5: Generate hot wallet encryption key
   show_progress 9 10 "Setting up hot wallet encryption (AES-256)"
   generate_aes_key
@@ -3983,6 +4046,7 @@ main() {
   log "INFO" "Server Mode: $SERVER"
   log "INFO" "Database: $DB_HOST:$DB_PORT/$DB_NAME"
   log "INFO" "SSL Path: ${SSL_CERT_PATH:-Not configured}"
+  log "INFO" "Port Mapping: ${PRIMARY_PORT_MAPPING:-80:80}"
   echo
   
   print_color "yellow" "🔐 Security Architecture:"
