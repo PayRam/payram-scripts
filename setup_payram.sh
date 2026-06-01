@@ -1696,6 +1696,11 @@ NETWORK_TYPE="${NETWORK_TYPE:-mainnet}"
 SERVER="${SERVER:-PRODUCTION}"
 AES_KEY="${AES_KEY:-}"
 
+# Published host ports retained across updates (space-separated
+# host:container[/proto] tokens). Always includes 80/443; extra ports
+# detected on an existing container are preserved here forever.
+RETAINED_PORTS="${RETAINED_PORTS:-80:80 443:443}"
+
 # Database Configuration
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
@@ -1784,9 +1789,77 @@ validate_docker_tag() {
   fi
 }
 
+# --- PORT-MAPPING RETENTION ---
+# Fresh installs publish only 80/443 (nginx fronts the backend and
+# frontend internally). But an existing install being UPDATED may have
+# extra/legacy ports published on its container (e.g. 8080, 8443, 5432,
+# or operator-added custom ports). Recreating the container would
+# silently drop those. We detect whatever the live container already
+# publishes, union it with the required ports, and persist the result
+# so it is retained on every future update — even after the original
+# container is gone.
+
+# Ports every PayRam deployment must publish.
+REQUIRED_PUBLISH_PORTS=("80:80" "443:443")
+
+# Echo the host:container[/proto] mappings currently published by the
+# running OR stopped `payram` container, one per line. A bind IP is
+# preserved (e.g. 127.0.0.1:5432:5432/tcp) so a loopback-only mapping
+# is never widened to all interfaces. The default /tcp proto is
+# stripped so the tokens dedupe cleanly against REQUIRED_PUBLISH_PORTS.
+# Silent (no output) when no container exists.
+detect_container_published_ports() {
+  docker inspect payram >/dev/null 2>&1 || return 0
+  docker inspect payram --format \
+    '{{range $p, $conf := .HostConfig.PortBindings}}{{range $conf}}{{if .HostPort}}{{if and .HostIp (ne .HostIp "0.0.0.0")}}{{.HostIp}}:{{end}}{{.HostPort}}:{{$p}}{{println}}{{end}}{{end}}{{end}}' \
+    2>/dev/null \
+    | sed 's#/tcp$##' \
+    | sort -u
+}
+
+# Populate the global PUBLISH_ARGS array (the docker `--publish` flags
+# for `docker run`) by unioning, in precedence order and deduping by the
+# whole token:
+#   1. REQUIRED_PUBLISH_PORTS — always present
+#   2. RETAINED_PORTS from config.env — survive forever once recorded
+#   3. ports the live/stopped container currently publishes
+# The union is written back to RETAINED_PORTS so save_configuration
+# persists it for all future updates. MUST be called BEFORE the existing
+# container is removed (docker rm), otherwise detection finds nothing.
+build_publish_args() {
+  local token seen=" "
+  local all=() retained=()
+  PUBLISH_ARGS=()
+  RETAINED_PORTS="${RETAINED_PORTS:-}"
+
+  for token in "${REQUIRED_PUBLISH_PORTS[@]}"; do all+=("$token"); done
+  for token in $RETAINED_PORTS; do all+=("$token"); done
+  while IFS= read -r token; do
+    [[ -n "$token" ]] && all+=("$token")
+  done < <(detect_container_published_ports)
+
+  for token in "${all[@]}"; do
+    case "$seen" in
+      *" $token "*) ;;
+      *)
+        seen+="$token "
+        PUBLISH_ARGS+=("--publish" "$token")
+        retained+=("$token")
+        ;;
+    esac
+  done
+
+  RETAINED_PORTS="${retained[*]}"
+  log "INFO" "Publishing ports: ${retained[*]}"
+}
+
 # Container deployment
 deploy_payram_container() {
   show_progress 10 10 "Deploying PayRam container..."
+
+  # Capture any ports the existing container already publishes BEFORE it
+  # is removed, so re-running install never drops them.
+  build_publish_args
   
   # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
@@ -1857,8 +1930,7 @@ deploy_payram_container() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 80:80 \
-    --publish 443:443 \
+    "${PUBLISH_ARGS[@]}" \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -2169,7 +2241,11 @@ update_payram_container() {
 # Update-specific container deployment with fixes
 deploy_payram_container_update() {
   show_progress 10 10 "Deploying updated PayRam container..."
-  
+
+  # Detect the current container's published ports BEFORE it is removed
+  # below, then retain them on the recreated container.
+  build_publish_args
+
   # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
     generate_aes_key
@@ -2232,8 +2308,7 @@ deploy_payram_container_update() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 80:80 \
-    --publish 443:443 \
+    "${PUBLISH_ARGS[@]}" \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -2278,6 +2353,10 @@ deploy_payram_container_update() {
 reconfigure_container() {
   log "INFO" "Recreating PayRam container with updated configuration..."
 
+  # Retain the existing container's published ports across the recreate
+  # (must run before the docker rm below).
+  build_publish_args
+
   local vol_postgres vol_logs
   if [[ "$OS_FAMILY" == "macos" ]]; then
     vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
@@ -2298,8 +2377,7 @@ reconfigure_container() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 80:80 \
-    --publish 443:443 \
+    "${PUBLISH_ARGS[@]}" \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
