@@ -1761,10 +1761,10 @@ validate_docker_tag() {
 }
 
 # --- PORT MAPPING + RETENTION ---
-# A fresh install publishes a single host port whose container side is
-# decided by the SSL choice: 443 when SSL is configured, 80 otherwise.
-# The operator may remap the host side (e.g. 3344 -> 443). That choice
-# is captured in PRIMARY_PORT_MAPPING at install time.
+# A fresh install's published ports are decided by where TLS terminates
+# (see configure_port_mapping): internal TLS (certbot/custom certs) →
+# "80:80 443:443"; external/no-SSL → "<host>:80" with an operator-chosen
+# host port. That choice is captured in PRIMARY_PORT_MAPPING at install time.
 #
 # An existing install being UPDATED may also have extra/legacy ports
 # published on its container (e.g. 8080, 8443, 5432, or operator-added
@@ -1774,8 +1774,9 @@ validate_docker_tag() {
 # is kept on every future update — even after the original container is
 # gone.
 
-# Set by configure_port_mapping at install time as "<host>:<container>"
-# (e.g. "443:443", "3344:443", "80:80", "1234:80"). Empty during updates
+# Set by configure_port_mapping at install time as one or more
+# space-separated "<host>:<container>" tokens (e.g. "80:80 443:443" for
+# internal TLS, "80:80" or "8090:80" for external). Empty during updates
 # — the mapping is then recovered from RETAINED_PORTS / the live container.
 PRIMARY_PORT_MAPPING=""
 
@@ -1787,29 +1788,44 @@ PRIMARY_PORT_MAPPING=""
 # install, where PRIMARY_PORT_MAPPING is always set.
 LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443" "5432:5432")
 
-# Ask the operator which host port to publish. The container's internal
-# port is fixed by the SSL choice (443 when SSL configured, else 80); the
-# operator may remap the host side or press Enter to keep the default.
-# Sets PRIMARY_PORT_MAPPING="<host>:<container>".
+# Decide the install-time host port mapping based on where TLS terminates.
+# This keys off SSL_CERT_PATH (NOT SSL_MODE): certbot and custom certs both
+# set SSL_CERT_PATH and terminate TLS inside the container on 443, whereas
+# external/no-SSL leaves it empty and serves plain HTTP on 80.
+#
+#   Internal TLS (SSL_CERT_PATH set) → fixed "80:80 443:443", no prompt:
+#       443 serves HTTPS, 80 gives the http→https redirect. 80/443 are
+#       dictated by the protocol (and certbot's ACME), so we don't ask.
+#   External / no SSL (SSL_CERT_PATH empty) → prompt for a host port that
+#       maps to container 80 (plain HTTP). Default 80 (Cloudflare forwards
+#       there); an operator fronting their own nginx may pick another.
+# Sets PRIMARY_PORT_MAPPING to a space-separated list of host:container tokens.
 configure_port_mapping() {
-  local container_port host_port
+  local host_port
 
-  if [[ -n "${SSL_CERT_PATH:-}" || -n "${SSL_MODE:-}" ]]; then
-    container_port=443
-  else
-    container_port=80
+  if [[ -n "${SSL_CERT_PATH:-}" ]]; then
+    # Internal TLS — both ports required, no prompt.
+    if ! is_port_free 80 || ! is_port_free 443; then
+      print_color "red" "❌ Ports 80 and 443 must both be free for an SSL install."
+      print_color "yellow" "💡 Find what's using them: sudo lsof -i :80 -i :443"
+      exit 1
+    fi
+    PRIMARY_PORT_MAPPING="80:80 443:443"
+    log "INFO" "Port mapping set to $PRIMARY_PORT_MAPPING (internal TLS)"
+    return 0
   fi
 
+  # External / no SSL — PayRam serves plain HTTP on container port 80.
   echo
   print_color "bold" "🔌 Port Mapping"
-  print_color "gray" "  PayRam serves on container port $container_port (decided by your SSL choice)."
-  print_color "gray" "  Press Enter to publish on host port $container_port, or enter a different"
-  print_color "gray" "  host port to map <host>:$container_port (e.g. 8443 → 8443:$container_port)."
+  print_color "gray" "  PayRam serves HTTP on container port 80."
+  print_color "gray" "  Press Enter to publish on host port 80, or enter a different host"
+  print_color "gray" "  port (e.g. if your own reverse proxy fronts PayRam on another port)."
   echo
 
   while true; do
-    read -e -p "Host port [$container_port]: " host_port
-    host_port="${host_port:-$container_port}"
+    read -e -p "Host port [80]: " host_port
+    host_port="${host_port:-80}"
     if [[ ! "$host_port" =~ ^[0-9]+$ ]] || (( host_port < 1 || host_port > 65535 )); then
       print_color "red" "Invalid port. Enter a number between 1 and 65535."
       continue
@@ -1821,7 +1837,7 @@ configure_port_mapping() {
     break
   done
 
-  PRIMARY_PORT_MAPPING="${host_port}:${container_port}"
+  PRIMARY_PORT_MAPPING="${host_port}:80"
   log "INFO" "Port mapping set to $PRIMARY_PORT_MAPPING"
 }
 
@@ -1857,7 +1873,9 @@ build_publish_args() {
   PUBLISH_ARGS=()
   RETAINED_PORTS="${RETAINED_PORTS:-}"
 
-  [[ -n "${PRIMARY_PORT_MAPPING:-}" ]] && all+=("$PRIMARY_PORT_MAPPING")
+  # PRIMARY_PORT_MAPPING may hold one OR more space-separated tokens (e.g.
+  # "80:80 443:443" for an internal-TLS install), so word-split it.
+  for token in ${PRIMARY_PORT_MAPPING:-}; do all+=("$token"); done
   for token in $RETAINED_PORTS; do all+=("$token"); done
   while IFS= read -r token; do
     [[ -n "$token" ]] && all+=("$token")
