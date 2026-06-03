@@ -885,65 +885,36 @@ tcp_check() {
   fi
 }
 
-# Check required ports for PayRam installation.
-# PayRam now ships with nginx fronting the backend (Go on :8080
-# loopback) and frontend (Next.js on :3000 loopback) — only 80 (HTTP)
-# and 443 (HTTPS) are exposed externally. Postgres runs inside the
-# container, not externalised.
-check_required_ports() {
-  local ports=(80 443)
-  local port_in_use=false
-  
-  log "INFO" "Checking required ports for PayRam..."
-  
+# Return 0 if the given host port is free, 1 if something is already
+# listening on it. Used by the install-time port prompt so the operator
+# can only map a port that is actually available.
+#   macOS: nc attempts a real TCP connection — catches OS listeners,
+#          Colima SSH tunnels, and existing containers alike (lsof/docker
+#          ps miss these because Colima uses per-user SSH tunnels root
+#          can't see and the Docker socket isn't at /var/run/docker.sock).
+#   Linux: ss, falling back to netstat. If neither exists we can't tell,
+#          so we assume free (return 0) rather than block the install.
+is_port_free() {
+  local port="$1"
+
   if [[ "$OS_FAMILY" == "macos" ]]; then
-    # macOS: use nc (netcat, pre-installed on macOS) to attempt a real TCP connection
-    # on each port. This catches everything — OS listeners, Colima SSH tunnels,
-    # existing Docker containers — regardless of who owns the process or socket.
-    # lsof/docker ps both fail here because Colima uses per-user SSH tunnels that
-    # root cannot see, and the Docker socket is not at /var/run/docker.sock.
-    for port in "${ports[@]}"; do
-      if nc -z -w1 127.0.0.1 "$port" >/dev/null 2>&1; then
-        log "ERROR" "Port $port is already in use"
-        print_color "red" "❌ Port $port is already in use by another service"
-        port_in_use=true
-      else
-        log "INFO" "Port $port is available"
-      fi
-    done
+    nc -z -w1 127.0.0.1 "$port" >/dev/null 2>&1 && return 1
+    return 0
+  fi
+
+  local check_cmd=()
+  if command -v ss >/dev/null 2>&1; then
+    check_cmd=(ss -tuln)
+  elif command -v netstat >/dev/null 2>&1; then
+    check_cmd=(netstat -tuln)
   else
-    # Linux: use ss, fallback to netstat
-    local check_cmd=()
-    if command -v ss >/dev/null 2>&1; then
-      check_cmd=(ss -tuln)
-    elif command -v netstat >/dev/null 2>&1; then
-      check_cmd=(netstat -tuln)
-    else
-      log "WARN" "Neither 'ss' nor 'netstat' available - skipping port check"
-      return 0
-    fi
-
-    for port in "${ports[@]}"; do
-      if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
-        log "ERROR" "Port $port is already in use"
-        print_color "red" "❌ Port $port is already in use by another service"
-        port_in_use=true
-      else
-        log "INFO" "Port $port is available"
-      fi
-    done
+    return 0
   fi
 
-  if [[ "$port_in_use" == true ]]; then
-    echo
-    print_color "red" "❌ CRITICAL: Required ports are in use. Please free them or modify the script to use different ports."
-    print_color "yellow" "💡 To check what's using a port:"
-    print_color "gray" "   sudo lsof -i :PORT"
-    echo
-    exit 1
+  if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
+    return 1
   fi
-  
-  log "SUCCESS" "All required ports are available"
+  return 0
 }
 
 # Enhanced database configuration with better UX
@@ -1839,10 +1810,15 @@ configure_port_mapping() {
   while true; do
     read -e -p "Host port [$container_port]: " host_port
     host_port="${host_port:-$container_port}"
-    if [[ "$host_port" =~ ^[0-9]+$ ]] && (( host_port >= 1 && host_port <= 65535 )); then
-      break
+    if [[ ! "$host_port" =~ ^[0-9]+$ ]] || (( host_port < 1 || host_port > 65535 )); then
+      print_color "red" "Invalid port. Enter a number between 1 and 65535."
+      continue
     fi
-    print_color "red" "Invalid port. Enter a number between 1 and 65535."
+    if ! is_port_free "$host_port"; then
+      print_color "red" "❌ Port $host_port is already in use by another service. Choose another."
+      continue
+    fi
+    break
   done
 
   PRIMARY_PORT_MAPPING="${host_port}:${container_port}"
@@ -3980,15 +3956,13 @@ main() {
   # Fresh installation workflow
   log "SUCCESS" "Starting PayRam setup..."
   
-  # Step 1: System detection FIRST — required before port check (OS_FAMILY must be set)
+  # Step 1: System detection FIRST — OS_FAMILY must be set before the
+  # install-time port prompt (configure_port_mapping) checks availability.
   detect_system_info
 
   # Check for existing installation before proceeding
   check_existing_installation
-  
-  # Check required ports (uses OS_FAMILY set above)
-  check_required_ports
-  
+
   # Step 2: Install dependencies
   install_all_dependencies
   
