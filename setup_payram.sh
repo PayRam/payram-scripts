@@ -2051,16 +2051,28 @@ perform_health_check() {
     # Look for positive indicators in logs
     if echo "$logs" | grep -qi "server.*start\|ready\|listening\|started\|running"; then
       print_color "green" "   ✅ Application startup detected in logs"
-      
-      # Additional check: Try to connect to port 80 (nginx fronts
-      # both backend and frontend now — :8080 is loopback-only).
-      if tcp_check 127.0.0.1 80 5; then
-        print_color "green" "   ✅ Port 80 is accepting connections"
+
+      # Authoritative check: hit the backend health endpoint from INSIDE
+      # the container, so we don't care what host port was published or
+      # whether it's behind a custom mapping. nginx serves on 80 (HTTP)
+      # and 443 (HTTPS) internally; the scheme is decided by SSL_CERT_PATH
+      # (set for certbot/custom certs, empty for external/no-SSL). The
+      # image ships wget (not curl); -S prints the status line on stderr,
+      # which we match for "HTTP/... 200".
+      local health_url="http://localhost/api/v1/health"
+      local ssl_opt=""
+      if [[ -n "${SSL_CERT_PATH:-}" ]]; then
+        health_url="https://localhost/api/v1/health"
+        ssl_opt="--no-check-certificate"
+      fi
+      # shellcheck disable=SC2086
+      if docker exec payram wget -q -O /dev/null -S $ssl_opt "$health_url" 2>&1 | grep -q "HTTP/.* 200"; then
+        print_color "green" "   ✅ Health endpoint /api/v1/health returned 200 OK"
         print_color "green" "   🎉 Health check passed - PayRam is healthy!"
         echo
         return 0
       else
-        print_color "yellow" "   ⚠️  Application starting but port not ready yet..."
+        print_color "yellow" "   ⚠️  Application starting but /api/v1/health not ready yet..."
       fi
     elif echo "$logs" | grep -qi "error\|failed\|exception\|fatal"; then
       print_color "red" "   ❌ Error detected in application logs"
