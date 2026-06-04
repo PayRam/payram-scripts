@@ -2036,59 +2036,40 @@ perform_health_check() {
   local attempt=1
   local wait_time=10
   
+  # Check /api/v1/health inside the container (https when SSL is configured); a 200 is the only healthy signal.
+  local health_url="http://localhost/api/v1/health"
+  local ssl_opt=""
+  if [[ -n "${SSL_CERT_PATH:-}" ]]; then
+    health_url="https://localhost/api/v1/health"
+    ssl_opt="--no-check-certificate"
+  fi
+
   while [[ $attempt -le $max_attempts ]]; do
-    print_color "yellow" "   Attempt $attempt/$max_attempts: Checking application status..."
-    
-    # Check if container is still running
+    print_color "yellow" "   Attempt $attempt/$max_attempts: Checking /api/v1/health..."
+
+    # A stopped container is a real failure — bail immediately.
     if ! docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
       print_color "red" "   ❌ Container stopped unexpectedly"
-      return 1
-    fi
-    
-    # Check container logs for successful startup indicators
-    local logs=$(docker logs payram 2>&1 | tail -20)
-    
-    # Look for positive indicators in logs
-    if echo "$logs" | grep -qi "server.*start\|ready\|listening\|started\|running"; then
-      print_color "green" "   ✅ Application startup detected in logs"
-
-      # Authoritative check: hit the backend health endpoint from INSIDE
-      # the container, so we don't care what host port was published or
-      # whether it's behind a custom mapping. nginx serves on 80 (HTTP)
-      # and 443 (HTTPS) internally; the scheme is decided by SSL_CERT_PATH
-      # (set for certbot/custom certs, empty for external/no-SSL). The
-      # image ships wget (not curl); -S prints the status line on stderr,
-      # which we match for "HTTP/... 200".
-      local health_url="http://localhost/api/v1/health"
-      local ssl_opt=""
-      if [[ -n "${SSL_CERT_PATH:-}" ]]; then
-        health_url="https://localhost/api/v1/health"
-        ssl_opt="--no-check-certificate"
-      fi
-      # shellcheck disable=SC2086
-      if docker exec payram wget -q -O /dev/null -S $ssl_opt "$health_url" 2>&1 | grep -q "HTTP/.* 200"; then
-        print_color "green" "   ✅ Health endpoint /api/v1/health returned 200 OK"
-        print_color "green" "   🎉 Health check passed - PayRam is healthy!"
-        echo
-        return 0
-      else
-        print_color "yellow" "   ⚠️  Application starting but /api/v1/health not ready yet..."
-      fi
-    elif echo "$logs" | grep -qi "error\|failed\|exception\|fatal"; then
-      print_color "red" "   ❌ Error detected in application logs"
       print_color "gray" "   Last few log lines:"
-      echo "$logs" | tail -5 | sed 's/^/      /'
+      docker logs payram 2>&1 | tail -5 | sed 's/^/      /'
       echo
       return 1
-    else
-      print_color "yellow" "   ⏳ Application still initializing..."
     fi
-    
+
+    # shellcheck disable=SC2086
+    if docker exec payram wget -q -O /dev/null -S $ssl_opt "$health_url" 2>&1 | grep -q "HTTP/.* 200"; then
+      print_color "green" "   ✅ Health endpoint /api/v1/health returned 200 OK"
+      print_color "green" "   🎉 Health check passed - PayRam is healthy!"
+      echo
+      return 0
+    fi
+
+    print_color "yellow" "   ⏳ /api/v1/health not ready yet..."
     if [[ $attempt -lt $max_attempts ]]; then
       print_color "gray" "   Waiting ${wait_time}s before next check..."
       sleep $wait_time
     fi
-    
+
     ((attempt++))
   done
   
