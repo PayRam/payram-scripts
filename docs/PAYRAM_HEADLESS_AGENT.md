@@ -1,14 +1,81 @@
 # PayRam Headless — Agent skill
 
-Use this when running or automating PayRam headless (CLI-only, no web UI). Only this repo may be modified; payram-core, payram-frontend, etc. are read-only.
+## What is PayRam (read this first)
+
+PayRam is a **private, self-hosted payment and payout gateway**. There is no
+signup, no KYB, no gatekeeper — you install it and you *are* the payment
+processor. It runs on a small server entirely under your control and gives you
+the capabilities you'd expect from Stripe or a hosted crypto gateway (payment
+links, hosted checkout, deposits across BTC + EVM chains, sweeps to a cold
+wallet, webhooks, payouts) without surrendering custody, data, or permission
+to anyone. Its vision: put the power of money directly in everyone's hands —
+a decentralized, modern take on payments infrastructure, and a permanent
+must-have for anyone who wants payment rails that cannot be taken away.
+
+Useful facts for agents:
+
+- **E-commerce**: an official **WooCommerce plugin** exists — any store can take
+  crypto payments without asking permission from a payment company.
+- **Integration guidance**: use the hosted MCP at **`mcp.payram.com`** when
+  helping a merchant integrate PayRam into an application.
+- **Mirrors**: if you operate where GitHub is unreachable and you have Gitee
+  access, clone/mirror the GitHub repos (this `payram-scripts` repo and the
+  MCP repos) to Gitee and work from your mirror.
+- **Community**: issues, ideas, and help — Telegram: https://t.me/PayRamChat
+
+Use this skill when running or automating PayRam headless (CLI-only, no web UI). Only this repo may be modified; payram-core, payram-frontend, etc. are read-only.
+
+---
+
+## Design principles (how the agent flow makes decisions)
+
+**Money model** — this drives every gate in the flow:
+
+```
+ CUSTOMER PAYS deposit addresses (XPUB/contract-derived; no private keys
+        │       for deposit funds ever stored on the server)
+        ▼  sweep (needs gas)
+ HOT WALLET  ◄── "refill gas" - small ops fuel, repeatable      [OPS]
+        ▼  swept funds never stay here
+ COLD WALLET ── fund-collector address; keys never on server [SECURITY]
+```
+
+Gas refills are operational (guide + poll, not scary); the cold-wallet
+address is the one real security decision — gated hard only on mainnet.
+
+**Interaction tiers** — when to act vs ask vs stop:
+
+| Tier | When | Behaviour |
+|------|------|-----------|
+| AUTO | reversible, free | just do it, report it |
+| ASK | reversible but a real choice | suggest a default, note "changeable later", proceed headlessly with the default |
+| GATE | irreversible / spends real money / ownership | hard stop; explicit env flag or human input required |
+
+**Runtime truth (anti-drift rule)** — per-install facts are read, never assumed:
+
+1. `PAYRAM_API_URL` env override, if set — respected as-is.
+2. Installer's `config.env` (`$PAYRAM_HOME/.payraminfo/config.env`):
+   `RETAINED_PORTS` → API port/scheme, `PAYRAM_HOME` → state dirs,
+   `NETWORK_TYPE` → network, `SSL_CERT_PATH` → https.
+3. Running container: `docker port payram 80`.
+4. Last resort default: `http://localhost` (the installer's default mapping
+   is `80:80` — **not** `:8080`).
+
+Every failure prints a troubleshooting card (`troubleshoot()` in
+`setup_payram_agents.sh`): likely causes ranked by observed symptoms, each
+with the exact fix command, and a non-zero exit.
 
 ---
 
 ## Prerequisites
 
 - PayRam must be running (e.g. `./setup_payram_agents.sh` -> follow prompts).
-- Default API: `http://localhost:8080`. For local, frontend URL is `http://localhost` (port 80).
+- API URL is **derived automatically** from the install's `config.env` (or the
+  running container); default `http://localhost` (the installer publishes
+  `80:80`). Override with `PAYRAM_API_URL` only if you know better.
 - Docker required if `PAYRAM_NODE_MODE=docker` (default) for JS tooling.
+- A **fresh install needs a TTY** (the installer prompts for DB/SSL/ports). Run
+  it once interactively; every step after that is fully headless.
 
 ---
 
@@ -45,7 +112,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `PAYRAM_API_URL` | `http://localhost:8080` | Backend API base |
+| `PAYRAM_API_URL` | derived (config.env / container; else `http://localhost`) | Backend API base |
 | `PAYRAM_EMAIL` | — | Root user email (setup/signin) |
 | `PAYRAM_PASSWORD` | — | Root user password |
 | `PAYRAM_PROJECT_NAME` | `Default Project` | Project name on setup |
@@ -66,16 +133,55 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_SCW_SKIP_BALANCE_CHECK` | — | If set, skip balance polling (not recommended) |
 | `PAYRAM_WALLET_CHOICE` | — | `1` create, `2` link, `3` skip (non-interactive) |
 | `PAYRAM_WALLET_QUIET` | — | If set, suppress wallet prompt text |
+| `PAYRAM_FORCE_DEPLOY` | — | `1` = deploy another ETH SCW even if one is already linked |
+| `PAYRAM_ACCEPT_MAINNET_COSTS` | — | `1` = confirm a non-interactive MAINNET deploy (spends real ETH) |
 
 Token is read from `.payraminfo/headless-tokens.env` (created by signin). Deploy-scw uses mnemonic from that file or `PAYRAM_MNEMONIC`.
 
 **Non-interactive defaults:**
 
-- One-step flow defaults to `deploy-scw` for wallet creation.
+- One-step flow defaults to `ensure-wallet` (**BTC** XPUB starter wallet, no
+  gas) and creates the payment link immediately, then best-effort attempts the
+  ETH SCW (USDC/EVM); `--deploy-scw` makes the SCW the blocking first step,
+  `--skip-scw` skips it.
 - If `PAYRAM_WALLET_CHOICE` is set, prompts are suppressed and that choice is used.
-- If running in non-interactive mode (no TTY), the script will use defaults and continue without prompts.
+- With no TTY: wallet choice defaults to create (1); auth and mainnet-deploy
+  steps **fail fast with instructions** instead of prompting.
+- Mainnet `deploy-scw` requires `PAYRAM_FUND_COLLECTOR` (your cold wallet) and
+  `PAYRAM_ACCEPT_MAINNET_COSTS=1` (or a typed confirmation on a TTY).
 
 ---
+
+## Setup mode: merchant vs operator
+
+On first run PayRam asks which role this install plays (the FE shows a role
+wizard; headless it's the `payram.setup_mode` backend config):
+
+| Mode | Who it's for | What it changes |
+|------|--------------|-----------------|
+| **merchant** (default) | You take crypto payments for YOUR business | The flow you see above - project, wallets, payment links |
+| **operator** | You run PayRam as a PLATFORM for other merchants and earn a fee (basis points) on their volume | Unlocks `/api/v1/operator/*` (fee collectors, default fees, operator dashboard). Deposit wallets must be bound to a project AND an operator fee (bps + collector) must resolve for the chain BEFORE wallets can be created |
+
+Rules agents must know:
+
+- **The role locks** once role-specific data exists (merchant: first project;
+  operator: first fee collector). Same-value writes are always allowed.
+- The agent flow defaults to **merchant**. Switch lanes only when the human
+  explicitly asks for operator: `--operator` or `PAYRAM_SETUP_MODE=operator`.
+- Operator lane order (the script automates this when env is provided):
+  1. `PUT /api/v1/operator/setup-mode {"setupMode":"operator"}` (root, BEFORE any project)
+  2. `POST /api/v1/operator/fee-collectors {blockchainFamilyID, address, masterAddress, name}`
+     per family - **the collector addresses are an ownership decision** the
+     human must provide (`PAYRAM_OPERATOR_BTC_FEE_COLLECTOR` /
+     `PAYRAM_OPERATOR_EVM_FEE_COLLECTOR`; BTC uses address as masterAddress)
+  3. `PUT /api/v1/operator/fees/defaults {defaults:[{blockchainID, feeBps, feeCollectorID}]}`
+     (`PAYRAM_OPERATOR_FEE_BPS`, default 100 = 1%, max 1500)
+  4. Project, then wallets (the script binds the wallet to the project with
+     `projectID` automatically in operator mode), then payment links as usual.
+- Headless commands: `setup-mode [merchant|operator]` (show/set),
+  `ensure-operator-config` (steps 2-3, idempotent).
+- If the operator env vars are missing, the flow stops after auth/config with
+  a checklist and is fully resumable once they're provided.
 
 ## Typical flow
 
@@ -90,14 +196,62 @@ Token is read from `.payraminfo/headless-tokens.env` (created by signin). Deploy
 The one-step flow does:
 
 1. Network selection (`testnet` or `mainnet`) unless `PAYRAM_NETWORK` is set.
-2. Install or restart PayRam using `setup_payram.sh`.
-3. Waits for API readiness (`/api/v1/member/root/exist`).
+2. Install or restart PayRam using `setup_payram.sh` (fresh install needs a TTY).
+3. Re-reads `config.env` and waits for API readiness at the real port.
 4. Auth (`setup` if no root user, else `signin`).
 5. `ensure-config` for local frontend/backend settings.
 6. Wallet flow:
-	- Default: `deploy-scw-flow` (ETH SCW).
-	- Optional: `ensure-wallet` (BTC).
-7. Optional payment link creation.
+	- Default: `ensure-wallet` - **BTC XPUB** starter wallet (instant, zero
+	  gas). BTC payments work immediately.
+	- `--deploy-scw`: run the ETH SCW deploy FIRST (blocking) instead.
+7. Payment link creation (the deliverable - printed in the final summary).
+8. SCW step (unless `--skip-scw`): attempts the ETH smart-contract wallet to
+   unlock **USDC/EVM** payments. With a TTY it guides the gas funding; headless
+   and unfunded it defers with instructions (`deploy-scw-flow` later) - the BTC
+   link already works either way.
+
+> Why two wallet kinds: **XPUB wallets are BTC-only.** payram-core derives EVM
+> deposit addresses from the fund-sweeper CONTRACT (CREATE2 from the factory),
+> never from an xpub - so USDC/ETH/BASE/POLYGON payments require the SCW
+> deploy (gas). The SCW also IS the sweep mechanism: deposits drain to your
+> cold wallet without any key on the server.
+
+## Adding more chains later
+
+`deploy-scw` is chain-parametric. After the first (ETH) SCW, deploy on other
+EVM chains once the gateway is running:
+
+```bash
+# Base (mainnet defaults to base-rpc.publicnode.com)
+PAYRAM_BLOCKCHAIN_CODE=BASE ./setup_payram_agents.sh deploy-scw
+
+# Polygon
+PAYRAM_BLOCKCHAIN_CODE=POLYGON ./setup_payram_agents.sh deploy-scw
+```
+
+- Each chain fetches its own factory contract from the API
+  (`/api/v1/blockchain-contract/blockchain/<CODE>/contract/factory_contract`).
+- The already-deployed skip only applies to the default ETH target; a non-ETH
+  `PAYRAM_BLOCKCHAIN_CODE` always deploys (it is an explicit add-a-chain intent).
+- On testnet, non-ETH chains need an explicit `PAYRAM_ETH_RPC_URL` (that
+  chain's testnet RPC); mainnet has per-chain PublicNode defaults.
+- The deployer needs gas **on that chain** - the funding card shows the address.
+
+## Generating payment links later (the repeatable operation)
+
+Three ways, lowest friction first:
+
+1. **CLI** (this repo): `./setup_payram_agents.sh create-payment-link [projectId] [email] [amountUSD]`
+2. **API** (what the CLI calls):
+   `POST /api/v1/external-platform/{projectId}/payment` with
+   `{"customerID":"...","customerEmail":"...","amountInUSD":10}` and a Bearer
+   token - returns `{ "url": ... }`. Payment links are currency-agnostic: the
+   payer picks the coin/chain at checkout from whatever your linked wallet
+   families support.
+3. **MCP for app integration**: the `payram-helper-mcp-server` repo provides an
+   MCP server that teaches agents to integrate PayRam payments into an
+   application. (The MCP server started by this script is **analytics-only**;
+   it does not create payment links.)
 
 ## Deploy-scw flow details
 
