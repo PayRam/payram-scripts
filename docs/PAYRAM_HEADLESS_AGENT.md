@@ -27,6 +27,46 @@ Use this skill when running or automating PayRam headless (CLI-only, no web UI).
 
 ---
 
+## Design principles (how the agent flow makes decisions)
+
+**Money model** — this drives every gate in the flow:
+
+```
+ CUSTOMER PAYS deposit addresses (XPUB/contract-derived; no private keys
+        │       for deposit funds ever stored on the server)
+        ▼  sweep (needs gas)
+ HOT WALLET  ◄── "refill gas" - small ops fuel, repeatable      [OPS]
+        ▼  swept funds never stay here
+ COLD WALLET ── fund-collector address; keys never on server [SECURITY]
+```
+
+Gas refills are operational (guide + poll, not scary); the cold-wallet
+address is the one real security decision — gated hard only on mainnet.
+
+**Interaction tiers** — when to act vs ask vs stop:
+
+| Tier | When | Behaviour |
+|------|------|-----------|
+| AUTO | reversible, free | just do it, report it |
+| ASK | reversible but a real choice | suggest a default, note "changeable later", proceed headlessly with the default |
+| GATE | irreversible / spends real money / ownership | hard stop; explicit env flag or human input required |
+
+**Runtime truth (anti-drift rule)** — per-install facts are read, never assumed:
+
+1. `PAYRAM_API_URL` env override, if set — respected as-is.
+2. Installer's `config.env` (`$PAYRAM_HOME/.payraminfo/config.env`):
+   `RETAINED_PORTS` → API port/scheme, `PAYRAM_HOME` → state dirs,
+   `NETWORK_TYPE` → network, `SSL_CERT_PATH` → https.
+3. Running container: `docker port payram 80`.
+4. Last resort default: `http://localhost` (the installer's default mapping
+   is `80:80` — **not** `:8080`).
+
+Every failure prints a troubleshooting card (`troubleshoot()` in
+`setup_payram_agents.sh`): likely causes ranked by observed symptoms, each
+with the exact fix command, and a non-zero exit.
+
+---
+
 ## Prerequisites
 
 - PayRam must be running (e.g. `./setup_payram_agents.sh` -> follow prompts).
