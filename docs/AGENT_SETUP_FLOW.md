@@ -46,16 +46,26 @@ to it and *reads* its outputs.
    ─► auth (env creds; fail fast if missing and no TTY)
    ─► project (reuse or create)
    ─► WALLET [ASK, default 1]:
-        (1) agent creates starter deposit wallet now  (~10s, xpub only,
-            BTC + ETH families, no keys sent to server)   ← default
+        (1) agent creates starter BTC deposit wallet now  (~10s, xpub,
+            no keys sent to server, zero gas)              ← default
         (2) link one you already created
         (3) skip — link later via dashboard
         "Either way you can add more wallets later."
-   ─► PAYMENT LINK  ← the deliverable, printed unmissably
-   ─► handoff summary (what was created / what to change later / upgrade path)
+   ─► PAYMENT LINK  ← the deliverable, printed unmissably (BTC payable now)
+   ─► SCW step (best-effort): ETH smart-contract wallet → unlocks USDC/EVM.
+      TTY: guided gas funding. Headless+unfunded: defer with instructions.
+   ─► handoff summary (what works now / what to change later / upgrade path)
 ```
 
-Zero gas, zero human waits after credentials. TTFPL ≈ install + ~1 minute.
+Zero gas, zero human waits to the FIRST link (BTC). USDC/EVM follows as soon
+as the deployer is funded. TTFPL ≈ install + ~1 minute.
+
+> **XPUB wallets are BTC-only.** payram-core derives EVM deposit addresses
+> from the fund-sweeper contract (CREATE2), never from an xpub — the dispatch
+> in `GenerateAddresses` routes ETH_Family to contract-based generation that
+> requires `FundSweeperAddress`. USDC/EVM payments therefore require the SCW
+> deploy; registering an ETH_Family xpub would create a wallet whose address
+> generation fails at payment time.
 
 ### Upgrade lane (explicit `--deploy-scw`)
 

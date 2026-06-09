@@ -14,16 +14,19 @@ Usage:
 	setup_payram_agents.sh [options]            One-step flow (install -> payment link)
 	setup_payram_agents.sh <command> [args]     Headless commands only
 
-Quick start (non-interactive testnet trial -> payment link, no gas needed):
+Quick start (non-interactive testnet trial -> BTC payment link in minutes):
 	PAYRAM_EMAIL=you@example.com PAYRAM_PASSWORD=... \
 	  ./setup_payram_agents.sh --testnet --skip-mcp-server
+	# USDC/EVM needs the smart-contract wallet (gas): it is attempted right
+	# after the link, or run later: ./setup_payram_agents.sh deploy-scw-flow
 
 One-step options:
 	--testnet               Install/run in testnet mode (default)
 	--mainnet               Install/run in mainnet mode
 	--restart               Restart PayRam container before headless steps
-	--ensure-wallet         Starter XPUB deposit wallet, no gas needed (default)
-	--deploy-scw            Deploy ETH/EVM SCW wallet (upgrade lane; needs gas)
+	--ensure-wallet         Starter BTC XPUB wallet, no gas (default); SCW follows the link
+	--deploy-scw            ETH/EVM SCW first (blocking; needs gas) instead of after the link
+	--skip-scw              Do not attempt the SCW step after the payment link
 	--wallet-choice=1|2|3   Wallet flow choice (1=create, 2=link, 3=skip)
 	--skip-payment-link     Do not create a payment link
 	--create-payment-link   Create a payment link (default)
@@ -796,10 +799,12 @@ ensure_wallet() {
 		echo "This project has no wallet linked. Payment links need a deposit wallet so"
 		echo "customers get unique deposit addresses. The API uses XPUB only (no private key sent)."
 		echo ""
-		echo "  (1) I create a starter deposit wallet now (~10s, BTC + EVM, no gas needed)"
+		echo "  (1) I create a starter BTC deposit wallet now (~10s, xpub-based, no gas)"
 		echo "  (2) Link an existing wallet you already created"
 		echo "  (3) Skip (link later via dashboard or API)"
 		echo ""
+		echo "Note: BTC payments work immediately. USDC/EVM payments need the smart-contract"
+		echo "wallet step (deploy-scw, needs gas) - offered right after your first link."
 		echo "Whatever you pick, you can add or replace wallets later in the dashboard."
 		echo ""
 	fi
@@ -852,26 +857,13 @@ ensure_wallet() {
 		local secret_file="${PAYRAM_INFO_DIR}/headless-wallet-secret.txt"
 		echo "$mnemonic" > "$secret_file"
 		chmod 600 "$secret_file" 2>/dev/null || true
-		# Derive the EVM (ETH_Family) xpub from the SAME mnemonic so the starter
-		# wallet accepts ETH/BASE/POLYGON deposits too - still zero gas. Same
-		# derivation as generate-deposit-wallet-eth.js (m/44'/60'/0').
-		local eth_xpub
-		eth_xpub=$(PAYRAM_MNEMONIC_FILE="$secret_file" run_node "$script_dir/scripts" -e "
-			const fs=require('fs');
-			const bip39=require('bip39');
-			const {BIP32Factory}=require('bip32');
-			const ecc=require('tiny-secp256k1');
-			const m=fs.readFileSync(process.env.PAYRAM_MNEMONIC_FILE,'utf8').trim().split('\n')[0].trim();
-			const root=BIP32Factory(ecc).fromSeed(bip39.mnemonicToSeedSync(m));
-			console.log(root.derivePath(\"m/44'/60'/0'\").neutered().toBase58());
-		" 2>/dev/null) || eth_xpub=""
+		# XPUB deposit wallets are BTC-only by design: payram-core derives EVM
+		# deposit addresses from the fund-sweeper CONTRACT (CREATE2), never from
+		# an xpub - registering an ETH_Family xpub would create a wallet whose
+		# address generation fails at payment time. USDC/EVM comes from the
+		# deploy-scw step.
 		local payload
-		if [[ -n "$eth_xpub" ]]; then
-			payload="{\"name\":\"Headless\",\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"},{\"family\":\"ETH_Family\",\"xpub\":\"$eth_xpub\"}]}"
-		else
-			echo "Note: could not derive the EVM xpub; registering BTC only (add EVM later via dashboard)."
-			payload="{\"name\":\"Headless\",\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
-		fi
+		payload="{\"name\":\"Headless\",\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
 		res=$(api POST "/api/v1/wallets/deposit/eoa/bulk" "$payload" true)
 		parse_response "$res"
 		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
@@ -1193,7 +1185,7 @@ cmd_deploy_scw_flow() {
 	echo "--------------------------------------------------------------------------------"
 
 	local attempts=0
-	local max_attempts=60
+	local max_attempts="${PAYRAM_SCW_FUND_MAX_ATTEMPTS:-60}"
 	while true; do
 		local status balance res
 		res=$(check_eth_balance)
@@ -1701,10 +1693,12 @@ headless_main() {
 flow_main() {
 	local network_mode="${PAYRAM_NETWORK:-}"
 	local restart_mode="false"
-	# Fast lane by default: an XPUB starter wallet needs no gas and no human
-	# waits, so the first payment link arrives in minutes. The SCW deploy
-	# (gas + funding wait) is the explicit --deploy-scw upgrade lane.
+	# Fast lane by default: the BTC XPUB starter wallet needs no gas and no
+	# human waits, so the first payment link arrives in minutes. The ETH SCW
+	# (which unlocks USDC/EVM, needs gas) runs right after the link as a
+	# best-effort step; --deploy-scw makes it the blocking first step instead.
 	local wallet_mode="ensure-wallet"
+	local attempt_scw="true"
 	local create_payment_link="true"
 	local start_mcp_server="true"
 	local mcp_port="${PAYRAM_MCP_PORT:-3333}"
@@ -1731,6 +1725,10 @@ flow_main() {
 				;;
 			--ensure-wallet)
 				wallet_mode="ensure-wallet"
+				shift
+				;;
+			--skip-scw)
+				attempt_scw="false"
 				shift
 				;;
 			--wallet-choice=*)
@@ -1851,10 +1849,11 @@ flow_main() {
 	ensure_config
 
 	if [[ "$wallet_mode" == "deploy-scw" ]]; then
+		# Explicit --deploy-scw: SCW first (blocking, guided funding).
 		log "Deploying SCW wallet..."
 		cmd_deploy_scw_flow
 	else
-		log "Ensuring deposit wallet..."
+		log "Ensuring deposit wallet (BTC xpub - instant, no gas)..."
 		ensure_wallet
 	fi
 
@@ -1863,6 +1862,19 @@ flow_main() {
 		cmd_create_payment_link
 	else
 		log "Skipping payment link creation."
+	fi
+
+	# Quick-setup continuation: BTC link is live; now unlock USDC/EVM via the
+	# ETH smart-contract wallet. Best-effort - with a TTY it guides funding;
+	# headless and unfunded it defers with instructions instead of blocking.
+	if [[ "$wallet_mode" == "ensure-wallet" && "$attempt_scw" == "true" ]]; then
+		log "Enabling USDC/EVM payments (ETH smart-contract wallet)..."
+		if [[ -t 0 ]]; then
+			cmd_deploy_scw_flow || log "SCW deploy deferred - run '$0 deploy-scw-flow' when ready."
+		else
+			PAYRAM_SCW_FUND_MAX_ATTEMPTS=1 cmd_deploy_scw_flow \
+				|| log "SCW deploy deferred (deployer not funded). BTC payments work now; for USDC/EVM run '$0 deploy-scw-flow' after funding the deployer."
+		fi
 	fi
 
 	if [[ "$start_mcp_server" == "true" ]]; then
@@ -1886,8 +1898,14 @@ flow_main() {
 	echo ""
 	echo "Everything set up today can be changed later:"
 	echo "  - Add/replace deposit wallets:  dashboard -> Project -> Wallet  (or: $0 ensure-wallet)"
-	echo "  - Production sweeps (smart-contract wallet; needs gas):  $0 --deploy-scw"
-	echo "  - More chains later:  PAYRAM_BLOCKCHAIN_CODE=BASE $0 deploy-scw   (POLYGON likewise)"
+	if [[ -f "${PAYRAM_INFO_DIR}/scw-state.env" ]] && grep -q '^SCW_LINKED=1' "${PAYRAM_INFO_DIR}/scw-state.env" 2>/dev/null; then
+		echo "  - USDC/EVM payments: ENABLED (smart-contract wallet linked)"
+		echo "  - More chains later:  PAYRAM_BLOCKCHAIN_CODE=BASE $0 deploy-scw   (POLYGON likewise)"
+	else
+		echo "  - USDC/EVM payments: NOT yet enabled - BTC works now. To enable, fund the"
+		echo "    deployer with gas and run:  $0 deploy-scw-flow"
+		echo "  - More chains after that:  PAYRAM_BLOCKCHAIN_CODE=BASE $0 deploy-scw"
+	fi
 	if [[ "$network_mode" != "mainnet" ]]; then
 		echo "  - Going LIVE? Re-run with --mainnet and set PAYRAM_FUND_COLLECTOR to YOUR"
 		echo "    cold-wallet address (that is where swept customer funds land)."

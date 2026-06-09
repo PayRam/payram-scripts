@@ -77,9 +77,10 @@ Token is read from `.payraminfo/headless-tokens.env` (created by signin). Deploy
 
 **Non-interactive defaults:**
 
-- One-step flow defaults to `ensure-wallet` (XPUB starter wallet, BTC + EVM
-  families, **no gas needed**) and creates the payment link immediately. The
-  SCW deploy is the explicit `--deploy-scw` upgrade.
+- One-step flow defaults to `ensure-wallet` (**BTC** XPUB starter wallet, no
+  gas) and creates the payment link immediately, then best-effort attempts the
+  ETH SCW (USDC/EVM); `--deploy-scw` makes the SCW the blocking first step,
+  `--skip-scw` skips it.
 - If `PAYRAM_WALLET_CHOICE` is set, prompts are suppressed and that choice is used.
 - With no TTY: wallet choice defaults to create (1); auth and mainnet-deploy
   steps **fail fast with instructions** instead of prompting.
@@ -106,15 +107,20 @@ The one-step flow does:
 4. Auth (`setup` if no root user, else `signin`).
 5. `ensure-config` for local frontend/backend settings.
 6. Wallet flow:
-	- Default: `ensure-wallet` - XPUB starter wallet registering **BTC_Family +
-	  ETH_Family** from one mnemonic. This makes BTC **and** EVM tokens
-	  (including USDC on ETH) payable immediately, with zero gas.
-	- Upgrade: `--deploy-scw` (smart-contract wallet for production sweeps).
+	- Default: `ensure-wallet` - **BTC XPUB** starter wallet (instant, zero
+	  gas). BTC payments work immediately.
+	- `--deploy-scw`: run the ETH SCW deploy FIRST (blocking) instead.
 7. Payment link creation (the deliverable - printed in the final summary).
+8. SCW step (unless `--skip-scw`): attempts the ETH smart-contract wallet to
+   unlock **USDC/EVM** payments. With a TTY it guides the gas funding; headless
+   and unfunded it defers with instructions (`deploy-scw-flow` later) - the BTC
+   link already works either way.
 
-> Note: the SCW deploy is NOT required for USDC/EVM payment links - the XPUB
-> wallet already enables them. The SCW is the production sweep mechanism
-> (fund-sweeper contract draining deposits to your cold wallet).
+> Why two wallet kinds: **XPUB wallets are BTC-only.** payram-core derives EVM
+> deposit addresses from the fund-sweeper CONTRACT (CREATE2 from the factory),
+> never from an xpub - so USDC/ETH/BASE/POLYGON payments require the SCW
+> deploy (gas). The SCW also IS the sweep mechanism: deposits drain to your
+> cold wallet without any key on the server.
 
 ## Adding more chains later
 
