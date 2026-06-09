@@ -1652,14 +1652,13 @@ headless_main() {
 	echo ""
 	echo "============================================================"
 	echo "  PayRam Agent CLI (BETA)"
+	echo "  Self-hosted payments - no signup, no KYB, yours."
 	echo "============================================================"
 	echo "  This tool is currently in BETA and under active testing."
-	echo "  If you encounter any bugs or unexpected behavior, please"
-	echo "  open an issue on the repo for our Bug Bounty program:"
-	echo ""
+	echo "  Bugs or unexpected behavior? Open an issue (Bug Bounty):"
 	echo "    https://github.com/PayRam/payram-scripts/issues"
-	echo ""
-	echo "  We appreciate your help in making PayRam better!"
+	echo "  Questions and ideas - join the community on Telegram:"
+	echo "    https://t.me/PayRamChat"
 	echo "============================================================"
 	echo ""
 
@@ -1771,6 +1770,20 @@ flow_main() {
 		esac
 	done
 
+	echo ""
+	echo "====================================================================="
+	echo "  Welcome to PayRam - your own payment gateway."
+	echo ""
+	echo "  No signup. No KYB. No middleman. In a few minutes this server"
+	echo "  becomes payment infrastructure that answers only to you: payment"
+	echo "  links, hosted checkout, BTC + EVM deposits, sweeps to YOUR cold"
+	echo "  wallet. The kind of power that used to require a payments company."
+	echo ""
+	echo "  Every self-hosted gateway makes money a little more open. Glad"
+	echo "  you're here - let's get you to your first payment link."
+	echo "====================================================================="
+	echo ""
+
 	if [[ -z "$network_mode" ]]; then
 		if [[ -t 0 ]]; then
 			echo "Choose network:"
@@ -1827,6 +1840,8 @@ flow_main() {
 		load_install_config
 		export PAYRAM_API_URL="${PAYRAM_API_URL_OVERRIDE:-$DERIVED_API_URL}"
 		PAYRAM_API_URL="$PAYRAM_API_URL"
+		echo ""
+		log "Gateway installed. That was the hard part - the rest is automatic."
 	else
 		log "PayRam container already running."
 	fi
@@ -1914,6 +1929,15 @@ flow_main() {
 		echo "    taking real payments (dashboard -> Wallets)."
 	fi
 	echo "  - More payment links anytime:  $0 create-payment-link"
+	echo ""
+	echo "Thank you for self-hosting PayRam. You now run payment rails that no"
+	echo "platform can switch off - and every independent gateway like yours"
+	echo "nudges money a little further toward open. Welcome to the revolution."
+	echo ""
+	echo "Questions, ideas, or stuck on anything? Come say hi - the community"
+	echo "and the team hang out here:"
+	echo "  Telegram:  https://t.me/PayRamChat"
+	echo "  Issues:    https://github.com/PayRam/payram-scripts/issues"
 	echo "====================================================="
 }
 
