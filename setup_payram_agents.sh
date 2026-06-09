@@ -27,6 +27,9 @@ One-step options:
 	--ensure-wallet         Starter BTC XPUB wallet, no gas (default); SCW follows the link
 	--deploy-scw            ETH/EVM SCW first (blocking; needs gas) instead of after the link
 	--skip-scw              Do not attempt the SCW step after the payment link
+	--merchant              Merchant role: take payments for YOUR business (default)
+	--operator              Operator role: run PayRam as a platform for other merchants,
+	                        taking a bps fee (needs PAYRAM_OPERATOR_*_FEE_COLLECTOR)
 	--wallet-choice=1|2|3   Wallet flow choice (1=create, 2=link, 3=skip)
 	--skip-payment-link     Do not create a payment link
 	--create-payment-link   Create a payment link (default)
@@ -37,6 +40,8 @@ One-step options:
 
 Headless commands:
 	status | setup | signin | ensure-config | ensure-wallet | deploy-scw | deploy-scw-flow
+	setup-mode [merchant|operator]    Show or set the install role
+	ensure-operator-config            Fee collectors + default fees (operator)
 	create-payment-link [projectId] [email] [amountUSD]
 	start-mcp-server
 	reset-local [-y]
@@ -44,6 +49,9 @@ Headless commands:
 
 Env vars:
 	PAYRAM_NETWORK (testnet|mainnet)
+	PAYRAM_SETUP_MODE (merchant|operator; default merchant)
+	PAYRAM_OPERATOR_BTC_FEE_COLLECTOR, PAYRAM_OPERATOR_EVM_FEE_COLLECTOR
+	PAYRAM_OPERATOR_FEE_BPS (default 100 = 1%, max 1500)
 	PAYRAM_API_URL (default: derived from installed config.env / running container)
 	PAYRAM_EMAIL, PAYRAM_PASSWORD, PAYRAM_PROJECT_NAME
 	PAYRAM_PAYMENT_EMAIL, PAYRAM_PAYMENT_AMOUNT, PAYRAM_CUSTOMER_ID
@@ -272,6 +280,167 @@ save_tokens() {
 	[[ -n "${CUSTOMER_ID:-}" ]] && echo "CUSTOMER_ID=\"$CUSTOMER_ID\"" >> "$TOKEN_FILE"
 	[[ -n "${MEMBER_EMAIL:-}" ]] && echo "MEMBER_EMAIL=\"$MEMBER_EMAIL\"" >> "$TOKEN_FILE"
 	chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+}
+
+# ── Setup mode (merchant vs operator) ────────────────────────────────
+# PayRam installs run in one of two roles, stored as the backend config
+# payram.setup_mode and picked on first run (the FE shows a role wizard):
+#   merchant - you take payments for YOUR business (default).
+#   operator - you run PayRam as a platform for OTHER merchants and take a
+#              fee (bps) on their volume, paid to YOUR fee-collector
+#              addresses. Unlocks /operator/* (fee collectors, default fees,
+#              operator dashboard). In operator mode, deposit wallets must be
+#              bound to a project AND a fee (bps + collector) must resolve
+#              for the chain before wallets can be created.
+# The role LOCKS once role-specific data exists (merchant: a project;
+# operator: a fee collector).
+
+get_setup_mode() {
+	local res
+	res=$(api GET "/api/v1/operator/setup-mode" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" == "200" ]]; then
+		echo "$HTTP_BODY" | grep -o '"setupMode":"[^"]*"' | cut -d'"' -f4 || true
+	fi
+}
+
+ensure_setup_mode() {
+	local desired="$1"
+	local current
+	current=$(get_setup_mode)
+	if [[ "$current" == "$desired" ]]; then
+		echo "Setup mode: $desired (already set)"
+		return 0
+	fi
+	if [[ -n "$current" ]]; then
+		echo "Setup mode is '$current' and you asked for '$desired'."
+		echo "The role locks once role data exists (merchant: a project; operator: a"
+		echo "fee collector). To change it, reset the install (reset-local) or use the"
+		echo "dashboard role screen while no role data has been saved."
+		return 1
+	fi
+	local res
+	res=$(api PUT "/api/v1/operator/setup-mode" "{\"setupMode\":\"$desired\"}" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" == "200" ]]; then
+		echo "Setup mode set: $desired"
+		return 0
+	fi
+	log_api_error "Set setup mode" "$HTTP_CODE" "$HTTP_BODY"
+	return 1
+}
+
+# Operator lane: ensure fee collectors (per family) + default fees (per
+# chain) exist, driven by env. Without these the backend refuses wallet
+# creation in operator mode - so this must run BEFORE ensure_wallet.
+ensure_operator_config() {
+	local btc_addr="${PAYRAM_OPERATOR_BTC_FEE_COLLECTOR:-}"
+	local evm_addr="${PAYRAM_OPERATOR_EVM_FEE_COLLECTOR:-}"
+	local fee_bps="${PAYRAM_OPERATOR_FEE_BPS:-100}"
+	if [[ -z "$btc_addr" && -z "$evm_addr" ]]; then
+		echo ""
+		echo "=== Operator mode needs YOUR fee-collector addresses (ownership decision) ==="
+		echo "Operator fees from merchant volume are paid to addresses you control."
+		echo "Provide at least one and re-run:"
+		echo "  PAYRAM_OPERATOR_BTC_FEE_COLLECTOR=<your BTC address>"
+		echo "  PAYRAM_OPERATOR_EVM_FEE_COLLECTOR=<your 0x address>"
+		echo "  PAYRAM_OPERATOR_FEE_BPS=$fee_bps   (fee in basis points, max 1500 = 15%)"
+		echo "Or configure in the dashboard: Setup -> Fee collectors -> Default fees."
+		echo "=============================================================================="
+		return 1
+	fi
+	if ! command -v python3 >/dev/null 2>&1; then
+		echo "python3 is required to auto-configure operator fees (JSON parsing)."
+		echo "Configure via the dashboard instead: Setup -> Fee collectors -> Default fees."
+		return 1
+	fi
+
+	local res families
+	res=$(api GET "/api/v1/blockchain-family" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		log_api_error "List blockchain families" "$HTTP_CODE" "$HTTP_BODY"
+		return 1
+	fi
+	families="$HTTP_BODY"
+	local btc_fam_id evm_fam_id
+	btc_fam_id=$(echo "$families" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+print(next((f['id'] for f in d if f.get('family')=='BTC_Family'),''))" 2>/dev/null || true)
+	evm_fam_id=$(echo "$families" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+print(next((f['id'] for f in d if f.get('family')=='ETH_Family'),''))" 2>/dev/null || true)
+
+	# Existing collectors (idempotency): family id -> collector id
+	res=$(api GET "/api/v1/operator/fee-collectors" "" true)
+	parse_response "$res"
+	local existing="$HTTP_BODY"
+	collector_id_for_family() {
+		echo "$existing" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+print(next((c['id'] for c in d if str(c.get('blockchainFamilyID'))=='$1'),''))" 2>/dev/null || true
+	}
+
+	create_collector() {
+		local fam_id="$1" addr="$2" name="$3"
+		local cid
+		cid=$(collector_id_for_family "$fam_id")
+		if [[ -n "$cid" ]]; then
+			echo "Fee collector for family $fam_id already exists (id $cid)."
+			echo "$cid"
+			return 0
+		fi
+		res=$(api POST "/api/v1/operator/fee-collectors" "{\"blockchainFamilyID\":$fam_id,\"address\":\"$addr\",\"masterAddress\":\"$addr\",\"name\":\"$name\"}" true)
+		parse_response "$res"
+		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
+			log_api_error "Create fee collector ($name)" "$HTTP_CODE" "$HTTP_BODY"
+			return 1
+		fi
+		echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2
+	}
+
+	local btc_cid="" evm_cid=""
+	if [[ -n "$btc_addr" && -n "$btc_fam_id" ]]; then
+		btc_cid=$(create_collector "$btc_fam_id" "$btc_addr" "Operator BTC collector" | tail -1) || return 1
+	fi
+	if [[ -n "$evm_addr" && -n "$evm_fam_id" ]]; then
+		evm_cid=$(create_collector "$evm_fam_id" "$evm_addr" "Operator EVM collector" | tail -1) || return 1
+	fi
+
+	# Default fees for every active chain whose family has a collector.
+	res=$(api GET "/api/v1/blockchains" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		log_api_error "List blockchains" "$HTTP_CODE" "$HTTP_BODY"
+		return 1
+	fi
+	local defaults
+	defaults=$(echo "$HTTP_BODY" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+out=[]
+for b in d:
+    fam=b.get('family'); cid=''
+    if fam=='BTC_Family': cid='$btc_cid'
+    elif fam=='ETH_Family': cid='$evm_cid'
+    if cid:
+        out.append({'blockchainID':b['id'],'feeBps':int('$fee_bps'),'feeCollectorID':int(cid)})
+print(json.dumps({'defaults':out}) if out else '')" 2>/dev/null || true)
+	if [[ -z "$defaults" ]]; then
+		echo "No chains matched the provided collectors; set default fees in the dashboard."
+		return 1
+	fi
+	res=$(api PUT "/api/v1/operator/fees/defaults" "$defaults" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
+		log_api_error "Set default operator fees" "$HTTP_CODE" "$HTTP_BODY"
+		return 1
+	fi
+	echo "Operator configured: fee collectors + default fee ${fee_bps} bps across supported chains."
+	return 0
 }
 
 # Print a troubleshooting card: likely causes ranked by probability given the
@@ -616,6 +785,11 @@ cmd_setup() {
 	save_tokens
 	echo "Signed in as $email"
 
+	# Pick the role BEFORE creating a project - the first project locks the
+	# install into merchant mode. Default is merchant; operator must be asked
+	# for explicitly (PAYRAM_SETUP_MODE=operator or --operator).
+	ensure_setup_mode "${PAYRAM_SETUP_MODE:-merchant}" || true
+
 	local project_name="${PAYRAM_PROJECT_NAME:-Default Project}"
 	res=$(api POST "/api/v1/external-platform" "{\"name\":\"$project_name\"}")
 	parse_response "$res"
@@ -862,8 +1036,17 @@ ensure_wallet() {
 		# an xpub - registering an ETH_Family xpub would create a wallet whose
 		# address generation fails at payment time. USDC/EVM comes from the
 		# deploy-scw step.
-		local payload
-		payload="{\"name\":\"Headless\",\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
+		#
+		# Operator mode: the backend requires the wallet to be bound to a
+		# project at creation AND an operator fee (bps + collector) to resolve
+		# for BTC - run ensure_operator_config first if creation fails.
+		local payload mode
+		mode=$(get_setup_mode)
+		if [[ "$mode" == "operator" ]]; then
+			payload="{\"name\":\"Headless\",\"projectID\":$project_id,\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
+		else
+			payload="{\"name\":\"Headless\",\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
+		fi
 		res=$(api POST "/api/v1/wallets/deposit/eoa/bulk" "$payload" true)
 		parse_response "$res"
 		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
@@ -1669,6 +1852,16 @@ headless_main() {
 		setup)    cmd_setup ;;
 		signin)   cmd_signin ;;
 		ensure-config) ensure_config ;;
+		setup-mode)
+			if [[ -n "${1:-}" ]]; then
+				ensure_token || exit 1
+				ensure_setup_mode "$1"
+			else
+				ensure_token || exit 1
+				echo "Setup mode: $(get_setup_mode)"
+			fi
+			;;
+		ensure-operator-config) ensure_token || exit 1; ensure_operator_config ;;
 		ensure-wallet) ensure_wallet ;;
 		deploy-scw) cmd_deploy_scw ;;
 		deploy-scw-flow) cmd_deploy_scw_flow ;;
@@ -1699,6 +1892,9 @@ flow_main() {
 	local wallet_mode="ensure-wallet"
 	local attempt_scw="true"
 	local create_payment_link="true"
+	# Role: merchant by default. Operator mode (run PayRam as a platform for
+	# other merchants, taking a bps fee) only when explicitly requested.
+	local setup_mode="${PAYRAM_SETUP_MODE:-merchant}"
 	local start_mcp_server="true"
 	local mcp_port="${PAYRAM_MCP_PORT:-3333}"
 	local node_mode="${PAYRAM_NODE_MODE:-docker}"
@@ -1728,6 +1924,14 @@ flow_main() {
 				;;
 			--skip-scw)
 				attempt_scw="false"
+				shift
+				;;
+			--operator)
+				setup_mode="operator"
+				shift
+				;;
+			--merchant)
+				setup_mode="merchant"
 				shift
 				;;
 			--wallet-choice=*)
@@ -1854,8 +2058,12 @@ flow_main() {
 	fi
 
 	log "Auth setup..."
+	export PAYRAM_SETUP_MODE="$setup_mode"
 	if root_exists; then
 		cmd_signin
+		# Existing install: make sure the role matches what was asked for
+		# (no-op when already set; refuses with directions when locked).
+		ensure_setup_mode "$setup_mode" || true
 	else
 		cmd_setup
 	fi
@@ -1863,10 +2071,23 @@ flow_main() {
 	log "Ensuring config..."
 	ensure_config
 
+	if [[ "$setup_mode" == "operator" ]]; then
+		log "Operator lane: configuring fee collectors + default fees..."
+		if ! ensure_operator_config; then
+			log "Operator fee config incomplete - wallet and payment-link steps need it."
+			log "Provide the env vars above (or use the dashboard) and re-run; everything is resumable."
+			wallet_mode="skip"
+			create_payment_link="false"
+			attempt_scw="false"
+		fi
+	fi
+
 	if [[ "$wallet_mode" == "deploy-scw" ]]; then
 		# Explicit --deploy-scw: SCW first (blocking, guided funding).
 		log "Deploying SCW wallet..."
 		cmd_deploy_scw_flow
+	elif [[ "$wallet_mode" == "skip" ]]; then
+		log "Skipping wallet setup (operator fee config pending)."
 	else
 		log "Ensuring deposit wallet (BTC xpub - instant, no gas)..."
 		ensure_wallet
@@ -1908,8 +2129,12 @@ flow_main() {
 		echo "  $payment_url"
 		echo ""
 	fi
-	echo "Network: ${network_mode}    API: $PAYRAM_API_URL"
+	echo "Network: ${network_mode}    Role: ${setup_mode}    API: $PAYRAM_API_URL"
 	echo "State:   $PAYRAM_INFO_DIR  (tokens, wallet mnemonic - back it up)"
+	if [[ "$setup_mode" == "operator" ]]; then
+		echo "Operator: fees from merchant volume route to YOUR fee collectors."
+		echo "  Dashboard -> Operator shows earnings; tune fees: $0 ensure-operator-config"
+	fi
 	echo ""
 	echo "Everything set up today can be changed later:"
 	echo "  - Add/replace deposit wallets:  dashboard -> Project -> Wallet  (or: $0 ensure-wallet)"
@@ -1944,7 +2169,7 @@ flow_main() {
 main() {
 	local cmd="${1:-}"
 	case "$cmd" in
-		status|setup|signin|ensure-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|start-mcp-server|reset-local|menu|run)
+		status|setup|signin|ensure-config|setup-mode|ensure-operator-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|start-mcp-server|reset-local|menu|run)
 			MODE="headless"
 			;;
 		-h|--help)

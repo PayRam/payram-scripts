@@ -112,6 +112,37 @@ Token is read from `.payraminfo/headless-tokens.env` (created by signin). Deploy
 
 ---
 
+## Setup mode: merchant vs operator
+
+On first run PayRam asks which role this install plays (the FE shows a role
+wizard; headless it's the `payram.setup_mode` backend config):
+
+| Mode | Who it's for | What it changes |
+|------|--------------|-----------------|
+| **merchant** (default) | You take crypto payments for YOUR business | The flow you see above - project, wallets, payment links |
+| **operator** | You run PayRam as a PLATFORM for other merchants and earn a fee (basis points) on their volume | Unlocks `/api/v1/operator/*` (fee collectors, default fees, operator dashboard). Deposit wallets must be bound to a project AND an operator fee (bps + collector) must resolve for the chain BEFORE wallets can be created |
+
+Rules agents must know:
+
+- **The role locks** once role-specific data exists (merchant: first project;
+  operator: first fee collector). Same-value writes are always allowed.
+- The agent flow defaults to **merchant**. Switch lanes only when the human
+  explicitly asks for operator: `--operator` or `PAYRAM_SETUP_MODE=operator`.
+- Operator lane order (the script automates this when env is provided):
+  1. `PUT /api/v1/operator/setup-mode {"setupMode":"operator"}` (root, BEFORE any project)
+  2. `POST /api/v1/operator/fee-collectors {blockchainFamilyID, address, masterAddress, name}`
+     per family - **the collector addresses are an ownership decision** the
+     human must provide (`PAYRAM_OPERATOR_BTC_FEE_COLLECTOR` /
+     `PAYRAM_OPERATOR_EVM_FEE_COLLECTOR`; BTC uses address as masterAddress)
+  3. `PUT /api/v1/operator/fees/defaults {defaults:[{blockchainID, feeBps, feeCollectorID}]}`
+     (`PAYRAM_OPERATOR_FEE_BPS`, default 100 = 1%, max 1500)
+  4. Project, then wallets (the script binds the wallet to the project with
+     `projectID` automatically in operator mode), then payment links as usual.
+- Headless commands: `setup-mode [merchant|operator]` (show/set),
+  `ensure-operator-config` (steps 2-3, idempotent).
+- If the operator env vars are missing, the flow stops after auth/config with
+  a checklist and is fully resumable once they're provided.
+
 ## Typical flow
 
 1. **Start PayRam:** `./setup_payram_agents.sh` (installs or restarts).
