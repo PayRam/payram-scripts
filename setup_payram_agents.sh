@@ -160,17 +160,20 @@ is_payram_running() {
 	docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^payram$'
 }
 
-PAYRAM_INFO_DIR=""
-PAYRAM_CORE_DIR=""
-PAYRAM_API_URL=""
+# Initialise globals WITHOUT stomping caller-provided env overrides
+# (PAYRAM_API_URL=... ./setup_payram_agents.sh must be honoured).
+PAYRAM_INFO_DIR="${PAYRAM_INFO_DIR:-}"
+PAYRAM_CORE_DIR="${PAYRAM_CORE_DIR:-}"
+PAYRAM_API_URL="${PAYRAM_API_URL:-}"
 TOKEN_FILE=""
-PAYRAM_NODE_MODE=""
-PAYRAM_NODE_DOCKER_IMAGE=""
+PAYRAM_NODE_MODE="${PAYRAM_NODE_MODE:-}"
+PAYRAM_NODE_DOCKER_IMAGE="${PAYRAM_NODE_DOCKER_IMAGE:-}"
 NODE_MODE_RESOLVED=""
 INSTALL_CONFIG_FILE=""
 INSTALL_HOME=""
 INSTALL_NETWORK=""
 DERIVED_API_URL=""
+SCW_STATE_FILE=""
 
 # setup_payram.sh is the source of truth for an installation. It persists every
 # install-time decision (ports, dirs, network, SSL) in config.env - so we READ
@@ -198,10 +201,14 @@ load_install_config() {
 			source "$INSTALL_CONFIG_FILE" 2>/dev/null
 			printf '%s\n%s\n%s\n%s\n' "${RETAINED_PORTS:-}" "${PAYRAM_HOME:-}" "${NETWORK_TYPE:-}" "${SSL_CERT_PATH:-}"
 		)
-		retained_ports=$(echo "$vals" | sed -n 1p)
-		INSTALL_HOME=$(echo "$vals" | sed -n 2p)
-		INSTALL_NETWORK=$(echo "$vals" | sed -n 3p)
-		ssl_cert_path=$(echo "$vals" | sed -n 4p)
+		{ read -r retained_ports; read -r INSTALL_HOME; read -r INSTALL_NETWORK; read -r ssl_cert_path; } <<< "$vals" || true
+	fi
+
+	# Caller pinned the URL explicitly (captured in main before defaults were
+	# applied) - nothing to derive, and no docker probe needed.
+	if [[ -n "${PAYRAM_API_URL_OVERRIDE:-}" ]]; then
+		DERIVED_API_URL="$PAYRAM_API_URL_OVERRIDE"
+		return 0
 	fi
 
 	# Derive the API URL: SSL install -> https on the 443 mapping; otherwise
@@ -215,21 +222,16 @@ load_install_config() {
 		[[ "$cont" == "443" && -z "$https_port" ]] && https_port="$host"
 	done
 	if [[ -n "$ssl_cert_path" && -n "$https_port" ]]; then
-		DERIVED_API_URL="https://localhost"
-		[[ "$https_port" != "443" ]] && DERIVED_API_URL="https://localhost:${https_port}"
+		DERIVED_API_URL=$(localhost_url https "$https_port" 443)
 	elif [[ -n "$http_port" ]]; then
-		DERIVED_API_URL="http://localhost"
-		[[ "$http_port" != "80" ]] && DERIVED_API_URL="http://localhost:${http_port}"
+		DERIVED_API_URL=$(localhost_url http "$http_port" 80)
 	elif command -v docker >/dev/null 2>&1; then
 		# No config.env - ask the running container which host port serves :80.
 		# (|| true: docker port fails when the container doesn't exist, and a
 		# failing command substitution would kill the script under set -e.)
 		local published
 		published=$(docker port payram 80/tcp 2>/dev/null | head -1 | sed 's/.*://' || true)
-		if [[ -n "$published" ]]; then
-			DERIVED_API_URL="http://localhost"
-			[[ "$published" != "80" ]] && DERIVED_API_URL="http://localhost:${published}"
-		fi
+		[[ -n "$published" ]] && DERIVED_API_URL=$(localhost_url http "$published" 80)
 	fi
 	# Last resort: the installer's default mapping is 80:80.
 	[[ -z "$DERIVED_API_URL" ]] && DERIVED_API_URL="http://localhost"
@@ -271,6 +273,62 @@ parse_response() {
 	HTTP_CODE=$(echo "$response" | tail -1)
 }
 
+# Parse the 4 auth fields out of a signin/signup response body into the
+# globals save_tokens persists. (refresh_token keeps its own 2-field parse -
+# refresh responses don't carry customer_id/email.)
+parse_auth_tokens() {
+	local body="$1"
+	ACCESS_TOKEN=$(echo "$body" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
+	REFRESH_TOKEN=$(echo "$body" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4)
+	CUSTOMER_ID=$(echo "$body" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4)
+	MEMBER_EMAIL=$(echo "$body" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
+}
+
+# First project id - the script's "current project" policy, in ONE place.
+# Echoes the id; guidance goes to stderr so $(capture) stays clean.
+get_first_project_id() {
+	local res
+	res=$(api GET "/api/v1/external-platform/all" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		echo "Failed to list projects: $HTTP_BODY" >&2
+		return 1
+	fi
+	local id
+	id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2 || true)
+	if [[ -z "$id" ]]; then
+		echo "No projects. Run 'setup' first." >&2
+		return 1
+	fi
+	echo "$id"
+}
+
+# scheme + port -> localhost URL, omitting the scheme's default port.
+localhost_url() {
+	if [[ "$2" == "$3" ]]; then
+		echo "$1://localhost"
+	else
+		echo "$1://localhost:$2"
+	fi
+}
+
+# The one place testnet faucet links live (used by the funding card AND the
+# gas troubleshooting card - keeping them identical by construction).
+print_testnet_faucets() {
+	echo "  https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
+	echo "  https://www.alchemy.com/faucets/ethereum-sepolia"
+}
+
+# Find the id of the first JSON-list element whose <field> equals <value>.
+# Tolerates {items:[...]}/{data:[...]} wrappers; reads the JSON on stdin.
+json_find_id_by() {
+	python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+print(next((x['id'] for x in d if str(x.get(sys.argv[1]))==sys.argv[2]),''))
+" "$1" "$2" 2>/dev/null || true
+}
+
 # Persist auth tokens from the current ACCESS_TOKEN/REFRESH_TOKEN/CUSTOMER_ID/
 # MEMBER_EMAIL globals. Tokens are credentials: 600 like the wallet mnemonic.
 save_tokens() {
@@ -295,7 +353,16 @@ save_tokens() {
 # The role LOCKS once role-specific data exists (merchant: a project;
 # operator: a fee collector).
 
+SETUP_MODE_CACHED=""
+
+# get_setup_mode is read via $(...) subshells, so it can only READ the cache;
+# ensure_setup_mode (which runs in the parent shell) is what populates it.
+# One GET per run instead of one per consumer (ensure_wallet, banner, ...).
 get_setup_mode() {
+	if [[ -n "$SETUP_MODE_CACHED" ]]; then
+		echo "$SETUP_MODE_CACHED"
+		return 0
+	fi
 	local res
 	res=$(api GET "/api/v1/operator/setup-mode" "" true)
 	parse_response "$res"
@@ -309,10 +376,12 @@ ensure_setup_mode() {
 	local current
 	current=$(get_setup_mode)
 	if [[ "$current" == "$desired" ]]; then
+		SETUP_MODE_CACHED="$desired"
 		echo "Setup mode: $desired (already set)"
 		return 0
 	fi
 	if [[ -n "$current" ]]; then
+		SETUP_MODE_CACHED="$current"
 		echo "Setup mode is '$current' and you asked for '$desired'."
 		echo "The role locks once role data exists (merchant: a project; operator: a"
 		echo "fee collector). To change it, reset the install (reset-local) or use the"
@@ -323,11 +392,34 @@ ensure_setup_mode() {
 	res=$(api PUT "/api/v1/operator/setup-mode" "{\"setupMode\":\"$desired\"}" true)
 	parse_response "$res"
 	if [[ "$HTTP_CODE" == "200" ]]; then
+		SETUP_MODE_CACHED="$desired"
 		echo "Setup mode set: $desired"
 		return 0
 	fi
 	log_api_error "Set setup mode" "$HTTP_CODE" "$HTTP_BODY"
 	return 1
+}
+
+# Create a fee collector for one family unless one already exists in
+# $4 (the pre-fetched collectors list). Result lands in COLLECTOR_ID
+# (existing or freshly created) - global result, same convention as
+# HTTP_BODY/HTTP_CODE, so messages can stay on stdout.
+COLLECTOR_ID=""
+ensure_fee_collector() {
+	local fam_id="$1" addr="$2" name="$3" existing_body="$4"
+	COLLECTOR_ID=$(echo "$existing_body" | json_find_id_by blockchainFamilyID "$fam_id")
+	if [[ -n "$COLLECTOR_ID" ]]; then
+		echo "Fee collector for family $fam_id already exists (id $COLLECTOR_ID)."
+		return 0
+	fi
+	local res
+	res=$(api POST "/api/v1/operator/fee-collectors" "{\"blockchainFamilyID\":$fam_id,\"address\":\"$addr\",\"masterAddress\":\"$addr\",\"name\":\"$name\"}" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
+		log_api_error "Create fee collector ($name)" "$HTTP_CODE" "$HTTP_BODY"
+		return 1
+	fi
+	COLLECTOR_ID=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2 || true)
 }
 
 # Operator lane: ensure fee collectors (per family) + default fees (per
@@ -364,50 +456,22 @@ ensure_operator_config() {
 	fi
 	families="$HTTP_BODY"
 	local btc_fam_id evm_fam_id
-	btc_fam_id=$(echo "$families" | python3 -c "
-import sys,json
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
-print(next((f['id'] for f in d if f.get('family')=='BTC_Family'),''))" 2>/dev/null || true)
-	evm_fam_id=$(echo "$families" | python3 -c "
-import sys,json
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
-print(next((f['id'] for f in d if f.get('family')=='ETH_Family'),''))" 2>/dev/null || true)
+	btc_fam_id=$(echo "$families" | json_find_id_by family BTC_Family)
+	evm_fam_id=$(echo "$families" | json_find_id_by family ETH_Family)
 
 	# Existing collectors (idempotency): family id -> collector id
 	res=$(api GET "/api/v1/operator/fee-collectors" "" true)
 	parse_response "$res"
 	local existing="$HTTP_BODY"
-	collector_id_for_family() {
-		echo "$existing" | python3 -c "
-import sys,json
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
-print(next((c['id'] for c in d if str(c.get('blockchainFamilyID'))=='$1'),''))" 2>/dev/null || true
-	}
-
-	create_collector() {
-		local fam_id="$1" addr="$2" name="$3"
-		local cid
-		cid=$(collector_id_for_family "$fam_id")
-		if [[ -n "$cid" ]]; then
-			echo "Fee collector for family $fam_id already exists (id $cid)."
-			echo "$cid"
-			return 0
-		fi
-		res=$(api POST "/api/v1/operator/fee-collectors" "{\"blockchainFamilyID\":$fam_id,\"address\":\"$addr\",\"masterAddress\":\"$addr\",\"name\":\"$name\"}" true)
-		parse_response "$res"
-		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
-			log_api_error "Create fee collector ($name)" "$HTTP_CODE" "$HTTP_BODY"
-			return 1
-		fi
-		echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2
-	}
 
 	local btc_cid="" evm_cid=""
 	if [[ -n "$btc_addr" && -n "$btc_fam_id" ]]; then
-		btc_cid=$(create_collector "$btc_fam_id" "$btc_addr" "Operator BTC collector" | tail -1) || return 1
+		ensure_fee_collector "$btc_fam_id" "$btc_addr" "Operator BTC collector" "$existing" || return 1
+		btc_cid="$COLLECTOR_ID"
 	fi
 	if [[ -n "$evm_addr" && -n "$evm_fam_id" ]]; then
-		evm_cid=$(create_collector "$evm_fam_id" "$evm_addr" "Operator EVM collector" | tail -1) || return 1
+		ensure_fee_collector "$evm_fam_id" "$evm_addr" "Operator EVM collector" "$existing" || return 1
+		evm_cid="$COLLECTOR_ID"
 	fi
 
 	# Default fees for every active chain whose family has a collector.
@@ -420,15 +484,12 @@ print(next((c['id'] for c in d if str(c.get('blockchainFamilyID'))=='$1'),''))" 
 	local defaults
 	defaults=$(echo "$HTTP_BODY" | python3 -c "
 import sys,json
+btc,evm,bps=sys.argv[1],sys.argv[2],int(sys.argv[3])
 d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
-out=[]
-for b in d:
-    fam=b.get('family'); cid=''
-    if fam=='BTC_Family': cid='$btc_cid'
-    elif fam=='ETH_Family': cid='$evm_cid'
-    if cid:
-        out.append({'blockchainID':b['id'],'feeBps':int('$fee_bps'),'feeCollectorID':int(cid)})
-print(json.dumps({'defaults':out}) if out else '')" 2>/dev/null || true)
+cid_by_family={'BTC_Family':btc,'ETH_Family':evm}
+out=[{'blockchainID':b['id'],'feeBps':bps,'feeCollectorID':int(cid)}
+     for b in d for cid in [cid_by_family.get(b.get('family'),'')] if cid]
+print(json.dumps({'defaults':out}) if out else '')" "$btc_cid" "$evm_cid" "$fee_bps" 2>/dev/null || true)
 	if [[ -z "$defaults" ]]; then
 		echo "No chains matched the provided collectors; set default fees in the dashboard."
 		return 1
@@ -507,8 +568,8 @@ troubleshoot() {
 			echo "  [90%] The deployer address was not funded (or not enough)."
 			echo "        -> send >= ${PAYRAM_SCW_MIN_BALANCE_ETH:-0.01} ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
 			if [[ "${PAYRAM_NETWORK:-testnet}" != "mainnet" ]]; then
-				echo "        -> testnet faucets: https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
-				echo "                            https://www.alchemy.com/faucets/ethereum-sepolia"
+				echo "        -> testnet faucets:"
+				print_testnet_faucets | sed 's/^/      /'
 			fi
 			echo "  [10%] Funds sent on the wrong network."
 			echo "        -> confirm you funded on ${PAYRAM_NETWORK:-testnet} (RPC: ${PAYRAM_ETH_RPC_URL:-default})"
@@ -778,10 +839,7 @@ cmd_setup() {
 		troubleshoot auth-failed
 		return 1
 	fi
-	ACCESS_TOKEN=$(echo "$body" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
-	REFRESH_TOKEN=$(echo "$body" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4)
-	CUSTOMER_ID=$(echo "$body" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4)
-	MEMBER_EMAIL=$(echo "$body" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
+	parse_auth_tokens "$body"
 	save_tokens
 	echo "Signed in as $email"
 
@@ -824,10 +882,7 @@ cmd_signin() {
 		troubleshoot auth-failed
 		return 1
 	fi
-	ACCESS_TOKEN=$(echo "$HTTP_BODY" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
-	REFRESH_TOKEN=$(echo "$HTTP_BODY" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4)
-	CUSTOMER_ID=$(echo "$HTTP_BODY" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4)
-	MEMBER_EMAIL=$(echo "$HTTP_BODY" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
+	parse_auth_tokens "$HTTP_BODY"
 	save_tokens
 	echo "Signed in."
 }
@@ -875,19 +930,14 @@ ensure_eth_mnemonic() {
 		return 1
 	fi
 	ensure_node_deps "$script_dir" || return 1
-	local gen parsed mnemonic
+	local gen mnemonic
 	if ! gen=$(run_node "$script_dir" generate-deposit-wallet-eth.js 2>&1); then
 		echo "Failed to generate ETH wallet mnemonic."
 		echo "$gen"
 		return 1
 	fi
-	parsed=$(echo "$gen" | run_node "$script_dir" -e "
-		let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
-			try { const j=JSON.parse(d); console.log('MNEMONIC', j.mnemonic); }
-			catch(e) { process.exit(1); }
-		});
-	" 2>/dev/null)
-	mnemonic=$(echo "$parsed" | grep '^MNEMONIC ' | sed 's/^MNEMONIC //')
+	# One-line JSON output; grep/cut beats a second node/docker spawn.
+	mnemonic=$(echo "$gen" | grep -o '"mnemonic":"[^"]*"' | cut -d'"' -f4 || true)
 	if [[ -z "$mnemonic" ]]; then
 		echo "Failed to parse generated ETH mnemonic."
 		return 1
@@ -943,19 +993,8 @@ check_eth_balance() {
 ensure_wallet() {
 	ensure_token || return 1
 	load_tokens
-	local project_id
-	local res
-	res=$(api GET "/api/v1/external-platform/all" "" true)
-	parse_response "$res"
-	if [[ "$HTTP_CODE" != "200" ]]; then
-		echo "Failed to list projects: $HTTP_BODY"
-		return 1
-	fi
-	project_id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
-	if [[ -z "$project_id" ]]; then
-		echo "No projects. Run 'setup' first."
-		return 1
-	fi
+	local project_id res
+	project_id=$(get_first_project_id) || return 1
 
 	res=$(api GET "/api/v1/project/${project_id}/wallet" "" true)
 	parse_response "$res"
@@ -1014,16 +1053,12 @@ ensure_wallet() {
 			echo "$gen"
 			return 1
 		fi
-		local mnemonic xpub parsed
-		parsed=$(echo "$gen" | run_node "$script_dir/scripts" -e "
-			let d=''; process.stdin.on('data',c=>d+=c); process.stdin.on('end',()=>{
-				try { const j=JSON.parse(d); console.log('MNEMONIC', j.mnemonic); console.log('XPUB', j.xpub); }
-				catch(e) { process.exit(1); }
-			});
-		" 2>/dev/null)
-		mnemonic=$(echo "$parsed" | grep '^MNEMONIC ' | sed 's/^MNEMONIC //')
-		xpub=$(echo "$parsed" | grep '^XPUB ' | sed 's/^XPUB //')
-		if [[ -z "$xpub" ]]; then
+		# The generator prints one-line JSON; grep/cut it directly instead of
+		# spawning a second node (= a second docker run) just to parse it.
+		local mnemonic xpub
+		mnemonic=$(echo "$gen" | grep -o '"mnemonic":"[^"]*"' | cut -d'"' -f4 || true)
+		xpub=$(echo "$gen" | grep -o '"xpub":"[^"]*"' | cut -d'"' -f4 || true)
+		if [[ -z "$xpub" || -z "$mnemonic" ]]; then
 			echo "Failed to parse generated wallet."
 			return 1
 		fi
@@ -1040,13 +1075,9 @@ ensure_wallet() {
 		# Operator mode: the backend requires the wallet to be bound to a
 		# project at creation AND an operator fee (bps + collector) to resolve
 		# for BTC - run ensure_operator_config first if creation fails.
-		local payload mode
-		mode=$(get_setup_mode)
-		if [[ "$mode" == "operator" ]]; then
-			payload="{\"name\":\"Headless\",\"projectID\":$project_id,\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
-		else
-			payload="{\"name\":\"Headless\",\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
-		fi
+		local payload proj_frag=""
+		[[ "$(get_setup_mode)" == "operator" ]] && proj_frag="\"projectID\":$project_id,"
+		payload="{\"name\":\"Headless\",${proj_frag}\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
 		res=$(api POST "/api/v1/wallets/deposit/eoa/bulk" "$payload" true)
 		parse_response "$res"
 		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
@@ -1126,24 +1157,21 @@ ensure_wallet() {
 link_scw_to_project() {
 	local wallet_id="$1"
 	local family="$2"
-	local state_file="${PAYRAM_INFO_DIR}/scw-state.env"
-	local project_id res
-	res=$(api GET "/api/v1/external-platform/all" "" true)
-	parse_response "$res"
-	if [[ "$HTTP_CODE" != "200" ]]; then
-		troubleshoot link-failed
-		return 1
-	fi
-	project_id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
+	# Optional: caller may pass an already-resolved project id to avoid
+	# re-fetching the project list it just queried.
+	local project_id="${3:-}"
+	local res
 	if [[ -z "$project_id" ]]; then
-		echo "No project found to link the SCW to. Run 'setup' first."
-		return 1
+		if ! project_id=$(get_first_project_id); then
+			troubleshoot link-failed
+			return 1
+		fi
 	fi
 	local payload="{\"wallets\":[{\"walletID\":$wallet_id,\"blockchainFamily\":\"$family\"}]}"
 	res=$(api POST "/api/v1/project/${project_id}/wallet" "$payload" true)
 	parse_response "$res"
 	if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "201" ]]; then
-		echo "SCW_LINKED=1" >> "$state_file"
+		echo "SCW_LINKED=1" >> "$SCW_STATE_FILE"
 		echo "SCW wallet linked to project. You can create payment links (no extra setup)."
 		return 0
 	fi
@@ -1162,14 +1190,12 @@ cmd_deploy_scw() {
 	fi
 	echo "deploy-scw: token OK."
 
-	local state_file="${PAYRAM_INFO_DIR}/scw-state.env"
-
 	# Resume: a previous run deployed on-chain but failed to link. Retry the
 	# LINK ONLY - never redeploy (that would spend gas on a second contract).
-	if [[ -f "$state_file" ]] && ! grep -q '^SCW_LINKED=1' "$state_file" 2>/dev/null; then
+	if [[ -f "$SCW_STATE_FILE" ]] && ! grep -q '^SCW_LINKED=1' "$SCW_STATE_FILE" 2>/dev/null; then
 		local prev_id prev_family
-		prev_id=$(grep '^SCW_WALLET_ID=' "$state_file" 2>/dev/null | cut -d= -f2- || true)
-		prev_family=$(grep '^SCW_FAMILY=' "$state_file" 2>/dev/null | cut -d= -f2- || true)
+		prev_id=$(grep '^SCW_WALLET_ID=' "$SCW_STATE_FILE" 2>/dev/null | cut -d= -f2- || true)
+		prev_family=$(grep '^SCW_FAMILY=' "$SCW_STATE_FILE" 2>/dev/null | cut -d= -f2- || true)
 		if [[ -n "$prev_id" ]]; then
 			echo "Found a deployed-but-unlinked SCW (wallet $prev_id). Resuming the link step only..."
 			link_scw_to_project "$prev_id" "${prev_family:-ETH_Family}"
@@ -1180,23 +1206,21 @@ cmd_deploy_scw() {
 	# Idempotency: an EVM wallet already linked to the project means a re-run
 	# should NOT deploy (and pay gas for) another contract. Only applied for
 	# the default ETH target - setting PAYRAM_BLOCKCHAIN_CODE=BASE/POLYGON is
-	# an explicit "add another chain" intent and always deploys.
+	# an explicit "add another chain" intent and always deploys. Tolerant by
+	# design: if the lookup fails we proceed to deploy rather than block.
+	local known_project_id=""
 	if [[ -z "${PAYRAM_FORCE_DEPLOY:-}" && "${PAYRAM_BLOCKCHAIN_CODE:-ETH}" == "ETH" ]]; then
-		local res project_id
-		res=$(api GET "/api/v1/external-platform/all" "" true)
-		parse_response "$res"
-		if [[ "$HTTP_CODE" == "200" ]]; then
-			project_id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
-			if [[ -n "$project_id" ]]; then
-				res=$(api GET "/api/v1/project/${project_id}/wallet" "" true)
-				parse_response "$res"
-				if [[ "$HTTP_CODE" == "200" ]] && echo "$HTTP_BODY" | grep -q 'ETH_Family'; then
-					echo "An EVM (ETH_Family) wallet is already linked to this project - skipping deploy."
-					echo "Re-running deploy-scw will not spend gas again."
-					echo "  - Deploy on ANOTHER chain:  PAYRAM_BLOCKCHAIN_CODE=BASE PAYRAM_ETH_RPC_URL=<base rpc> $0 deploy-scw"
-					echo "  - Deploy another ETH SCW anyway:  PAYRAM_FORCE_DEPLOY=1 $0 deploy-scw"
-					return 0
-				fi
+		local res
+		known_project_id=$(get_first_project_id 2>/dev/null || true)
+		if [[ -n "$known_project_id" ]]; then
+			res=$(api GET "/api/v1/project/${known_project_id}/wallet" "" true)
+			parse_response "$res"
+			if [[ "$HTTP_CODE" == "200" ]] && echo "$HTTP_BODY" | grep -q 'ETH_Family'; then
+				echo "An EVM (ETH_Family) wallet is already linked to this project - skipping deploy."
+				echo "Re-running deploy-scw will not spend gas again."
+				echo "  - Deploy on ANOTHER chain:  PAYRAM_BLOCKCHAIN_CODE=BASE PAYRAM_ETH_RPC_URL=<base rpc> $0 deploy-scw"
+				echo "  - Deploy another ETH SCW anyway:  PAYRAM_FORCE_DEPLOY=1 $0 deploy-scw"
+				return 0
 			fi
 		fi
 	fi
@@ -1299,11 +1323,11 @@ cmd_deploy_scw() {
 		{
 			echo "SCW_WALLET_ID=$wallet_id"
 			echo "SCW_FAMILY=$family"
-		} > "$state_file"
-		chmod 600 "$state_file" 2>/dev/null || true
+		} > "$SCW_STATE_FILE"
+		chmod 600 "$SCW_STATE_FILE" 2>/dev/null || true
 		echo ""
 		echo "Linking SCW wallet to current project..."
-		link_scw_to_project "$wallet_id" "$family"
+		link_scw_to_project "$wallet_id" "$family" "$known_project_id"
 		return $?
 	fi
 }
@@ -1361,8 +1385,7 @@ cmd_deploy_scw_flow() {
 	echo "Network: ${PAYRAM_NETWORK:-testnet}   RPC: $PAYRAM_ETH_RPC_URL"
 	if [[ "${PAYRAM_NETWORK:-testnet}" != "mainnet" ]]; then
 		echo "Testnet ETH is free - faucets:"
-		echo "  https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
-		echo "  https://www.alchemy.com/faucets/ethereum-sepolia"
+		print_testnet_faucets
 	fi
 	echo "I'll keep checking the balance; this step is resumable - re-running continues the wait."
 	echo "--------------------------------------------------------------------------------"
@@ -1411,18 +1434,7 @@ cmd_create_payment_link() {
 	local customer_email="${2:-}"
 	local amount_usd="${3:-}"
 	if [[ -z "$project_id" ]]; then
-		local res
-		res=$(api GET "/api/v1/external-platform/all" "" true)
-		parse_response "$res"
-		if [[ "$HTTP_CODE" != "200" ]]; then
-			echo "Failed to list projects: $HTTP_BODY"
-			return 1
-		fi
-		project_id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
-		if [[ -z "$project_id" ]]; then
-			echo "No projects. Run 'setup' first."
-			return 1
-		fi
+		project_id=$(get_first_project_id) || return 1
 	fi
 	load_tokens
 	if [[ -z "$customer_email" ]]; then
@@ -1724,10 +1736,7 @@ cmd_run() {
 				echo "Signin failed (HTTP $HTTP_CODE): $HTTP_BODY"
 				return 1
 			fi
-			ACCESS_TOKEN=$(echo "$HTTP_BODY" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
-			REFRESH_TOKEN=$(echo "$HTTP_BODY" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4)
-			CUSTOMER_ID=$(echo "$HTTP_BODY" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4)
-			MEMBER_EMAIL=$(echo "$HTTP_BODY" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
+			parse_auth_tokens "$HTTP_BODY"
 			save_tokens
 			echo "Signed in."
 		fi
@@ -1745,10 +1754,7 @@ cmd_run() {
 			echo "Signup failed (HTTP $HTTP_CODE): $HTTP_BODY"
 			return 1
 		fi
-		ACCESS_TOKEN=$(echo "$HTTP_BODY" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
-		REFRESH_TOKEN=$(echo "$HTTP_BODY" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4)
-		CUSTOMER_ID=$(echo "$HTTP_BODY" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4)
-		MEMBER_EMAIL=$(echo "$HTTP_BODY" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
+		parse_auth_tokens "$HTTP_BODY"
 		save_tokens
 		echo "Signed in as $email"
 		local project_name="${PAYRAM_PROJECT_NAME:-Default Project}"
@@ -1767,17 +1773,7 @@ cmd_run() {
 	load_tokens
 
 	local project_id
-	res=$(api GET "/api/v1/external-platform/all" "" true)
-	parse_response "$res"
-	if [[ "$HTTP_CODE" != "200" ]]; then
-		echo "Failed to list projects: $HTTP_BODY"
-		return 1
-	fi
-	project_id=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2)
-	if [[ -z "$project_id" ]]; then
-		echo "No projects."
-		return 1
-	fi
+	project_id=$(get_first_project_id) || return 1
 
 	ensure_config || true
 	ensure_wallet || true
@@ -1853,11 +1849,10 @@ headless_main() {
 		signin)   cmd_signin ;;
 		ensure-config) ensure_config ;;
 		setup-mode)
+			ensure_token || exit 1
 			if [[ -n "${1:-}" ]]; then
-				ensure_token || exit 1
 				ensure_setup_mode "$1"
 			else
-				ensure_token || exit 1
 				echo "Setup mode: $(get_setup_mode)"
 			fi
 			;;
@@ -2043,7 +2038,6 @@ flow_main() {
 		# port/dirs from it rather than keeping pre-install guesses.
 		load_install_config
 		export PAYRAM_API_URL="${PAYRAM_API_URL_OVERRIDE:-$DERIVED_API_URL}"
-		PAYRAM_API_URL="$PAYRAM_API_URL"
 		echo ""
 		log "Gateway installed. That was the hard part - the rest is automatic."
 	else
@@ -2138,7 +2132,7 @@ flow_main() {
 	echo ""
 	echo "Everything set up today can be changed later:"
 	echo "  - Add/replace deposit wallets:  dashboard -> Project -> Wallet  (or: $0 ensure-wallet)"
-	if [[ -f "${PAYRAM_INFO_DIR}/scw-state.env" ]] && grep -q '^SCW_LINKED=1' "${PAYRAM_INFO_DIR}/scw-state.env" 2>/dev/null; then
+	if grep -q '^SCW_LINKED=1' "$SCW_STATE_FILE" 2>/dev/null; then
 		echo "  - USDC/EVM payments: ENABLED (smart-contract wallet linked)"
 		echo "  - More chains later:  PAYRAM_BLOCKCHAIN_CODE=BASE $0 deploy-scw   (POLYGON likewise)"
 	else
@@ -2217,6 +2211,7 @@ main() {
 	PAYRAM_CORE_DIR="$PAYRAM_CORE_DIR"
 	PAYRAM_API_URL="$PAYRAM_API_URL"
 	TOKEN_FILE="${PAYRAM_INFO_DIR}/headless-tokens.env"
+	SCW_STATE_FILE="${PAYRAM_INFO_DIR}/scw-state.env"
 	PAYRAM_NODE_MODE="$PAYRAM_NODE_MODE"
 	PAYRAM_NODE_DOCKER_IMAGE="$PAYRAM_NODE_DOCKER_IMAGE"
 
