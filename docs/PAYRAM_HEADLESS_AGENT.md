@@ -248,10 +248,29 @@ Three ways, lowest friction first:
    token - returns `{ "url": ... }`. Payment links are currency-agnostic: the
    payer picks the coin/chain at checkout from whatever your linked wallet
    families support.
-3. **MCP for app integration**: the `payram-helper-mcp-server` repo provides an
-   MCP server that teaches agents to integrate PayRam payments into an
-   application. (The MCP server started by this script is **analytics-only**;
-   it does not create payment links.)
+3. **MCP for app integration**: connect the PayRam MCP
+   (`https://mcp.payram.com/mcp`, repo `payram-mcp`) — it generates payment
+   routes/webhooks for your stack and can create payment links via
+   `POST /api/v1/payment` with the **merchant API key**. (The MCP server
+   started by this script is **analytics-only**; it does not create payment
+   links.)
+
+## Merchant API key (the MCP/integration credential)
+
+Server-to-server integrations and the PayRam MCP authenticate with a
+**per-project API key** (header `API-Key`), not the JWT. No dashboard visit
+needed:
+
+```bash
+./setup_payram_agents.sh ensure-api-key
+```
+
+Reuses the project's active key or mints one via
+`POST /api/v1/external-platform/{projectId}/api-key` (JWT auth), then saves
+`PAYRAM_BASE_URL` + `PAYRAM_API_KEY` to `.payraminfo/merchant-api-key.env`
+(chmod 600). The one-step flow runs this automatically after the first
+payment link. Two credentials, two jobs: **JWT** (email/password signin) for
+admin/setup APIs; **API key** for merchant payment APIs and the MCP.
 
 ## Deploy-scw flow details
 
@@ -302,7 +321,7 @@ Three ways, lowest friction first:
 ## Files and scripts
 
 - **Token / secrets:** `.payraminfo/headless-tokens.env`, `.payraminfo/headless-wallet-secret.txt` (mnemonic). Do not commit.
-- **Scripts:** `scripts/generate-deposit-wallet.js` (BTC), `scripts/generate-deposit-wallet-eth.js` (ETH xpub), `scripts/deploy-scw-eth.js` (SCW deploy). Run via headless commands; deploy-scw is invoked by `./setup_payram_agents.sh deploy-scw`.
+- **Scripts:** `scripts/generate-deposit-wallet.js` (BTC deposit xpub), `scripts/generate-deposit-wallet-eth.js` (mnemonic for the SCW DEPLOYER - not a deposit xpub; EVM deposits come from the contract), `scripts/deploy-scw-eth.js` (SCW deploy). Run via headless commands; deploy-scw is invoked by `./setup_payram_agents.sh deploy-scw`.
 
 ## Agent automation tips
 

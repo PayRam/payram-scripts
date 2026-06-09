@@ -42,6 +42,7 @@ Headless commands:
 	status | setup | signin | ensure-config | ensure-wallet | deploy-scw | deploy-scw-flow
 	setup-mode [merchant|operator]    Show or set the install role
 	ensure-operator-config            Fee collectors + default fees (operator)
+	ensure-api-key                    Mint/reuse the project's merchant API key (for MCP/integrations)
 	create-payment-link [projectId] [email] [amountUSD]
 	start-mcp-server
 	reset-local [-y]
@@ -174,6 +175,7 @@ INSTALL_HOME=""
 INSTALL_NETWORK=""
 DERIVED_API_URL=""
 SCW_STATE_FILE=""
+API_KEY_FILE=""
 
 # setup_payram.sh is the source of truth for an installation. It persists every
 # install-time decision (ports, dirs, network, SSL) in config.env - so we READ
@@ -420,6 +422,50 @@ ensure_fee_collector() {
 		return 1
 	fi
 	COLLECTOR_ID=$(echo "$HTTP_BODY" | grep -o '"id":[0-9]*' | head -1 | cut -d':' -f2 || true)
+}
+
+# Merchant API key: every server-to-server integration (and the PayRam MCP at
+# mcp.payram.com) authenticates with a per-PROJECT API key. The dashboard can
+# mint one, but agents shouldn't need a browser: reuse the project's active
+# key, else create one via the API. Saved next to the other secrets.
+ensure_api_key() {
+	ensure_token || return 1
+	load_tokens
+	local project_id
+	project_id=$(get_first_project_id) || return 1
+	local res key=""
+	res=$(api GET "/api/v1/external-platform/${project_id}/api-key" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" == "200" ]] && command -v python3 >/dev/null 2>&1; then
+		key=$(echo "$HTTP_BODY" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+print(next((k['key'] for k in d if k.get('status')=='active' and k.get('key')),''))" 2>/dev/null || true)
+	fi
+	if [[ -z "$key" ]]; then
+		res=$(api POST "/api/v1/external-platform/${project_id}/api-key" "{\"description\":\"Created by setup_payram_agents.sh\"}" true)
+		parse_response "$res"
+		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
+			log_api_error "Create API key" "$HTTP_CODE" "$HTTP_BODY"
+			return 1
+		fi
+		key=$(echo "$HTTP_BODY" | grep -o '"key":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+	fi
+	if [[ -z "$key" ]]; then
+		echo "Could not obtain an API key. Create one in the dashboard: Project -> API keys."
+		return 1
+	fi
+	mkdir -p "$PAYRAM_INFO_DIR"
+	{
+		echo "PAYRAM_BASE_URL=\"$PAYRAM_API_URL\""
+		echo "PAYRAM_API_KEY=\"$key\""
+	} > "$API_KEY_FILE"
+	chmod 600 "$API_KEY_FILE" 2>/dev/null || true
+	echo "Merchant API key ready (project $project_id), saved to: $API_KEY_FILE"
+	echo "This is what server-to-server integrations and the PayRam MCP use:"
+	echo "  PAYRAM_BASE_URL=$PAYRAM_API_URL"
+	echo "  PAYRAM_API_KEY=$key"
+	return 0
 }
 
 # Operator lane: ensure fee collectors (per family) + default fees (per
@@ -1857,6 +1903,7 @@ headless_main() {
 			fi
 			;;
 		ensure-operator-config) ensure_token || exit 1; ensure_operator_config ;;
+		ensure-api-key) ensure_api_key ;;
 		ensure-wallet) ensure_wallet ;;
 		deploy-scw) cmd_deploy_scw ;;
 		deploy-scw-flow) cmd_deploy_scw_flow ;;
@@ -2094,6 +2141,13 @@ flow_main() {
 		log "Skipping payment link creation."
 	fi
 
+	# Mint the merchant API key so integrations (and the PayRam MCP) can take
+	# over without a dashboard visit. Non-fatal: the link above already works.
+	if [[ "$wallet_mode" != "skip" ]]; then
+		log "Ensuring merchant API key..."
+		ensure_api_key || log "API key step deferred - run '$0 ensure-api-key' anytime."
+	fi
+
 	# Quick-setup continuation: BTC link is live; now unlock USDC/EVM via the
 	# ETH smart-contract wallet. Best-effort - with a TTY it guides funding;
 	# headless and unfunded it defers with instructions instead of blocking.
@@ -2148,6 +2202,13 @@ flow_main() {
 		echo "    taking real payments (dashboard -> Wallets)."
 	fi
 	echo "  - More payment links anytime:  $0 create-payment-link"
+	if [[ -f "$API_KEY_FILE" ]]; then
+		echo "  - Integrate into your app: credentials saved at $API_KEY_FILE"
+		echo "    Connect the PayRam MCP (https://mcp.payram.com/mcp) and it can generate"
+		echo "    routes/webhooks for your stack using PAYRAM_BASE_URL + PAYRAM_API_KEY."
+	else
+		echo "  - Integrate into your app: $0 ensure-api-key   (then connect mcp.payram.com)"
+	fi
 	echo ""
 	echo "Thank you for self-hosting PayRam. You now run payment rails that no"
 	echo "platform can switch off - and every independent gateway like yours"
@@ -2163,7 +2224,7 @@ flow_main() {
 main() {
 	local cmd="${1:-}"
 	case "$cmd" in
-		status|setup|signin|ensure-config|setup-mode|ensure-operator-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|start-mcp-server|reset-local|menu|run)
+		status|setup|signin|ensure-config|setup-mode|ensure-operator-config|ensure-api-key|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|start-mcp-server|reset-local|menu|run)
 			MODE="headless"
 			;;
 		-h|--help)
@@ -2212,6 +2273,7 @@ main() {
 	PAYRAM_API_URL="$PAYRAM_API_URL"
 	TOKEN_FILE="${PAYRAM_INFO_DIR}/headless-tokens.env"
 	SCW_STATE_FILE="${PAYRAM_INFO_DIR}/scw-state.env"
+	API_KEY_FILE="${PAYRAM_INFO_DIR}/merchant-api-key.env"
 	PAYRAM_NODE_MODE="$PAYRAM_NODE_MODE"
 	PAYRAM_NODE_DOCKER_IMAGE="$PAYRAM_NODE_DOCKER_IMAGE"
 
