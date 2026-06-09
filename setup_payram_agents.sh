@@ -1003,8 +1003,10 @@ cmd_deploy_scw() {
 	fi
 
 	# Idempotency: an EVM wallet already linked to the project means a re-run
-	# should NOT deploy (and pay gas for) another contract.
-	if [[ -z "${PAYRAM_FORCE_DEPLOY:-}" ]]; then
+	# should NOT deploy (and pay gas for) another contract. Only applied for
+	# the default ETH target - setting PAYRAM_BLOCKCHAIN_CODE=BASE/POLYGON is
+	# an explicit "add another chain" intent and always deploys.
+	if [[ -z "${PAYRAM_FORCE_DEPLOY:-}" && "${PAYRAM_BLOCKCHAIN_CODE:-ETH}" == "ETH" ]]; then
 		local res project_id
 		res=$(api GET "/api/v1/external-platform/all" "" true)
 		parse_response "$res"
@@ -1015,8 +1017,9 @@ cmd_deploy_scw() {
 				parse_response "$res"
 				if [[ "$HTTP_CODE" == "200" ]] && echo "$HTTP_BODY" | grep -q 'ETH_Family'; then
 					echo "An EVM (ETH_Family) wallet is already linked to this project - skipping deploy."
-					echo "Re-running deploy-scw will not spend gas again. To deploy another SCW anyway,"
-					echo "set PAYRAM_FORCE_DEPLOY=1."
+					echo "Re-running deploy-scw will not spend gas again."
+					echo "  - Deploy on ANOTHER chain:  PAYRAM_BLOCKCHAIN_CODE=BASE PAYRAM_ETH_RPC_URL=<base rpc> $0 deploy-scw"
+					echo "  - Deploy another ETH SCW anyway:  PAYRAM_FORCE_DEPLOY=1 $0 deploy-scw"
 					return 0
 				fi
 			fi
@@ -1136,10 +1139,24 @@ cmd_deploy_scw_flow() {
 	ensure_eth_mnemonic || return 1
 
 	if [[ -z "${PAYRAM_ETH_RPC_URL:-}" ]]; then
+		local chain="${PAYRAM_BLOCKCHAIN_CODE:-ETH}"
 		if [[ "${PAYRAM_NETWORK:-}" == "mainnet" ]]; then
-			PAYRAM_ETH_RPC_URL="https://eth.llamarpc.com"
+			case "$chain" in
+				ETH)     PAYRAM_ETH_RPC_URL="https://ethereum-rpc.publicnode.com" ;;
+				BASE)    PAYRAM_ETH_RPC_URL="https://base-rpc.publicnode.com" ;;
+				POLYGON) PAYRAM_ETH_RPC_URL="https://polygon-bor-rpc.publicnode.com" ;;
+				*)
+					echo "No default RPC for chain '$chain' - set PAYRAM_ETH_RPC_URL explicitly."
+					return 1
+					;;
+			esac
 		else
-			PAYRAM_ETH_RPC_URL="https://ethereum-sepolia-rpc.publicnode.com"
+			if [[ "$chain" == "ETH" ]]; then
+				PAYRAM_ETH_RPC_URL="https://ethereum-sepolia-rpc.publicnode.com"
+			else
+				echo "No default testnet RPC for chain '$chain' - set PAYRAM_ETH_RPC_URL to that chain's testnet RPC."
+				return 1
+			fi
 		fi
 		export PAYRAM_ETH_RPC_URL
 	fi
@@ -1782,13 +1799,8 @@ flow_main() {
 	[[ -n "$wallet_choice" ]] && export PAYRAM_WALLET_CHOICE="$wallet_choice"
 	[[ -n "$wallet_choice" ]] && export PAYRAM_WALLET_QUIET=1
 
-	if [[ "$wallet_mode" == "deploy-scw" && -z "${PAYRAM_ETH_RPC_URL:-}" ]]; then
-		if [[ "$network_mode" == "mainnet" ]]; then
-			export PAYRAM_ETH_RPC_URL="https://eth.llamarpc.com"
-		else
-			export PAYRAM_ETH_RPC_URL="https://ethereum-sepolia-rpc.publicnode.com"
-		fi
-	fi
+	# RPC defaults for deploy-scw live in cmd_deploy_scw_flow (per-chain aware);
+	# nothing to pre-set here.
 
 	log "Using assets at $ASSET_DIR"
 	log "Working directory: $WORK_DIR"
@@ -1874,7 +1886,8 @@ flow_main() {
 	echo ""
 	echo "Everything set up today can be changed later:"
 	echo "  - Add/replace deposit wallets:  dashboard -> Project -> Wallet  (or: $0 ensure-wallet)"
-	echo "  - Accept EVM at scale (smart-contract wallet + sweeps):  $0 --deploy-scw"
+	echo "  - Production sweeps (smart-contract wallet; needs gas):  $0 --deploy-scw"
+	echo "  - More chains later:  PAYRAM_BLOCKCHAIN_CODE=BASE $0 deploy-scw   (POLYGON likewise)"
 	if [[ "$network_mode" != "mainnet" ]]; then
 		echo "  - Going LIVE? Re-run with --mainnet and set PAYRAM_FUND_COLLECTOR to YOUR"
 		echo "    cold-wallet address (that is where swept customer funds land)."
