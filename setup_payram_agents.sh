@@ -17,16 +17,19 @@ Usage:
 Quick start (non-interactive testnet trial -> BTC payment link in minutes):
 	PAYRAM_EMAIL=you@example.com PAYRAM_PASSWORD=... \
 	  ./setup_payram_agents.sh --testnet --skip-mcp-server
-	# USDC/EVM needs the smart-contract wallet (gas): it is attempted right
-	# after the link, or run later: ./setup_payram_agents.sh deploy-scw-flow
+	# Default flow (MVF): EVM smart-contract wallet on BASE -> payment link
+	# that accepts USDC. Master wallet is local + ops-only; on mainnet the
+	# sweep destination is YOUR cold address (PAYRAM_FUND_COLLECTOR). The one
+	# human wait is funding the deployer with gas. BTC comes later:
+	#   ./setup_payram_agents.sh ensure-wallet
 
 One-step options:
 	--testnet               Install/run in testnet mode (default)
 	--mainnet               Install/run in mainnet mode
 	--restart               Restart PayRam container before headless steps
-	--ensure-wallet         Starter BTC XPUB wallet, no gas (default); SCW follows the link
-	--deploy-scw            ETH/EVM SCW first (blocking; needs gas) instead of after the link
-	--skip-scw              Do not attempt the SCW step after the payment link
+	--deploy-scw            EVM SCW first on BASE -> USDC link (default; needs gas funding)
+	--ensure-wallet         BTC-first fast lane instead: XPUB wallet, no gas; SCW follows the link
+	--skip-scw              Skip the SCW entirely (no gas): BTC-only fast lane
 	--merchant              Merchant role: take payments for YOUR business (default)
 	--operator              Operator role: run PayRam as a platform for other merchants,
 	                        taking a bps fee (needs PAYRAM_OPERATOR_*_FEE_COLLECTOR)
@@ -340,8 +343,22 @@ localhost_url() {
 # The one place testnet faucet links live (used by the funding card AND the
 # gas troubleshooting card - keeping them identical by construction).
 print_testnet_faucets() {
-	echo "  https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
-	echo "  https://www.alchemy.com/faucets/ethereum-sepolia"
+	# Chain-aware: point the human at faucets for the chain actually being
+	# funded (default flow deploys on BASE).
+	case "${PAYRAM_BLOCKCHAIN_CODE:-ETH}" in
+		BASE)
+			echo "  https://www.alchemy.com/faucets/base-sepolia"
+			echo "  https://faucet.quicknode.com/base/sepolia"
+			;;
+		POLYGON)
+			echo "  https://faucet.polygon.technology (Amoy)"
+			echo "  https://www.alchemy.com/faucets/polygon-amoy"
+			;;
+		*)
+			echo "  https://cloud.google.com/application/web3/faucet/ethereum/sepolia"
+			echo "  https://www.alchemy.com/faucets/ethereum-sepolia"
+			;;
+	esac
 }
 
 # Find the id of the first JSON-list element whose <field> equals <value>.
@@ -1281,12 +1298,13 @@ cmd_deploy_scw() {
 	fi
 
 	# Idempotency: an EVM wallet already linked to the project means a re-run
-	# should NOT deploy (and pay gas for) another contract. Only applied for
-	# the default ETH target - setting PAYRAM_BLOCKCHAIN_CODE=BASE/POLYGON is
-	# an explicit "add another chain" intent and always deploys. Tolerant by
-	# design: if the lookup fails we proceed to deploy rather than block.
+	# should NOT deploy (and pay gas for) another contract. Applied when the
+	# target chain is the legacy ETH default OR was defaulted by the one-step
+	# flow (PAYRAM_SCW_CHAIN_DEFAULTED=1) - an EXPLICITLY chosen chain is an
+	# "add another chain" intent and always deploys. Tolerant by design: if
+	# the lookup fails we proceed to deploy rather than block.
 	local known_project_id=""
-	if [[ -z "${PAYRAM_FORCE_DEPLOY:-}" && "${PAYRAM_BLOCKCHAIN_CODE:-ETH}" == "ETH" ]]; then
+	if [[ -z "${PAYRAM_FORCE_DEPLOY:-}" ]] && { [[ "${PAYRAM_BLOCKCHAIN_CODE:-ETH}" == "ETH" ]] || [[ "${PAYRAM_SCW_CHAIN_DEFAULTED:-0}" == "1" ]]; }; then
 		local res
 		known_project_id=$(get_first_project_id 2>/dev/null || true)
 		if [[ -n "$known_project_id" ]]; then
@@ -1294,9 +1312,10 @@ cmd_deploy_scw() {
 			parse_response "$res"
 			if [[ "$HTTP_CODE" == "200" ]] && echo "$HTTP_BODY" | grep -q 'ETH_Family'; then
 				echo "An EVM (ETH_Family) wallet is already linked to this project - skipping deploy."
-				echo "Re-running deploy-scw will not spend gas again."
-				echo "  - Deploy on ANOTHER chain:  PAYRAM_BLOCKCHAIN_CODE=BASE PAYRAM_ETH_RPC_URL=<base rpc> $0 deploy-scw"
-				echo "  - Deploy another ETH SCW anyway:  PAYRAM_FORCE_DEPLOY=1 $0 deploy-scw"
+				echo "Re-running will not spend gas again."
+				echo "  - Deploy on ANOTHER chain:  PAYRAM_BLOCKCHAIN_CODE=ETH $0 deploy-scw   (POLYGON likewise)"
+				echo "  - Add BTC payments:  $0 ensure-wallet"
+				echo "  - Deploy another SCW anyway:  PAYRAM_FORCE_DEPLOY=1 $0 deploy-scw"
 				return 0
 			fi
 		fi
@@ -1427,12 +1446,15 @@ cmd_deploy_scw_flow() {
 					;;
 			esac
 		else
-			if [[ "$chain" == "ETH" ]]; then
-				PAYRAM_ETH_RPC_URL="https://ethereum-sepolia-rpc.publicnode.com"
-			else
-				echo "No default testnet RPC for chain '$chain' - set PAYRAM_ETH_RPC_URL to that chain's testnet RPC."
-				return 1
-			fi
+			case "$chain" in
+				ETH)     PAYRAM_ETH_RPC_URL="https://ethereum-sepolia-rpc.publicnode.com" ;;
+				BASE)    PAYRAM_ETH_RPC_URL="https://base-sepolia-rpc.publicnode.com" ;;
+				POLYGON) PAYRAM_ETH_RPC_URL="https://polygon-amoy-bor-rpc.publicnode.com" ;;
+				*)
+					echo "No default testnet RPC for chain '$chain' - set PAYRAM_ETH_RPC_URL to that chain's testnet RPC."
+					return 1
+					;;
+			esac
 		fi
 		export PAYRAM_ETH_RPC_URL
 	fi
@@ -1958,11 +1980,13 @@ headless_main() {
 flow_main() {
 	local network_mode="${PAYRAM_NETWORK:-}"
 	local restart_mode="false"
-	# Fast lane by default: the BTC XPUB starter wallet needs no gas and no
-	# human waits, so the first payment link arrives in minutes. The ETH SCW
-	# (which unlocks USDC/EVM, needs gas) runs right after the link as a
-	# best-effort step; --deploy-scw makes it the blocking first step instead.
-	local wallet_mode="ensure-wallet"
+	# MVF by default: an EVM smart-contract wallet on BASE, then a payment
+	# link that accepts USDC. The master (deployer) wallet is created locally
+	# and is ops-only; on mainnet the sweep destination must be a HUMAN-provided
+	# cold address (PAYRAM_FUND_COLLECTOR). The one human wait is gas funding.
+	# BTC is progressive - add it later: $0 ensure-wallet
+	# (--ensure-wallet flips back to the BTC-first, no-gas fast lane.)
+	local wallet_mode="deploy-scw"
 	local attempt_scw="true"
 	local create_payment_link="true"
 	# Role: merchant by default. Operator mode (run PayRam as a platform for
@@ -1996,7 +2020,10 @@ flow_main() {
 				shift
 				;;
 			--skip-scw)
+				# No-gas escape hatch: skip the SCW entirely. With the SCW-first
+				# default this downgrades the flow to the BTC fast lane.
 				attempt_scw="false"
+				wallet_mode="ensure-wallet"
 				shift
 				;;
 			--operator)
@@ -2168,8 +2195,16 @@ flow_main() {
 	fi
 
 	if [[ "$wallet_mode" == "deploy-scw" ]]; then
-		# Explicit --deploy-scw: SCW first (blocking, guided funding).
-		log "Deploying SCW wallet..."
+		# Default MVF: SCW first (blocking, guided funding). Chain defaults to
+		# BASE so the resulting link takes USDC with sub-cent gas; override
+		# with PAYRAM_BLOCKCHAIN_CODE=ETH/POLYGON. When WE pick the chain
+		# (defaulted), mark it so re-runs stay idempotent (no double deploy);
+		# an explicitly chosen chain keeps its add-another-chain semantics.
+		if [[ -z "${PAYRAM_BLOCKCHAIN_CODE:-}" ]]; then
+			export PAYRAM_BLOCKCHAIN_CODE="BASE"
+			export PAYRAM_SCW_CHAIN_DEFAULTED=1
+		fi
+		log "Deploying SCW wallet on ${PAYRAM_BLOCKCHAIN_CODE} (USDC-ready)..."
 		cmd_deploy_scw_flow
 	elif [[ "$wallet_mode" == "skip" ]]; then
 		log "Skipping wallet setup (operator fee config pending)."
@@ -2232,11 +2267,15 @@ flow_main() {
 	echo "  - Add/replace deposit wallets:  dashboard -> Project -> Wallet  (or: $0 ensure-wallet)"
 	if grep -q '^SCW_LINKED=1' "$SCW_STATE_FILE" 2>/dev/null; then
 		echo "  - USDC/EVM payments: ENABLED (smart-contract wallet linked)"
-		echo "  - More chains later:  PAYRAM_BLOCKCHAIN_CODE=BASE $0 deploy-scw   (POLYGON likewise)"
+		echo "  - More chains later:  PAYRAM_BLOCKCHAIN_CODE=ETH $0 deploy-scw   (POLYGON likewise)"
+		echo "  - Add BTC payments:  $0 ensure-wallet"
+		echo "  - Master wallet is local + ops-only ($PAYRAM_INFO_DIR/headless-wallet-secret.txt)."
+		echo "    Once all chains are set up: back it up offline, then remove it from this host."
 	else
-		echo "  - USDC/EVM payments: NOT yet enabled - BTC works now. To enable, fund the"
-		echo "    deployer with gas and run:  $0 deploy-scw-flow"
-		echo "  - More chains after that:  PAYRAM_BLOCKCHAIN_CODE=BASE $0 deploy-scw"
+		echo "  - USDC/EVM payments: NOT yet enabled. Fund the deployer with gas and run:"
+		echo "    $0 deploy-scw-flow"
+		echo "  - More chains after that:  PAYRAM_BLOCKCHAIN_CODE=ETH $0 deploy-scw"
+		echo "  - Add BTC payments:  $0 ensure-wallet"
 	fi
 	if [[ "$network_mode" != "mainnet" ]]; then
 		echo "  - Going LIVE? Re-run with --mainnet and set PAYRAM_FUND_COLLECTOR to YOUR"
