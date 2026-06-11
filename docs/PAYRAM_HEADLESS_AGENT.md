@@ -74,14 +74,13 @@ with the exact fix command, and a non-zero exit.
   running container); default `http://localhost` (the installer publishes
   `80:80`). Override with `PAYRAM_API_URL` only if you know better.
 - Docker required if `PAYRAM_NODE_MODE=docker` (default) for JS tooling.
-- A **fresh install is fully headless and zero-question** (TTY or not): every
-  choice resolves from env knobs with deterministic defaults: containerized DB,
-  no SSL (add later), HTTP on **port 80** — the bundled nginx inside the
-  container reverse-proxies everything, so 80 (and 443 with TLS) are the only
-  ports PayRam needs. Override with `PAYRAM_DB_MODE`, `PAYRAM_SSL_MODE`,
-  `PAYRAM_HOST_PORT`. Anything ambiguous (external DB without credentials,
-  letsencrypt without `DOMAIN_NAME`/`LE_EMAIL`, port 80 busy, low disk)
-  **fails fast naming the exact env var to set** — it never hangs on a prompt.
+- A **fresh install needs a terminal once** — `setup_payram.sh` (the working
+  installer, unmodified) asks its one-time DB/SSL/port questions interactively.
+  Defaults are fine to start: containerized DB, no SSL (add later), HTTP on
+  **port 80** (the bundled nginx inside the container reverse-proxies
+  everything, so 80 — plus 443 with TLS — are the only ports PayRam needs).
+  **Everything after the install is fully headless.** Without a TTY the agent
+  flow fails fast with directions rather than letting prompts hang.
 
 ---
 
@@ -127,11 +126,6 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_CUSTOMER_ID` | from signin | Usually from token file after signin |
 | `PAYRAM_FRONTEND_URL` | `http://localhost` | Used by ensure-config (local) |
 | `PAYRAM_NETWORK` | `mainnet` | One-step flow network selection (`mainnet` default - real payments; `testnet` to try with free coins) |
-| **headless fresh install** | | |
-| `PAYRAM_DB_MODE` | `internal` | `internal` (containerized) or `external` (needs `DB_NAME`, `DB_USER`, `DB_PASSWORD`; `DB_HOST`/`DB_PORT` default `localhost`/`5432`) |
-| `PAYRAM_SSL_MODE` | `none` | `none`, `letsencrypt` (needs `DOMAIN_NAME` + `LE_EMAIL`), or `custom` (certs already in place) |
-| `PAYRAM_HOST_PORT` | `80` | HTTP host port. Bundled nginx proxies everything inside the container - 80 (+443 with TLS) are the only ports needed. Fails fast if busy |
-| `PAYRAM_NONINTERACTIVE` | auto (no TTY) | Set `1` to force headless prompts even with a TTY |
 | `PAYRAM_NODE_MODE` | `docker` | JS runtime: `docker` or `host` |
 | `PAYRAM_NODE_DOCKER_IMAGE` | `node:20-bullseye-slim` | Docker image used for JS scripts |
 | **deploy-scw** | | |
@@ -207,7 +201,7 @@ Rules agents must know:
 The one-step flow does:
 
 1. Network selection (`testnet` or `mainnet`) unless `PAYRAM_NETWORK` is set.
-2. Install or restart PayRam using `setup_payram.sh` (fresh install works headless — env-knob defaults; see Prerequisites).
+2. Install or restart PayRam using `setup_payram.sh` (fresh install asks its one-time questions in the terminal; see Prerequisites).
 3. Re-reads `config.env` and waits for API readiness at the real port.
 4. Auth (`setup` if no root user, else `signin`).
 5. `ensure-config` for local frontend/backend settings.
