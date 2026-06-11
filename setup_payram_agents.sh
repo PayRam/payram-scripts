@@ -648,7 +648,8 @@ troubleshoot() {
 				echo "           Ethereum or Base network - both work, same address; we detect"
 				echo "           where it lands. Pick Base if your wallet asks and you're unsure."
 			else
-				echo "        -> send >= ${PAYRAM_SCW_MIN_BALANCE_ETH:-0.01} ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
+				echo "        -> send ETH (any amount lets the deploy try; ~\$10 is comfortable)"
+				echo "           to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
 			fi
 			if [[ "${PAYRAM_NETWORK:-testnet}" != "mainnet" ]]; then
 				echo "        -> testnet faucets:"
@@ -1095,8 +1096,8 @@ get_eth_deployer_address() {
 check_eth_balance_any() {
 	local script_dir="$SCRIPT_DIR/scripts"
 	ensure_node_deps "$script_dir" || return 1
-	PAYRAM_SCW_MIN_BASE="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_BASE:-0.0015}}" \
-	PAYRAM_SCW_MIN_ETHL1="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_ETHL1:-0.0025}}" \
+	PAYRAM_SCW_MIN_BASE="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_BASE:-0}}" \
+	PAYRAM_SCW_MIN_ETHL1="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_ETHL1:-0}}" \
 	run_node "$script_dir" -e "
 		const { ethers } = require('ethers');
 		const addr = process.env.PAYRAM_DEPLOYER_ADDRESS;
@@ -1111,7 +1112,8 @@ check_eth_balance_any() {
 					const bal = await new ethers.JsonRpcProvider(rpc).getBalance(addr);
 					allFailed = false;
 					summary.push(chain.toLowerCase() + '=' + ethers.formatEther(bal));
-					if (!anyOk && bal >= ethers.parseEther(min)) { anyOk = true; winner = chain; }
+					const ok = min === '0' ? bal > 0n : bal >= ethers.parseEther(min);
+					if (!anyOk && ok) { anyOk = true; winner = chain; }
 				} catch (e) { summary.push(chain.toLowerCase() + '=?'); }
 			}
 			if (allFailed) process.exit(1);
@@ -1125,15 +1127,18 @@ check_eth_balance_any() {
 check_eth_balance() {
 	local script_dir="$SCRIPT_DIR/scripts"
 	ensure_node_deps "$script_dir" || return 1
-	PAYRAM_SCW_MIN_BALANCE_ETH="${PAYRAM_SCW_MIN_BALANCE_ETH:-0.01}" run_node "$script_dir" -e "
+	# Any balance > 0 is a green light: we don't gate on a guessed gas number -
+	# the deploy simply tries, and an out-of-gas failure is resumable. Setting
+	# PAYRAM_SCW_MIN_BALANCE_ETH explicitly restores a hard threshold.
+	PAYRAM_SCW_MIN_BALANCE_ETH="${PAYRAM_SCW_MIN_BALANCE_ETH:-0}" run_node "$script_dir" -e "
 		const { ethers } = require('ethers');
 		const rpc = process.env.PAYRAM_ETH_RPC_URL;
 		const addr = process.env.PAYRAM_DEPLOYER_ADDRESS;
-		const min = process.env.PAYRAM_SCW_MIN_BALANCE_ETH || '0.01';
+		const min = process.env.PAYRAM_SCW_MIN_BALANCE_ETH || '0';
 		const provider = new ethers.JsonRpcProvider(rpc);
 		(async () => {
 			const bal = await provider.getBalance(addr);
-			const ok = bal >= ethers.parseEther(min);
+			const ok = min === '0' ? bal > 0n : bal >= ethers.parseEther(min);
 			console.log(ok ? 'OK' : 'WAIT');
 			console.log(ethers.formatEther(bal));
 		})().catch(() => process.exit(1));
@@ -1532,16 +1537,9 @@ cmd_deploy_scw_flow() {
 	fi
 	export PAYRAM_DEPLOYER_ADDRESS="$deployer"
 
-	# Single-chain threshold default. Skipped for the dual-watch path, which
-	# carries per-chain minimums (Base ~\$5 vs Ethereum L1 ~\$30) inside
-	# check_eth_balance_any - a flat 0.02 here would break the \$5-on-Base UX.
-	if [[ -z "${PAYRAM_SCW_MIN_BALANCE_ETH:-}" && -z "$dual_watch" ]]; then
-		if [[ "${PAYRAM_NETWORK:-}" == "mainnet" ]]; then
-			PAYRAM_SCW_MIN_BALANCE_ETH="0.02"
-		else
-			PAYRAM_SCW_MIN_BALANCE_ETH="0.01"
-		fi
-	fi
+	# No threshold gating by default: any balance > 0 lets the deploy try
+	# (out-of-gas just fails and resumes). PAYRAM_SCW_MIN_BALANCE_ETH, when
+	# explicitly set, restores a hard gate in both checkers.
 
 	local attempts=0
 	local max_attempts="${PAYRAM_SCW_FUND_MAX_ATTEMPTS:-60}"
@@ -1599,7 +1597,12 @@ cmd_deploy_scw_flow() {
 	else
 		echo ""
 		echo "--- Gas refill needed (ops fuel for the deploy + future sweeps, not savings) ---"
-		echo "Send >= ${PAYRAM_SCW_MIN_BALANCE_ETH} ETH to the deployer address:"
+		if [[ -n "${PAYRAM_SCW_MIN_BALANCE_ETH:-}" && "${PAYRAM_SCW_MIN_BALANCE_ETH}" != "0" ]]; then
+			echo "Send >= ${PAYRAM_SCW_MIN_BALANCE_ETH} ETH to the deployer address:"
+		else
+			echo "Send ETH for gas to the deployer address (any amount lets the deploy try;"
+			echo "~\$10 worth is comfortably enough - too little just fails and resumes):"
+		fi
 		echo ""
 		echo "  $deployer"
 		echo ""
@@ -1631,7 +1634,11 @@ cmd_deploy_scw_flow() {
 				break
 			fi
 			if [[ -t 0 ]]; then
-				echo "Balance ${balance} ETH is below ${PAYRAM_SCW_MIN_BALANCE_ETH}. Add funds and press Enter to recheck."
+				if [[ -n "${PAYRAM_SCW_MIN_BALANCE_ETH:-}" && "${PAYRAM_SCW_MIN_BALANCE_ETH}" != "0" ]]; then
+					echo "Balance ${balance} ETH is below ${PAYRAM_SCW_MIN_BALANCE_ETH}. Add funds and press Enter to recheck."
+				else
+					echo "No funds detected yet (balance ${balance} ETH). Add ETH and press Enter to recheck."
+				fi
 				read -r _
 			else
 				if [[ $attempts -ge $max_attempts ]]; then
