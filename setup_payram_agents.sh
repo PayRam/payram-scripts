@@ -57,7 +57,7 @@ Env vars:
 	Headless fresh-install knobs (no TTY needed; every prompt resolves from env):
 	PAYRAM_DB_MODE (internal|external; default internal. external needs DB_NAME, DB_USER, DB_PASSWORD [+DB_HOST, DB_PORT])
 	PAYRAM_SSL_MODE (none|letsencrypt|custom; default none. letsencrypt needs DOMAIN_NAME + LE_EMAIL)
-	PAYRAM_HOST_PORT (HTTP host port; default 80, auto-falls back to first free of 8080/8081/8088/8888)
+	PAYRAM_HOST_PORT (HTTP host port; default 80 - the bundled nginx proxies everything inside the container. Fails fast if 80 is busy)
 	PAYRAM_NONINTERACTIVE=1 (force headless even with a TTY)
 	PAYRAM_OPERATOR_BTC_FEE_COLLECTOR, PAYRAM_OPERATOR_EVM_FEE_COLLECTOR
 	PAYRAM_OPERATOR_FEE_BPS (default 100 = 1%, max 1500)
@@ -136,24 +136,6 @@ run_as_root() {
 	fi
 }
 
-# Pick the host port a headless install publishes HTTP on: 80 when free, else
-# the first free fallback. Deterministic - same machine state, same answer.
-# The installer re-validates whatever we pick (PAYRAM_HOST_PORT).
-pick_free_http_port() {
-	local p
-	for p in 80 8080 8081 8088 8888; do
-		# bash /dev/tcp probe: connect succeeds -> something is listening.
-		if ! (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; then
-			echo "$p"
-			return 0
-		fi
-		exec 3>&- 3<&- 2>/dev/null || true
-	done
-	# Every candidate is taken - surface a clear, fixable error.
-	echo "80"
-	return 0
-}
-
 wait_for_api() {
 	local max_tries=60
 	local wait_secs=2
@@ -193,6 +175,7 @@ PAYRAM_INFO_DIR="${PAYRAM_INFO_DIR:-}"
 PAYRAM_CORE_DIR="${PAYRAM_CORE_DIR:-}"
 PAYRAM_API_URL="${PAYRAM_API_URL:-}"
 TOKEN_FILE=""
+CREDENTIALS_FILE=""
 PAYRAM_NODE_MODE="${PAYRAM_NODE_MODE:-}"
 PAYRAM_NODE_DOCKER_IMAGE="${PAYRAM_NODE_DOCKER_IMAGE:-}"
 NODE_MODE_RESOLVED=""
@@ -661,9 +644,9 @@ troubleshoot() {
 			echo "Deployer wallet has insufficient ETH for gas (this is ops fuel, not savings)."
 			echo "  [90%] The deployer address was not funded (or not enough)."
 			if [[ "${PAYRAM_NETWORK:-testnet}" == "mainnet" && "${PAYRAM_SCW_CHAIN_DEFAULTED:-0}" == "1" ]]; then
-				echo "        -> send ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
-				echo "           ~\$5 on the BASE network (easiest), or ~\$30 on Ethereum -"
-				echo "           same address on both; we detect where it lands."
+				echo "        -> send ~\$10 of ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
+				echo "           Ethereum or Base network - both work, same address; we detect"
+				echo "           where it lands. Pick Base if your wallet asks and you're unsure."
 			else
 				echo "        -> send >= ${PAYRAM_SCW_MIN_BALANCE_ETH:-0.01} ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
 			fi
@@ -903,6 +886,40 @@ cmd_status() {
 	fi
 }
 
+# Zero-input credentials: when PAYRAM_EMAIL/PAYRAM_PASSWORD are not provided,
+# generate them (random password, local default email) and persist 600 next to
+# the auth tokens - both are changeable from the dashboard later, so this is
+# config-pushed-to-the-end, not a security downgrade. Later runs (signin)
+# re-read the same file, so nothing has to be remembered or exported.
+load_or_create_root_credentials() {
+	if [[ -n "${PAYRAM_EMAIL:-}" && -n "${PAYRAM_PASSWORD:-}" ]]; then
+		return 0
+	fi
+	if [[ -n "$CREDENTIALS_FILE" && -f "$CREDENTIALS_FILE" ]]; then
+		# shellcheck source=/dev/null
+		source "$CREDENTIALS_FILE"
+		export PAYRAM_EMAIL PAYRAM_PASSWORD
+		[[ -n "${PAYRAM_EMAIL:-}" && -n "${PAYRAM_PASSWORD:-}" ]] && return 0
+	fi
+	export PAYRAM_EMAIL="${PAYRAM_EMAIL:-admin@payram.local}"
+	if [[ -z "${PAYRAM_PASSWORD:-}" ]]; then
+		if command -v openssl >/dev/null 2>&1; then
+			PAYRAM_PASSWORD="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)"
+		else
+			PAYRAM_PASSWORD="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-16)"
+		fi
+		export PAYRAM_PASSWORD
+	fi
+	if [[ -n "$CREDENTIALS_FILE" ]]; then
+		mkdir -p "$(dirname "$CREDENTIALS_FILE")"
+		printf 'PAYRAM_EMAIL="%s"\nPAYRAM_PASSWORD="%s"\n' "$PAYRAM_EMAIL" "$PAYRAM_PASSWORD" > "$CREDENTIALS_FILE"
+		chmod 600 "$CREDENTIALS_FILE"
+	fi
+	echo "Root credentials auto-created (change anytime in the dashboard):"
+	echo "  email: $PAYRAM_EMAIL"
+	echo "  saved to: ${CREDENTIALS_FILE:-<not persisted>} (password inside, mode 600)"
+}
+
 cmd_setup() {
 	local res body code
 	res=$(curl -s -w "\n%{http_code}" "${PAYRAM_API_URL}/api/v1/member/root/exist")
@@ -917,19 +934,9 @@ cmd_setup() {
 		echo "Root user already exists. Use 'signin' then 'create-payment-link'."
 		return 0
 	fi
-	local email="${PAYRAM_EMAIL:-}"
-	local password="${PAYRAM_PASSWORD:-}"
-	if [[ ( -z "$email" || -z "$password" ) && ! -t 0 ]]; then
-		troubleshoot auth-env
-		return 1
-	fi
-	if [[ -z "$email" ]]; then
-		read -p "Email for root user: " email
-	fi
-	if [[ -z "$password" ]]; then
-		read -s -p "Password: " password
-		echo
-	fi
+	load_or_create_root_credentials
+	local email="$PAYRAM_EMAIL"
+	local password="$PAYRAM_PASSWORD"
 	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signup" \
 		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
 	body=$(echo "$res" | sed '$d')
@@ -962,6 +969,14 @@ cmd_setup() {
 cmd_signin() {
 	local email="${PAYRAM_EMAIL:-}"
 	local password="${PAYRAM_PASSWORD:-}"
+	# Auto-created credentials from a previous setup run live next to the
+	# tokens - re-use them so signin needs no env vars either.
+	if [[ ( -z "$email" || -z "$password" ) && -n "$CREDENTIALS_FILE" && -f "$CREDENTIALS_FILE" ]]; then
+		# shellcheck source=/dev/null
+		source "$CREDENTIALS_FILE"
+		email="${email:-${PAYRAM_EMAIL:-}}"
+		password="${password:-${PAYRAM_PASSWORD:-}}"
+	fi
 	if [[ ( -z "$email" || -z "$password" ) && ! -t 0 ]]; then
 		troubleshoot auth-env
 		return 1
@@ -1080,8 +1095,8 @@ get_eth_deployer_address() {
 check_eth_balance_any() {
 	local script_dir="$SCRIPT_DIR/scripts"
 	ensure_node_deps "$script_dir" || return 1
-	PAYRAM_SCW_MIN_BASE="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_BASE:-0.002}}" \
-	PAYRAM_SCW_MIN_ETHL1="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_ETHL1:-0.01}}" \
+	PAYRAM_SCW_MIN_BASE="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_BASE:-0.0015}}" \
+	PAYRAM_SCW_MIN_ETHL1="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_ETHL1:-0.0025}}" \
 	run_node "$script_dir" -e "
 		const { ethers } = require('ethers');
 		const addr = process.env.PAYRAM_DEPLOYER_ADDRESS;
@@ -1536,16 +1551,14 @@ cmd_deploy_scw_flow() {
 		echo ""
 		echo "--- One step needs you: add a little ETH (this pays the network fees) ---"
 		echo ""
-		echo "Send ETH to this address:"
+		echo "Send about \$10 worth of ETH to this address:"
 		echo ""
 		echo "  $deployer"
 		echo ""
-		echo "  - Easiest: about \$5 of ETH on the BASE network."
-		echo "    (If your wallet or exchange asks which network, pick 'Base'.)"
-		echo "  - Sending on the Ethereum network works too, but its fees are higher -"
-		echo "    send about \$30 there instead."
-		echo "  - Same address on both. I'll detect where the funds land and continue"
-		echo "    automatically. This is resumable - re-running continues the wait."
+		echo "  - Ethereum network or Base network - BOTH work, it's the same address."
+		echo "    (If your wallet or exchange asks which network, pick 'Base' when unsure.)"
+		echo "  - I'll detect where the funds land and continue automatically."
+		echo "  - This is resumable - re-running continues the wait."
 		echo "--------------------------------------------------------------------------"
 		while true; do
 			local status chain balances res
@@ -2201,6 +2214,9 @@ flow_main() {
 			echo "Choose network:"
 			echo "  1) mainnet - real payments (default)"
 			echo "  2) testnet - try everything first with free test coins"
+			echo "     Heads-up: test tokens are free but often a hassle to get - faucets"
+			echo "     usually want an account, a mainnet balance, or a social post."
+			echo "     With ~\$10 of real ETH, mainnet is often the faster path."
 			read -p "Selection [1]: " net_choice
 			net_choice="${net_choice:-1}"
 			if [[ "$net_choice" == "2" ]]; then
@@ -2211,6 +2227,10 @@ flow_main() {
 		else
 			network_mode="mainnet"
 		fi
+	fi
+	if [[ "$network_mode" == "testnet" ]]; then
+		log "Testnet mode. Note: faucets often have requirements (account, mainnet balance,"
+		log "social post) - if they block you, mainnet with ~\$10 of ETH is the faster path."
 	fi
 
 	export PAYRAM_NODE_MODE="$node_mode"
@@ -2236,18 +2256,18 @@ flow_main() {
 	elif ! is_payram_running; then
 		# A FRESH install delegates to setup_payram.sh and ALWAYS runs it with
 		# zero questions: every choice resolves from PAYRAM_* env knobs with
-		# deterministic defaults (internal DB, no SSL, port 80 or first free
-		# fallback). Config-comes-later UX: SSL, ports, and DB can all be
-		# changed once the gateway works - the goal here is the payment link.
-		# Humans who want the full interactive installer run it directly:
-		#   sudo ./setup_payram.sh
+		# deterministic defaults (internal DB, no SSL, port 80). The bundled
+		# nginx inside the container reverse-proxies everything - 80 (and 443
+		# with TLS) are the only ports PayRam needs. If 80 is busy the
+		# installer fails fast with the listener + the PAYRAM_HOST_PORT
+		# override; we don't silently pick another port (links on :8080
+		# surprise people). Config-comes-later UX: SSL, ports, and DB can all
+		# be changed once the gateway works - the goal here is the payment
+		# link. Full interactive installer: sudo ./setup_payram.sh
 		export PAYRAM_NONINTERACTIVE=1
 		export PAYRAM_DB_MODE="${PAYRAM_DB_MODE:-internal}"
 		export PAYRAM_SSL_MODE="${PAYRAM_SSL_MODE:-none}"
-		if [[ -z "${PAYRAM_HOST_PORT:-}" ]]; then
-			export PAYRAM_HOST_PORT="$(pick_free_http_port)"
-		fi
-		log "Install defaults: DB=${PAYRAM_DB_MODE} SSL=${PAYRAM_SSL_MODE} port=${PAYRAM_HOST_PORT} (${network_mode})"
+		log "Install defaults: DB=${PAYRAM_DB_MODE} SSL=${PAYRAM_SSL_MODE} port=${PAYRAM_HOST_PORT:-80} (${network_mode})"
 		log "All of this is changeable later - SSL included. Overrides: PAYRAM_DB_MODE / PAYRAM_SSL_MODE / PAYRAM_HOST_PORT."
 		log "Installing/starting PayRam (${network_mode})..."
 		local install_rc=0
@@ -2381,7 +2401,9 @@ flow_main() {
 		echo "  - More chains later:  PAYRAM_BLOCKCHAIN_CODE=ETH $0 deploy-scw   (POLYGON likewise)"
 		echo "  - Add BTC payments:  $0 ensure-wallet"
 		echo "  - Master wallet is local + ops-only ($PAYRAM_INFO_DIR/headless-wallet-secret.txt)."
-		echo "    Once all chains are set up: back it up offline, then remove it from this host."
+		echo "    KEEP it for now - it's needed to deploy on more chains and to change the"
+		echo "    cold-wallet config on-chain. Back it up offline FIRST; only remove it from"
+		echo "    this host once ALL chains are deployed and the cold-wallet config is final."
 	else
 		echo "  - USDC/EVM payments: NOT yet enabled. Fund the deployer with gas and run:"
 		echo "    $0 deploy-scw-flow"
@@ -2468,6 +2490,7 @@ main() {
 	TOKEN_FILE="${PAYRAM_INFO_DIR}/headless-tokens.env"
 	SCW_STATE_FILE="${PAYRAM_INFO_DIR}/scw-state.env"
 	API_KEY_FILE="${PAYRAM_INFO_DIR}/merchant-api-key.env"
+	CREDENTIALS_FILE="${PAYRAM_INFO_DIR}/root-credentials.env"
 	PAYRAM_NODE_MODE="$PAYRAM_NODE_MODE"
 	PAYRAM_NODE_DOCKER_IMAGE="$PAYRAM_NODE_DOCKER_IMAGE"
 
