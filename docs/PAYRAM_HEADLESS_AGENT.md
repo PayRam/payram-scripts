@@ -137,7 +137,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_ETH_RPC_URL` | `https://ethereum-sepolia-rpc.publicnode.com` | No API key needed. Placeholder values (e.g. YOUR_ACTUAL_ALCHEMY_KEY) are ignored and default used. |
 | `PAYRAM_FUND_COLLECTOR` | deployer address | Cold wallet 0x (40 hex). Omit or leave empty to use deployer address from mnemonic. |
 | `PAYRAM_SCW_NAME` | `Headless SCW` | Name for the SCW wallet |
-| `PAYRAM_BLOCKCHAIN_CODE` | `ETH` | e.g. ETH, BASE, POLYGON |
+| `PAYRAM_BLOCKCHAIN_CODE` | `BASE` (one-step flow) / `ETH` (subcommand) | e.g. BASE, ETH, POLYGON |
 | `PAYRAM_MNEMONIC` | — | Or mnemonic in `.payraminfo/headless-wallet-secret.txt` |
 | `PAYRAM_SCW_MIN_BALANCE_ETH` | `0.01` (testnet) | Balance threshold before deploying SCW |
 | `PAYRAM_SCW_SKIP_BALANCE_CHECK` | — | If set, skip balance polling (not recommended) |
@@ -198,7 +198,7 @@ Rules agents must know:
 1. **Start PayRam:** `./setup_payram_agents.sh` (installs or restarts).
 2. **Auth:** `./setup_payram_agents.sh signin` (or setup if first time). Env: `PAYRAM_EMAIL`, `PAYRAM_PASSWORD`.
 3. **Config (local):** `./setup_payram_agents.sh ensure-config` so payment creation works.
-4. **Wallet:** Either `./setup_payram_agents.sh ensure-wallet` (BTC) or `./setup_payram_agents.sh deploy-scw-flow` (ETH SCW). deploy-scw-flow generates a mnemonic, shows deployer address, waits for funds, then deploys.
+4. **Wallet:** Default is `./setup_payram_agents.sh deploy-scw-flow` (EVM SCW on **BASE** → USDC-ready). It generates a local master mnemonic (ops-only), shows the deployer address, waits for gas funding, then deploys; on mainnet it requires your cold address via `PAYRAM_FUND_COLLECTOR`. BTC is optional/progressive: `./setup_payram_agents.sh ensure-wallet`.
 5. **Payment link:** `./setup_payram_agents.sh create-payment-link` or pass `[projectId] [email] [amountUSD]`. Use the printed URL as-is (keep `&host=...`).
 
 ## One-step flow details (agent behavior)
@@ -210,15 +210,20 @@ The one-step flow does:
 3. Re-reads `config.env` and waits for API readiness at the real port.
 4. Auth (`setup` if no root user, else `signin`).
 5. `ensure-config` for local frontend/backend settings.
-6. Wallet flow:
-	- Default: `ensure-wallet` - **BTC XPUB** starter wallet (instant, zero
-	  gas). BTC payments work immediately.
-	- `--deploy-scw`: run the ETH SCW deploy FIRST (blocking) instead.
+6. Wallet flow (MVF: **USDC on Base**):
+	- Default: EVM smart-contract wallet deploy on **BASE** (blocking, guided
+	  gas funding). The master (deployer) wallet is generated locally and is
+	  **ops-only**; once all chains are set up, back it up offline and remove
+	  it from the host. On **mainnet** the sweep destination must be a
+	  human-provided cold address (`PAYRAM_FUND_COLLECTOR`) — never a silent
+	  default. Override the chain with `PAYRAM_BLOCKCHAIN_CODE=ETH/POLYGON`.
+	  Re-runs are idempotent: an already-linked EVM wallet skips the deploy.
+	- `--ensure-wallet`: BTC-first fast lane instead - **BTC XPUB** starter
+	  wallet (instant, zero gas); the SCW is then attempted after the link.
+	- `--skip-scw`: no gas at all - BTC-only fast lane.
 7. Payment link creation (the deliverable - printed in the final summary).
-8. SCW step (unless `--skip-scw`): attempts the ETH smart-contract wallet to
-   unlock **USDC/EVM** payments. With a TTY it guides the gas funding; headless
-   and unfunded it defers with instructions (`deploy-scw-flow` later) - the BTC
-   link already works either way.
+   With the default flow the link accepts **USDC on Base**.
+8. BTC is progressive: add it anytime with `./setup_payram_agents.sh ensure-wallet`.
 
 > Why two wallet kinds: **XPUB wallets are BTC-only.** payram-core derives EVM
 > deposit addresses from the fund-sweeper CONTRACT (CREATE2 from the factory),
@@ -228,8 +233,8 @@ The one-step flow does:
 
 ## Adding more chains later
 
-`deploy-scw` is chain-parametric. After the first (ETH) SCW, deploy on other
-EVM chains once the gateway is running:
+`deploy-scw` is chain-parametric. After the first SCW (Base, in the default
+flow), deploy on other EVM chains once the gateway is running:
 
 ```bash
 # Base (mainnet defaults to base-rpc.publicnode.com)
