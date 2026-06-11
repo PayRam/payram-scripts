@@ -267,6 +267,28 @@ If you are an AI agent (or building agent-based integrations), the following scr
 
 For full agent documentation, see [`docs/PAYRAM_HEADLESS_AGENT.md`](docs/PAYRAM_HEADLESS_AGENT.md).
 
+## 🛍️ Shopify Integration (Optional)
+
+Accept crypto payments directly on your Shopify store. The Shopify connector is an **optional add-on** — install Payram first, then run the Shopify installer separately.
+
+**One-Line Setup:**
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram_shopify.sh)"
+```
+
+The installer only requires Docker. It handles Shopify CLI authentication, deploys the checkout UI extension, and starts the connector container automatically.
+
+**Reset an existing installation:**
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram_shopify.sh)" --reset
+```
+
+For the full setup walkthrough, environment variables reference, architecture diagram, and update instructions, see [`docs/PAYRAM_SHOPIFY_CONNECTOR.md`](docs/PAYRAM_SHOPIFY_CONNECTOR.md).
+
+---
+
 ## 🤝 Contributing
 
 1. Fork the repository

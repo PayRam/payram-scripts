@@ -885,61 +885,36 @@ tcp_check() {
   fi
 }
 
-# Check required ports for PayRam installation
-check_required_ports() {
-  local ports=(5432 80 443 8080 8443)
-  local port_in_use=false
-  
-  log "INFO" "Checking required ports for PayRam..."
-  
+# Return 0 if the given host port is free, 1 if something is already
+# listening on it. Used by the install-time port prompt so the operator
+# can only map a port that is actually available.
+#   macOS: nc attempts a real TCP connection — catches OS listeners,
+#          Colima SSH tunnels, and existing containers alike (lsof/docker
+#          ps miss these because Colima uses per-user SSH tunnels root
+#          can't see and the Docker socket isn't at /var/run/docker.sock).
+#   Linux: ss, falling back to netstat. If neither exists we can't tell,
+#          so we assume free (return 0) rather than block the install.
+is_port_free() {
+  local port="$1"
+
   if [[ "$OS_FAMILY" == "macos" ]]; then
-    # macOS: use nc (netcat, pre-installed on macOS) to attempt a real TCP connection
-    # on each port. This catches everything — OS listeners, Colima SSH tunnels,
-    # existing Docker containers — regardless of who owns the process or socket.
-    # lsof/docker ps both fail here because Colima uses per-user SSH tunnels that
-    # root cannot see, and the Docker socket is not at /var/run/docker.sock.
-    for port in "${ports[@]}"; do
-      if nc -z -w1 127.0.0.1 "$port" >/dev/null 2>&1; then
-        log "ERROR" "Port $port is already in use"
-        print_color "red" "❌ Port $port is already in use by another service"
-        port_in_use=true
-      else
-        log "INFO" "Port $port is available"
-      fi
-    done
+    nc -z -w1 127.0.0.1 "$port" >/dev/null 2>&1 && return 1
+    return 0
+  fi
+
+  local check_cmd=()
+  if command -v ss >/dev/null 2>&1; then
+    check_cmd=(ss -tuln)
+  elif command -v netstat >/dev/null 2>&1; then
+    check_cmd=(netstat -tuln)
   else
-    # Linux: use ss, fallback to netstat
-    local check_cmd=()
-    if command -v ss >/dev/null 2>&1; then
-      check_cmd=(ss -tuln)
-    elif command -v netstat >/dev/null 2>&1; then
-      check_cmd=(netstat -tuln)
-    else
-      log "WARN" "Neither 'ss' nor 'netstat' available - skipping port check"
-      return 0
-    fi
-
-    for port in "${ports[@]}"; do
-      if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
-        log "ERROR" "Port $port is already in use"
-        print_color "red" "❌ Port $port is already in use by another service"
-        port_in_use=true
-      else
-        log "INFO" "Port $port is available"
-      fi
-    done
+    return 0
   fi
 
-  if [[ "$port_in_use" == true ]]; then
-    echo
-    print_color "red" "❌ CRITICAL: Required ports are in use. Please free them or modify the script to use different ports."
-    print_color "yellow" "💡 To check what's using a port:"
-    print_color "gray" "   sudo lsof -i :PORT"
-    echo
-    exit 1
+  if "${check_cmd[@]}" 2>/dev/null | grep -E ":$port[[:space:]]|:$port$" >/dev/null 2>&1; then
+    return 1
   fi
-  
-  log "SUCCESS" "All required ports are available"
+  return 0
 }
 
 # Enhanced database configuration with better UX
@@ -1100,7 +1075,7 @@ configure_ssl() {
   # SSL is not supported on macOS — skip entirely
   if [[ "$(uname -s)" == "Darwin" ]]; then
     print_color "yellow" "⚠️  SSL configuration is not supported on macOS — skipping."
-    print_color "gray" "   PayRam will run on HTTP (port 8080) for local testing."
+    print_color "gray" "   PayRam will run on HTTP (port 80) for local testing."
     SSL_CERT_PATH=""
     return 0
   fi
@@ -1127,7 +1102,7 @@ configure_ssl() {
   echo
 
   print_color "blue" "3) No SSL for now — I'll configure it later"
-  print_color "gray" "   • PayRam starts on HTTP (port 8080) immediately"
+  print_color "gray" "   • PayRam starts on HTTP (port 80) immediately"
   print_color "gray" "   • No domain or certificate needed to get started"
   print_color "gray" "   • You can add SSL certificates anytime when ready"
   echo
@@ -1343,8 +1318,7 @@ configure_ssl_external() {
   print_color "blue" "Setup Configuration:"
   print_color "gray" "  • PayRam will run HTTP-only (no SSL certificates needed)"
   print_color "gray" "  • Your external service handles HTTPS and forwards to PayRam"
-  print_color "gray" "  • PayRam API accessible at: http://localhost:8080"
-  print_color "gray" "  • PayRam Dashboard at: http://localhost"
+  print_color "gray" "  • PayRam API + Dashboard at: http://localhost (port 80)"
   echo
   
   print_color "yellow" "⚠️  Important Notes:"
@@ -1361,8 +1335,7 @@ configure_ssl_external() {
     print_color "green" "✅ External SSL management selected"
     print_color "blue" "Next steps after PayRam installation:"
     print_color "gray" "  1. Configure your reverse proxy to forward to:"
-    print_color "gray" "     - API: http://this-server:8080"
-    print_color "gray" "     - Dashboard: http://this-server:80"
+    print_color "gray" "     - http://this-server:80 (handles both API and dashboard)"
     print_color "gray" "  2. Test HTTPS connectivity through your proxy"
     print_color "gray" "  3. Configure firewall to block direct access"
     echo
@@ -1694,6 +1667,11 @@ NETWORK_TYPE="${NETWORK_TYPE:-mainnet}"
 SERVER="${SERVER:-PRODUCTION}"
 AES_KEY="${AES_KEY:-}"
 
+# Published host ports retained across updates (space-separated
+# host:container[/proto] tokens). Set from the install-time port mapping;
+# extra ports detected on an existing container are preserved here forever.
+RETAINED_PORTS="${RETAINED_PORTS:-${PRIMARY_PORT_MAPPING:-80:80}}"
+
 # Database Configuration
 DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
@@ -1782,9 +1760,162 @@ validate_docker_tag() {
   fi
 }
 
+# --- PORT MAPPING + RETENTION ---
+# A fresh install's published ports are decided by where TLS terminates
+# (see configure_port_mapping): internal TLS (certbot/custom certs) →
+# "80:80 443:443"; external/no-SSL → "<host>:80" with an operator-chosen
+# host port. That choice is captured in PRIMARY_PORT_MAPPING at install time.
+#
+# An existing install being UPDATED may also have extra/legacy ports
+# published on its container (e.g. 8080, 8443, 5432, or operator-added
+# custom ports). Recreating the container would silently drop those, so
+# we detect whatever the live container already publishes, union it with
+# the install-time mapping, and persist the result (RETAINED_PORTS) so it
+# is kept on every future update — even after the original container is
+# gone.
+
+# Set by configure_port_mapping at install time as one or more
+# space-separated "<host>:<container>" tokens (e.g. "80:80 443:443" for
+# internal TLS, "80:80" or "8090:80" for external). Empty during updates
+# — the mapping is then recovered from RETAINED_PORTS / the live container.
+PRIMARY_PORT_MAPPING=""
+
+# Last-resort fallback for the update path: used only when there is NO
+# saved RETAINED_PORTS in config.env AND no container to read ports from
+# (e.g. an old install whose container was already removed). Matches the
+# historical production port set so an existing deployment is never
+# updated into having fewer ports than it had. Never reached on a fresh
+# install, where PRIMARY_PORT_MAPPING is always set.
+LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443" "5432:5432")
+
+# Decide the install-time host port mapping based on where TLS terminates.
+# This keys off SSL_CERT_PATH (NOT SSL_MODE): certbot and custom certs both
+# set SSL_CERT_PATH and terminate TLS inside the container on 443, whereas
+# external/no-SSL leaves it empty and serves plain HTTP on 80.
+#
+#   Internal TLS (SSL_CERT_PATH set) → fixed "80:80 443:443", no prompt:
+#       443 serves HTTPS, 80 gives the http→https redirect. 80/443 are
+#       dictated by the protocol (and certbot's ACME), so we don't ask.
+#   External / no SSL (SSL_CERT_PATH empty) → prompt for a host port that
+#       maps to container 80 (plain HTTP). Default 80 (Cloudflare forwards
+#       there); an operator fronting their own nginx may pick another.
+# Sets PRIMARY_PORT_MAPPING to a space-separated list of host:container tokens.
+configure_port_mapping() {
+  local host_port
+
+  if [[ -n "${SSL_CERT_PATH:-}" ]]; then
+    # Internal TLS — both ports required, no prompt.
+    if ! is_port_free 80 || ! is_port_free 443; then
+      print_color "red" "❌ Ports 80 and 443 must both be free for an SSL install."
+      print_color "yellow" "💡 Find what's using them: sudo lsof -i :80 -i :443"
+      exit 1
+    fi
+    PRIMARY_PORT_MAPPING="80:80 443:443"
+    log "INFO" "Port mapping set to $PRIMARY_PORT_MAPPING (internal TLS)"
+    return 0
+  fi
+
+  # External / no SSL — PayRam serves plain HTTP on container port 80.
+  echo
+  print_color "bold" "🔌 Port Mapping"
+  print_color "gray" "  PayRam serves HTTP on container port 80."
+  print_color "gray" "  Press Enter to publish on host port 80, or enter a different host"
+  print_color "gray" "  port (e.g. if your own reverse proxy fronts PayRam on another port)."
+  echo
+
+  while true; do
+    read -e -p "Host port [80]: " host_port
+    host_port="${host_port:-80}"
+    if [[ ! "$host_port" =~ ^[0-9]+$ ]] || (( host_port < 1 || host_port > 65535 )); then
+      print_color "red" "Invalid port. Enter a number between 1 and 65535."
+      continue
+    fi
+    if ! is_port_free "$host_port"; then
+      print_color "red" "❌ Port $host_port is already in use by another service. Choose another."
+      continue
+    fi
+    break
+  done
+
+  PRIMARY_PORT_MAPPING="${host_port}:80"
+  log "INFO" "Port mapping set to $PRIMARY_PORT_MAPPING"
+}
+
+# Echo the host:container[/proto] mappings currently published by the
+# running OR stopped `payram` container, one per line. A bind IP is
+# preserved (e.g. 127.0.0.1:5432:5432/tcp) so a loopback-only mapping
+# is never widened to all interfaces. The default /tcp proto is
+# stripped so the tokens dedupe cleanly against the install-time mapping.
+# Silent (no output) when no container exists.
+detect_container_published_ports() {
+  docker inspect payram >/dev/null 2>&1 || return 0
+  docker inspect payram --format \
+    '{{range $p, $conf := .HostConfig.PortBindings}}{{range $conf}}{{if .HostPort}}{{if and .HostIp (ne .HostIp "0.0.0.0")}}{{.HostIp}}:{{end}}{{.HostPort}}:{{$p}}{{println}}{{end}}{{end}}{{end}}' \
+    2>/dev/null \
+    | sed 's#/tcp$##' \
+    | sort -u
+}
+
+# Populate the global PUBLISH_ARGS array (the docker `--publish` flags
+# for `docker run`) by unioning, in precedence order and deduping by the
+# whole token:
+#   1. PRIMARY_PORT_MAPPING — the install-time host:container choice
+#   2. RETAINED_PORTS from config.env — survive forever once recorded
+#   3. ports the live/stopped container currently publishes
+# If all three are empty (an update with no saved ports and no readable
+# container) it falls back to LEGACY_FALLBACK_PORTS. The union is written
+# back to RETAINED_PORTS so save_configuration persists it for all future
+# updates. MUST be called BEFORE the existing container is removed
+# (docker rm), otherwise detection finds nothing.
+build_publish_args() {
+  local token seen=" "
+  local all=() retained=()
+  PUBLISH_ARGS=()
+  RETAINED_PORTS="${RETAINED_PORTS:-}"
+
+  # PRIMARY_PORT_MAPPING may hold one OR more space-separated tokens (e.g.
+  # "80:80 443:443" for an internal-TLS install), so word-split it.
+  for token in ${PRIMARY_PORT_MAPPING:-}; do all+=("$token"); done
+  for token in $RETAINED_PORTS; do all+=("$token"); done
+  while IFS= read -r token; do
+    [[ -n "$token" ]] && all+=("$token")
+  done < <(detect_container_published_ports)
+
+  # ${all[@]+...} guard: iterating an empty array under `set -u` errors on
+  # bash < 4.4 (incl. macOS bash 3.2). Expands to nothing when empty.
+  for token in ${all[@]+"${all[@]}"}; do
+    case "$seen" in
+      *" $token "*) ;;
+      *)
+        seen+="$token "
+        PUBLISH_ARGS+=("--publish" "$token")
+        retained+=("$token")
+        ;;
+    esac
+  done
+
+  # Safety net: nothing in env and no container to read from. Fall back to
+  # the historical production port set (see LEGACY_FALLBACK_PORTS) rather
+  # than guessing a single port, so an existing install is never updated
+  # into fewer ports than it had.
+  if [[ ${#PUBLISH_ARGS[@]} -eq 0 ]]; then
+    for token in "${LEGACY_FALLBACK_PORTS[@]}"; do
+      PUBLISH_ARGS+=("--publish" "$token")
+      retained+=("$token")
+    done
+  fi
+
+  RETAINED_PORTS="${retained[*]}"
+  log "INFO" "Publishing ports: ${retained[*]}"
+}
+
 # Container deployment
 deploy_payram_container() {
   show_progress 10 10 "Deploying PayRam container..."
+
+  # Capture any ports the existing container already publishes BEFORE it
+  # is removed, so re-running install never drops them.
+  build_publish_args
   
   # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
@@ -1855,11 +1986,7 @@ deploy_payram_container() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 8080:8080 \
-    --publish 8443:8443 \
-    --publish 80:80 \
-    --publish 443:443 \
-    --publish 5432:5432 \
+    "${PUBLISH_ARGS[@]}" \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -1924,15 +2051,28 @@ perform_health_check() {
     # Look for positive indicators in logs
     if echo "$logs" | grep -qi "server.*start\|ready\|listening\|started\|running"; then
       print_color "green" "   ✅ Application startup detected in logs"
-      
-      # Additional check: Try to connect to port 8080
-      if tcp_check 127.0.0.1 8080 5; then
-        print_color "green" "   ✅ Port 8080 is accepting connections"
+
+      # Authoritative check: hit the backend health endpoint from INSIDE
+      # the container, so we don't care what host port was published or
+      # whether it's behind a custom mapping. nginx serves on 80 (HTTP)
+      # and 443 (HTTPS) internally; the scheme is decided by SSL_CERT_PATH
+      # (set for certbot/custom certs, empty for external/no-SSL). The
+      # image ships wget (not curl); -S prints the status line on stderr,
+      # which we match for "HTTP/... 200".
+      local health_url="http://localhost/api/v1/health"
+      local ssl_opt=""
+      if [[ -n "${SSL_CERT_PATH:-}" ]]; then
+        health_url="https://localhost/api/v1/health"
+        ssl_opt="--no-check-certificate"
+      fi
+      # shellcheck disable=SC2086
+      if docker exec payram wget -q -O /dev/null -S $ssl_opt "$health_url" 2>&1 | grep -q "HTTP/.* 200"; then
+        print_color "green" "   ✅ Health endpoint /api/v1/health returned 200 OK"
         print_color "green" "   🎉 Health check passed - PayRam is healthy!"
         echo
         return 0
       else
-        print_color "yellow" "   ⚠️  Application starting but port not ready yet..."
+        print_color "yellow" "   ⚠️  Application starting but /api/v1/health not ready yet..."
       fi
     elif echo "$logs" | grep -qi "error\|failed\|exception\|fatal"; then
       print_color "red" "   ❌ Error detected in application logs"
@@ -2169,7 +2309,11 @@ update_payram_container() {
 # Update-specific container deployment with fixes
 deploy_payram_container_update() {
   show_progress 10 10 "Deploying updated PayRam container..."
-  
+
+  # Detect the current container's published ports BEFORE it is removed
+  # below, then retain them on the recreated container.
+  build_publish_args
+
   # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
     generate_aes_key
@@ -2232,11 +2376,7 @@ deploy_payram_container_update() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 8080:8080 \
-    --publish 8443:8443 \
-    --publish 80:80 \
-    --publish 443:443 \
-    --publish 5432:5432 \
+    "${PUBLISH_ARGS[@]}" \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -2281,6 +2421,10 @@ deploy_payram_container_update() {
 reconfigure_container() {
   log "INFO" "Recreating PayRam container with updated configuration..."
 
+  # Retain the existing container's published ports across the recreate
+  # (must run before the docker rm below).
+  build_publish_args
+
   local vol_postgres vol_logs
   if [[ "$OS_FAMILY" == "macos" ]]; then
     vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
@@ -2301,11 +2445,7 @@ reconfigure_container() {
   docker run -d \
     --name payram \
     --restart unless-stopped \
-    --publish 8080:8080 \
-    --publish 8443:8443 \
-    --publish 80:80 \
-    --publish 443:443 \
-    --publish 5432:5432 \
+    "${PUBLISH_ARGS[@]}" \
     -e AES_KEY="$AES_KEY" \
     -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
     -e SERVER="$SERVER" \
@@ -2551,7 +2691,7 @@ configure_ssl_update_remove() {
 
   echo
   print_color "bold" "🌐 Remove SSL"
-  print_color "yellow" "PayRam will run on HTTP only (port 80 / port 8080)"
+  print_color "yellow" "PayRam will run on HTTP only (port 80)"
   echo
 
   local delete_cert="n"
@@ -2583,7 +2723,7 @@ configure_ssl_update_remove() {
     perform_health_check
     echo
     print_color "green" "✅ SSL removed — PayRam running on HTTP"
-    print_color "gray" "   Access: http://<your-server>:8080"
+    print_color "gray" "   Access: http://<your-server>"
   fi
 }
 
@@ -2591,7 +2731,7 @@ configure_ssl_update() {
   # SSL configuration is not supported on macOS (testing only — runs HTTP)
   if [[ "$(uname -s)" == "Darwin" ]]; then
     print_color "yellow" "⚠️  SSL configuration is not supported on macOS."
-    print_color "gray" "   macOS is for testing only — PayRam runs on HTTP (port 8080)."
+    print_color "gray" "   macOS is for testing only — PayRam runs on HTTP (port 80)."
     return 0
   fi
 
@@ -3126,11 +3266,9 @@ display_access_urls() {
     print_color "blue" "🌍 Public Access (from anywhere):"
     
     if [[ "$ssl_enabled" == "true" ]]; then
-      print_color "gray" "  • HTTPS API: https://$public_ip:8443"
-      print_color "gray" "  • Web Interface: https://$public_ip/login"
+      print_color "gray" "  • Web Interface + API: https://$public_ip/"
     else
-      print_color "gray" "  • HTTP API: http://$public_ip:8080"
-      print_color "gray" "  • Web Interface: http://$public_ip/login"
+      print_color "gray" "  • Web Interface + API: http://$public_ip/"
     fi
   else
     print_color "yellow" "🔍 Public IP Detection:"
@@ -3149,8 +3287,7 @@ display_access_urls() {
   # Domain access (if configured) - safely check for domain variable
   if [[ -n "${DOMAIN_NAME:-}" && "${DOMAIN_NAME}" != "" ]]; then
     print_color "blue" "🏷️  Domain Access (SSL enabled):"
-    print_color "gray" "  • HTTPS API: https://$DOMAIN_NAME:8443"
-    print_color "gray" "  • Web Interface: https://$DOMAIN_NAME/login"
+    print_color "gray" "  • Web Interface + API: https://$DOMAIN_NAME/"
     echo
   fi
 }
@@ -3176,11 +3313,11 @@ display_firewall_notice() {
   local port_list=""
   local port_short=""
   if [[ -n "${SSL_CERT_PATH:-}" ]]; then
-    port_list="443 and 8443"
-    port_short="443, 8443"
+    port_list="443"
+    port_short="443"
   else
-    port_list="80 and 8080"
-    port_short="80, 8080"
+    port_list="80"
+    port_short="80"
   fi
 
   # DB context for AI prompt
@@ -3849,15 +3986,13 @@ main() {
   # Fresh installation workflow
   log "SUCCESS" "Starting PayRam setup..."
   
-  # Step 1: System detection FIRST — required before port check (OS_FAMILY must be set)
+  # Step 1: System detection FIRST — OS_FAMILY must be set before the
+  # install-time port prompt (configure_port_mapping) checks availability.
   detect_system_info
 
   # Check for existing installation before proceeding
   check_existing_installation
-  
-  # Check required ports (uses OS_FAMILY set above)
-  check_required_ports
-  
+
   # Step 2: Install dependencies
   install_all_dependencies
   
@@ -3901,7 +4036,8 @@ main() {
   
   configure_database
   configure_ssl
-  
+  configure_port_mapping
+
   # Step 5: Generate hot wallet encryption key
   show_progress 9 10 "Setting up hot wallet encryption (AES-256)"
   generate_aes_key
@@ -3914,6 +4050,7 @@ main() {
   log "INFO" "Server Mode: $SERVER"
   log "INFO" "Database: $DB_HOST:$DB_PORT/$DB_NAME"
   log "INFO" "SSL Path: ${SSL_CERT_PATH:-Not configured}"
+  log "INFO" "Port Mapping: ${PRIMARY_PORT_MAPPING:-80:80}"
   echo
   
   print_color "yellow" "🔐 Security Architecture:"
