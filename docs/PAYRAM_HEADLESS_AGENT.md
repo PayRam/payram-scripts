@@ -125,7 +125,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_PAYMENT_AMOUNT` | `10` | Amount in USD for payment link |
 | `PAYRAM_CUSTOMER_ID` | from signin | Usually from token file after signin |
 | `PAYRAM_FRONTEND_URL` | `http://localhost` | Used by ensure-config (local) |
-| `PAYRAM_NETWORK` | `testnet` | One-step flow network selection (`testnet` or `mainnet`) |
+| `PAYRAM_NETWORK` | `mainnet` | One-step flow network selection (`mainnet` default - real payments; `testnet` to try with free coins) |
 | **headless fresh install** | | |
 | `PAYRAM_DB_MODE` | `internal` | `internal` (containerized) or `external` (needs `DB_NAME`, `DB_USER`, `DB_PASSWORD`; `DB_HOST`/`DB_PORT` default `localhost`/`5432`) |
 | `PAYRAM_SSL_MODE` | `none` | `none`, `letsencrypt` (needs `DOMAIN_NAME` + `LE_EMAIL`), or `custom` (certs already in place) |
@@ -211,12 +211,17 @@ The one-step flow does:
 4. Auth (`setup` if no root user, else `signin`).
 5. `ensure-config` for local frontend/backend settings.
 6. Wallet flow (MVF: **USDC on Base**):
-	- Default: EVM smart-contract wallet deploy on **BASE** (blocking, guided
-	  gas funding). The master (deployer) wallet is generated locally and is
-	  **ops-only**; once all chains are set up, back it up offline and remove
-	  it from the host. On **mainnet** the sweep destination must be a
-	  human-provided cold address (`PAYRAM_FUND_COLLECTOR`) — never a silent
-	  default. Override the chain with `PAYRAM_BLOCKCHAIN_CODE=ETH/POLYGON`.
+	- Default: EVM smart-contract wallet deploy (blocking, guided gas funding).
+	  The master (deployer) wallet is generated locally and is **ops-only**;
+	  once all chains are set up, back it up offline and remove it from the
+	  host. On **mainnet** the sweep destination must be a human-provided cold
+	  address (`PAYRAM_FUND_COLLECTOR`) — never a silent default.
+	- **Fund on either chain (mainnet)**: the human sends ETH to ONE address -
+	  ~\$5 on the **Base** network (easiest) or ~\$30 on Ethereum (higher fees).
+	  Same address on both; the flow watches both chains and deploys where the
+	  funds land - the human never has to understand networks. Explicit
+	  `PAYRAM_BLOCKCHAIN_CODE=ETH/POLYGON` or `PAYRAM_ETH_RPC_URL` pins a
+	  single chain instead.
 	  Re-runs are idempotent: an already-linked EVM wallet skips the deploy.
 	- `--ensure-wallet`: BTC-first fast lane instead - **BTC XPUB** starter
 	  wallet (instant, zero gas); the SCW is then attempted after the link.

@@ -24,8 +24,8 @@ Quick start (non-interactive testnet trial -> BTC payment link in minutes):
 	#   ./setup_payram_agents.sh ensure-wallet
 
 One-step options:
-	--testnet               Install/run in testnet mode (default)
-	--mainnet               Install/run in mainnet mode
+	--mainnet               Install/run in mainnet mode (default - real payments)
+	--testnet               Install/run in testnet mode (try it with free test coins)
 	--restart               Restart PayRam container before headless steps
 	--deploy-scw            EVM SCW first on BASE -> USDC link (default; needs gas funding)
 	--ensure-wallet         BTC-first fast lane instead: XPUB wallet, no gas; SCW follows the link
@@ -660,7 +660,13 @@ troubleshoot() {
 		gas)
 			echo "Deployer wallet has insufficient ETH for gas (this is ops fuel, not savings)."
 			echo "  [90%] The deployer address was not funded (or not enough)."
-			echo "        -> send >= ${PAYRAM_SCW_MIN_BALANCE_ETH:-0.01} ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
+			if [[ "${PAYRAM_NETWORK:-testnet}" == "mainnet" && "${PAYRAM_SCW_CHAIN_DEFAULTED:-0}" == "1" ]]; then
+				echo "        -> send ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
+				echo "           ~\$5 on the BASE network (easiest), or ~\$30 on Ethereum -"
+				echo "           same address on both; we detect where it lands."
+			else
+				echo "        -> send >= ${PAYRAM_SCW_MIN_BALANCE_ETH:-0.01} ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
+			fi
 			if [[ "${PAYRAM_NETWORK:-testnet}" != "mainnet" ]]; then
 				echo "        -> testnet faucets:"
 				print_testnet_faucets | sed 's/^/      /'
@@ -1066,6 +1072,41 @@ get_eth_deployer_address() {
 	echo "$addr"
 }
 
+# Watch the SAME deployer address on Base AND Ethereum mainnet at once.
+# Humans often don't know which network their wallet/exchange will use - so we
+# accept either and deploy on whichever chain the funds land. Per-chain
+# minimums reflect real gas costs (Base is ~100x cheaper than Ethereum L1).
+# Output: line1 OK|WAIT, line2 winning chain (or '-'), line3 balances summary.
+check_eth_balance_any() {
+	local script_dir="$SCRIPT_DIR/scripts"
+	ensure_node_deps "$script_dir" || return 1
+	PAYRAM_SCW_MIN_BASE="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_BASE:-0.002}}" \
+	PAYRAM_SCW_MIN_ETHL1="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_ETHL1:-0.01}}" \
+	run_node "$script_dir" -e "
+		const { ethers } = require('ethers');
+		const addr = process.env.PAYRAM_DEPLOYER_ADDRESS;
+		const watch = [
+			['BASE', 'https://base-rpc.publicnode.com', process.env.PAYRAM_SCW_MIN_BASE],
+			['ETH', 'https://ethereum-rpc.publicnode.com', process.env.PAYRAM_SCW_MIN_ETHL1],
+		];
+		(async () => {
+			let summary = [], winner = '', anyOk = false, allFailed = true;
+			for (const [chain, rpc, min] of watch) {
+				try {
+					const bal = await new ethers.JsonRpcProvider(rpc).getBalance(addr);
+					allFailed = false;
+					summary.push(chain.toLowerCase() + '=' + ethers.formatEther(bal));
+					if (!anyOk && bal >= ethers.parseEther(min)) { anyOk = true; winner = chain; }
+				} catch (e) { summary.push(chain.toLowerCase() + '=?'); }
+			}
+			if (allFailed) process.exit(1);
+			console.log(anyOk ? 'OK' : 'WAIT');
+			console.log(winner || '-');
+			console.log(summary.join(' '));
+		})().catch(() => process.exit(1));
+	" 2>/dev/null
+}
+
 check_eth_balance() {
 	local script_dir="$SCRIPT_DIR/scripts"
 	ensure_node_deps "$script_dir" || return 1
@@ -1433,6 +1474,15 @@ cmd_deploy_scw_flow() {
 	ensure_token || { echo "Sign in first: $0 signin"; return 1; }
 	ensure_eth_mnemonic || return 1
 
+	# Fund-on-either-chain: when WE defaulted the chain (one-step mainnet flow,
+	# no explicit RPC), the human can send ETH to the deployer address on Base
+	# OR Ethereum - same address on both - and we deploy where the funds land.
+	local user_rpc_set="${PAYRAM_ETH_RPC_URL:+1}"
+	local dual_watch=""
+	if [[ "${PAYRAM_NETWORK:-}" == "mainnet" && "${PAYRAM_SCW_CHAIN_DEFAULTED:-0}" == "1" && -z "$user_rpc_set" ]]; then
+		dual_watch="1"
+	fi
+
 	if [[ -z "${PAYRAM_ETH_RPC_URL:-}" ]]; then
 		local chain="${PAYRAM_BLOCKCHAIN_CODE:-ETH}"
 		if [[ "${PAYRAM_NETWORK:-}" == "mainnet" ]]; then
@@ -1467,7 +1517,10 @@ cmd_deploy_scw_flow() {
 	fi
 	export PAYRAM_DEPLOYER_ADDRESS="$deployer"
 
-	if [[ -z "${PAYRAM_SCW_MIN_BALANCE_ETH:-}" ]]; then
+	# Single-chain threshold default. Skipped for the dual-watch path, which
+	# carries per-chain minimums (Base ~\$5 vs Ethereum L1 ~\$30) inside
+	# check_eth_balance_any - a flat 0.02 here would break the \$5-on-Base UX.
+	if [[ -z "${PAYRAM_SCW_MIN_BALANCE_ETH:-}" && -z "$dual_watch" ]]; then
 		if [[ "${PAYRAM_NETWORK:-}" == "mainnet" ]]; then
 			PAYRAM_SCW_MIN_BALANCE_ETH="0.02"
 		else
@@ -1475,53 +1528,108 @@ cmd_deploy_scw_flow() {
 		fi
 	fi
 
-	echo ""
-	echo "--- Gas refill needed (ops fuel for the deploy + future sweeps, not savings) ---"
-	echo "Send >= ${PAYRAM_SCW_MIN_BALANCE_ETH} ETH to the deployer address:"
-	echo ""
-	echo "  $deployer"
-	echo ""
-	echo "Network: ${PAYRAM_NETWORK:-testnet}   RPC: $PAYRAM_ETH_RPC_URL"
-	if [[ "${PAYRAM_NETWORK:-testnet}" != "mainnet" ]]; then
-		echo "Testnet ETH is free - faucets:"
-		print_testnet_faucets
-	fi
-	echo "I'll keep checking the balance; this step is resumable - re-running continues the wait."
-	echo "--------------------------------------------------------------------------------"
-
 	local attempts=0
 	local max_attempts="${PAYRAM_SCW_FUND_MAX_ATTEMPTS:-60}"
-	while true; do
-		local status balance res
-		res=$(check_eth_balance)
-		status=$(echo "$res" | head -1)
-		balance=$(echo "$res" | tail -1)
-		if [[ -z "$status" ]]; then
-			echo "Failed to check balance via RPC."
-			troubleshoot rpc
-			return 1
-		fi
-		if [[ "$status" == "OK" ]]; then
-			echo "Balance confirmed: ${balance} ETH"
-			break
-		fi
-		attempts=$((attempts + 1))
-		if [[ -n "${PAYRAM_SCW_SKIP_BALANCE_CHECK:-}" ]]; then
-			echo "Balance check skipped by PAYRAM_SCW_SKIP_BALANCE_CHECK."
-			break
-		fi
-		if [[ -t 0 ]]; then
-			echo "Balance ${balance} ETH is below ${PAYRAM_SCW_MIN_BALANCE_ETH}. Add funds and press Enter to recheck."
-			read -r _
-		else
-			if [[ $attempts -ge $max_attempts ]]; then
-				echo "Balance not confirmed after ${max_attempts} checks (~10 min)."
+
+	if [[ -n "$dual_watch" ]]; then
+		# Human-simple funding: one address, either network, auto-detected.
+		echo ""
+		echo "--- One step needs you: add a little ETH (this pays the network fees) ---"
+		echo ""
+		echo "Send ETH to this address:"
+		echo ""
+		echo "  $deployer"
+		echo ""
+		echo "  - Easiest: about \$5 of ETH on the BASE network."
+		echo "    (If your wallet or exchange asks which network, pick 'Base'.)"
+		echo "  - Sending on the Ethereum network works too, but its fees are higher -"
+		echo "    send about \$30 there instead."
+		echo "  - Same address on both. I'll detect where the funds land and continue"
+		echo "    automatically. This is resumable - re-running continues the wait."
+		echo "--------------------------------------------------------------------------"
+		while true; do
+			local status chain balances res
+			res=$(check_eth_balance_any)
+			if [[ -z "$res" ]]; then
+				echo "Failed to check balances via RPC."
+				troubleshoot rpc
+				return 1
+			fi
+			status=$(echo "$res" | sed -n 1p)
+			chain=$(echo "$res" | sed -n 2p)
+			balances=$(echo "$res" | sed -n 3p)
+			if [[ "$status" == "OK" ]]; then
+				echo "Funds detected on ${chain} (${balances}) - deploying there."
+				if [[ "$chain" != "${PAYRAM_BLOCKCHAIN_CODE:-}" ]]; then
+					export PAYRAM_BLOCKCHAIN_CODE="$chain"
+					case "$chain" in
+						ETH)  PAYRAM_ETH_RPC_URL="https://ethereum-rpc.publicnode.com" ;;
+						BASE) PAYRAM_ETH_RPC_URL="https://base-rpc.publicnode.com" ;;
+					esac
+					export PAYRAM_ETH_RPC_URL
+				fi
+				break
+			fi
+			attempts=$((attempts + 1))
+			if [[ -n "${PAYRAM_SCW_SKIP_BALANCE_CHECK:-}" ]]; then
+				echo "Balance check skipped by PAYRAM_SCW_SKIP_BALANCE_CHECK."
+				break
+			fi
+			if [[ ! -t 0 && $attempts -ge $max_attempts ]]; then
+				echo "Funds not detected after ${max_attempts} checks (~15 min). Current: ${balances}"
 				troubleshoot gas
 				return 1
 			fi
-			sleep 10
+			echo "Waiting for funds... (${balances}) - checking again in 15s"
+			sleep 15
+		done
+	else
+		echo ""
+		echo "--- Gas refill needed (ops fuel for the deploy + future sweeps, not savings) ---"
+		echo "Send >= ${PAYRAM_SCW_MIN_BALANCE_ETH} ETH to the deployer address:"
+		echo ""
+		echo "  $deployer"
+		echo ""
+		echo "Network: ${PAYRAM_NETWORK:-testnet}   RPC: $PAYRAM_ETH_RPC_URL"
+		if [[ "${PAYRAM_NETWORK:-testnet}" != "mainnet" ]]; then
+			echo "Testnet ETH is free - faucets:"
+			print_testnet_faucets
 		fi
-	done
+		echo "I'll keep checking the balance; this step is resumable - re-running continues the wait."
+		echo "--------------------------------------------------------------------------------"
+
+		while true; do
+			local status balance res
+			res=$(check_eth_balance)
+			status=$(echo "$res" | head -1)
+			balance=$(echo "$res" | tail -1)
+			if [[ -z "$status" ]]; then
+				echo "Failed to check balance via RPC."
+				troubleshoot rpc
+				return 1
+			fi
+			if [[ "$status" == "OK" ]]; then
+				echo "Balance confirmed: ${balance} ETH"
+				break
+			fi
+			attempts=$((attempts + 1))
+			if [[ -n "${PAYRAM_SCW_SKIP_BALANCE_CHECK:-}" ]]; then
+				echo "Balance check skipped by PAYRAM_SCW_SKIP_BALANCE_CHECK."
+				break
+			fi
+			if [[ -t 0 ]]; then
+				echo "Balance ${balance} ETH is below ${PAYRAM_SCW_MIN_BALANCE_ETH}. Add funds and press Enter to recheck."
+				read -r _
+			else
+				if [[ $attempts -ge $max_attempts ]]; then
+					echo "Balance not confirmed after ${max_attempts} checks (~10 min)."
+					troubleshoot gas
+					return 1
+				fi
+				sleep 10
+			fi
+		done
+	fi
 
 	cmd_deploy_scw
 }
@@ -2091,17 +2199,17 @@ flow_main() {
 	if [[ -z "$network_mode" ]]; then
 		if [[ -t 0 ]]; then
 			echo "Choose network:"
-			echo "  1) testnet"
-			echo "  2) mainnet"
+			echo "  1) mainnet - real payments (default)"
+			echo "  2) testnet - try everything first with free test coins"
 			read -p "Selection [1]: " net_choice
 			net_choice="${net_choice:-1}"
 			if [[ "$net_choice" == "2" ]]; then
-				network_mode="mainnet"
-			else
 				network_mode="testnet"
+			else
+				network_mode="mainnet"
 			fi
 		else
-			network_mode="testnet"
+			network_mode="mainnet"
 		fi
 	fi
 
@@ -2126,21 +2234,21 @@ flow_main() {
 		log "Restarting PayRam container..."
 		(cd "$SCRIPT_DIR" && run_as_root ./setup_payram.sh --restart)
 	elif ! is_payram_running; then
-		# A FRESH install delegates to setup_payram.sh. Without a TTY the
-		# installer runs HEADLESS: every prompt resolves from PAYRAM_* env
-		# knobs with deterministic defaults (internal DB, no SSL, port 80 or
-		# the first free fallback), and ambiguous cases fail fast with the
-		# exact env var to set - the install is fully agent-drivable.
-		if [[ ! -t 0 ]]; then
-			export PAYRAM_NONINTERACTIVE=1
-			export PAYRAM_DB_MODE="${PAYRAM_DB_MODE:-internal}"
-			export PAYRAM_SSL_MODE="${PAYRAM_SSL_MODE:-none}"
-			if [[ -z "${PAYRAM_HOST_PORT:-}" ]]; then
-				export PAYRAM_HOST_PORT="$(pick_free_http_port)"
-			fi
-			log "Headless install: DB=${PAYRAM_DB_MODE} SSL=${PAYRAM_SSL_MODE} port=${PAYRAM_HOST_PORT} (${network_mode})"
-			log "Override with PAYRAM_DB_MODE / PAYRAM_SSL_MODE / PAYRAM_HOST_PORT env vars."
+		# A FRESH install delegates to setup_payram.sh and ALWAYS runs it with
+		# zero questions: every choice resolves from PAYRAM_* env knobs with
+		# deterministic defaults (internal DB, no SSL, port 80 or first free
+		# fallback). Config-comes-later UX: SSL, ports, and DB can all be
+		# changed once the gateway works - the goal here is the payment link.
+		# Humans who want the full interactive installer run it directly:
+		#   sudo ./setup_payram.sh
+		export PAYRAM_NONINTERACTIVE=1
+		export PAYRAM_DB_MODE="${PAYRAM_DB_MODE:-internal}"
+		export PAYRAM_SSL_MODE="${PAYRAM_SSL_MODE:-none}"
+		if [[ -z "${PAYRAM_HOST_PORT:-}" ]]; then
+			export PAYRAM_HOST_PORT="$(pick_free_http_port)"
 		fi
+		log "Install defaults: DB=${PAYRAM_DB_MODE} SSL=${PAYRAM_SSL_MODE} port=${PAYRAM_HOST_PORT} (${network_mode})"
+		log "All of this is changeable later - SSL included. Overrides: PAYRAM_DB_MODE / PAYRAM_SSL_MODE / PAYRAM_HOST_PORT."
 		log "Installing/starting PayRam (${network_mode})..."
 		local install_rc=0
 		if [[ "$network_mode" == "mainnet" ]]; then
@@ -2264,6 +2372,9 @@ flow_main() {
 	fi
 	echo ""
 	echo "Everything set up today can be changed later:"
+	echo "  - SSL/HTTPS: not set up yet (HTTP first keeps setup simple). Add anytime:"
+	echo "    sudo ./setup_payram.sh   (menu -> SSL Configuration; Let's Encrypt or custom certs)"
+	echo "  - Ports / database: also changeable via  sudo ./setup_payram.sh  (update flow)"
 	echo "  - Add/replace deposit wallets:  dashboard -> Project -> Wallet  (or: $0 ensure-wallet)"
 	if grep -q '^SCW_LINKED=1' "$SCW_STATE_FILE" 2>/dev/null; then
 		echo "  - USDC/EVM payments: ENABLED (smart-contract wallet linked)"
