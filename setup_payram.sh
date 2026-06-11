@@ -8,21 +8,6 @@ set -euo pipefail
 # Supports: Ubuntu, Debian, CentOS, RHEL, Fedora, Arch, Alpine
 # =============================================================================
 
-# --- NON-INTERACTIVE (HEADLESS) INSTALL SUPPORT ---
-# When PAYRAM_NONINTERACTIVE=1 is set, or stdin is not a terminal, fresh-install
-# prompts stop blocking and resolve from environment variables with safe
-# defaults. Anything ambiguous fails fast with a clear message instead of
-# guessing. Interactive (TTY) behavior is unchanged unless a PAYRAM_* knob is
-# explicitly set. Knobs honored on a fresh install:
-#   PAYRAM_DB_MODE    internal (default) | external  — external needs DB_NAME,
-#                     DB_USER, DB_PASSWORD (DB_HOST/DB_PORT default localhost/5432)
-#   PAYRAM_SSL_MODE   none (default) | letsencrypt | custom — letsencrypt needs
-#                     DOMAIN_NAME + LE_EMAIL; custom needs DOMAIN_NAME + certs in place
-#   PAYRAM_HOST_PORT  host port published for HTTP (default 80; must be free)
-is_noninteractive() {
-  [[ "${PAYRAM_NONINTERACTIVE:-0}" == "1" || ! -t 0 ]]
-}
-
 # --- GLOBAL SYSTEM INFORMATION ---
 # Note: declare -g (bash 4.2+) is not used here; plain assignments work on bash 3.2+ (macOS default)
 OS_FAMILY=""
@@ -808,12 +793,6 @@ check_disk_space_requirements() {
       print_color "blue" "💡 Note: You can increase disk space after installation if needed."
       echo
       
-      if is_noninteractive; then
-        print_color "red" "❌ Not enough disk space for an unattended install (needs 5GB+ free)."
-        print_color "gray" "   Free space (docker system prune -a, apt clean) and re-run."
-        return 1
-      fi
-
       while true; do
         print_color "yellow" "Do you want to continue anyway? (y/N): "
         read -r response
@@ -971,26 +950,6 @@ configure_database() {
   print_color "gray" "   • Best for: Testing, development, and small-scale usage"
   echo
   
-  # Headless / env-pinned choice: PAYRAM_DB_MODE=internal|external.
-  # Unattended default is the containerized DB — zero extra inputs needed.
-  if [[ -n "${PAYRAM_DB_MODE:-}" ]] || is_noninteractive; then
-    case "${PAYRAM_DB_MODE:-internal}" in
-      external)
-        print_color "blue" "→ Database: external PostgreSQL (PAYRAM_DB_MODE)"
-        configure_external_database
-        ;;
-      internal)
-        print_color "blue" "→ Database: containerized PostgreSQL (${PAYRAM_DB_MODE:+via PAYRAM_DB_MODE=}${PAYRAM_DB_MODE:-headless default})"
-        configure_internal_database
-        ;;
-      *)
-        print_color "red" "❌ Invalid PAYRAM_DB_MODE='${PAYRAM_DB_MODE}'. Use 'internal' or 'external'."
-        exit 1
-        ;;
-    esac
-    return 0
-  fi
-
   while true; do
     read -e -p "Select option (1-2): " choice
     case $choice in
@@ -1018,34 +977,10 @@ configure_external_database() {
   print_color "gray" "  • Network connectivity (check firewalls if connection fails)"
   echo
   
-  # Headless: take connection details from the environment, test once, no retry
-  # loop. Required: DB_NAME, DB_USER, DB_PASSWORD. Optional: DB_HOST, DB_PORT.
-  if is_noninteractive; then
-    DB_HOST="${DB_HOST:-localhost}"
-    DB_PORT="${DB_PORT:-5432}"
-    local missing=""
-    [[ -z "${DB_NAME:-}" ]] && missing="$missing DB_NAME"
-    [[ -z "${DB_USER:-}" ]] && missing="$missing DB_USER"
-    [[ -z "${DB_PASSWORD:-}" ]] && missing="$missing DB_PASSWORD"
-    if [[ -n "$missing" ]]; then
-      print_color "red" "❌ External DB selected but missing env:${missing}"
-      print_color "gray" "   Export them and re-run, or use PAYRAM_DB_MODE=internal."
-      exit 1
-    fi
-    print_color "blue" "🔍 Testing database connection (headless)..."
-    if test_postgres_connection; then
-      print_color "green" "✅ Database connection successful!"
-      return 0
-    fi
-    print_color "red" "❌ Could not connect to ${DB_HOST}:${DB_PORT}/${DB_NAME} as ${DB_USER}."
-    print_color "gray" "   Check host/credentials/firewall, or use PAYRAM_DB_MODE=internal."
-    exit 1
-  fi
-
   while true; do
     read -e -p "Database Host [localhost]: " DB_HOST
     DB_HOST=${DB_HOST:-localhost}
-
+    
     read -e -p "Database Port [5432]: " DB_PORT
     DB_PORT=${DB_PORT:-5432}
     
@@ -1172,31 +1107,6 @@ configure_ssl() {
   print_color "gray" "   • You can add SSL certificates anytime when ready"
   echo
 
-  # Headless / env-pinned choice: PAYRAM_SSL_MODE=none|letsencrypt|custom.
-  # Unattended default is none (HTTP) — SSL needs DNS facts an agent may not
-  # have; it can be added later via the SSL update flow.
-  if [[ -n "${PAYRAM_SSL_MODE:-}" ]] || is_noninteractive; then
-    case "${PAYRAM_SSL_MODE:-none}" in
-      letsencrypt)
-        print_color "blue" "→ SSL: Let's Encrypt (PAYRAM_SSL_MODE)"
-        configure_ssl_letsencrypt
-        ;;
-      custom)
-        print_color "blue" "→ SSL: custom certificates (PAYRAM_SSL_MODE)"
-        configure_ssl_custom
-        ;;
-      none|external)
-        print_color "blue" "→ SSL: none for now (${PAYRAM_SSL_MODE:+via PAYRAM_SSL_MODE=}${PAYRAM_SSL_MODE:-headless default}) — HTTP on port 80"
-        configure_ssl_external
-        ;;
-      *)
-        print_color "red" "❌ Invalid PAYRAM_SSL_MODE='${PAYRAM_SSL_MODE}'. Use 'none', 'letsencrypt', or 'custom'."
-        exit 1
-        ;;
-    esac
-    return 0
-  fi
-
   while true; do
     read -e -p "Select option (1-3): " choice
     case $choice in
@@ -1230,34 +1140,40 @@ configure_ssl_letsencrypt() {
   print_color "gray" "  • No other web server using these ports"
   echo
   
-  # Headless: domain + email must come from the environment — there is no
-  # sane default for DNS facts. Fail fast with the exact knobs to set.
-  if is_noninteractive; then
-    if [[ -z "${DOMAIN_NAME:-}" || -z "${LE_EMAIL:-}" ]]; then
-      print_color "red" "❌ PAYRAM_SSL_MODE=letsencrypt needs DOMAIN_NAME and LE_EMAIL env vars."
-      print_color "gray" "   Export both and re-run, or use PAYRAM_SSL_MODE=none and add SSL later."
-      exit 1
-    fi
-  fi
-
-  # Domain input with validation (skipped when DOMAIN_NAME is pre-set)
-  while [[ -z "${DOMAIN_NAME:-}" ]] || [[ ! "$DOMAIN_NAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; do
-    if [[ -n "${DOMAIN_NAME:-}" ]]; then
-      print_color "red" "Invalid domain format. Please use format: payram.example.com"
-      if is_noninteractive; then exit 1; fi
-    fi
+  # Domain input with validation
+  while true; do
     read -e -p "Enter your domain name (e.g., payram.example.com): " DOMAIN_NAME
-    [[ -z "$DOMAIN_NAME" ]] && print_color "red" "Domain name cannot be empty"
-  done
-
-  # Email for Let's Encrypt notifications (skipped when LE_EMAIL is pre-set)
-  while [[ -z "${LE_EMAIL:-}" ]] || [[ ! "$LE_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; do
-    if [[ -n "${LE_EMAIL:-}" ]]; then
-      print_color "red" "Invalid email format"
-      if is_noninteractive; then exit 1; fi
+    
+    if [[ -z "$DOMAIN_NAME" ]]; then
+      print_color "red" "Domain name cannot be empty"
+      continue
     fi
+    
+    # Basic domain validation
+    if [[ ! "$DOMAIN_NAME" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+      print_color "red" "Invalid domain format. Please use format: payram.example.com"
+      continue
+    fi
+    
+    break
+  done
+  
+  # Email for Let's Encrypt notifications
+  while true; do
     read -e -p "Enter email for SSL notifications (certificate expiry alerts): " LE_EMAIL
-    [[ -z "$LE_EMAIL" ]] && print_color "red" "Email cannot be empty"
+    
+    if [[ -z "$LE_EMAIL" ]]; then
+      print_color "red" "Email cannot be empty"
+      continue
+    fi
+    
+    # Basic email validation
+    if [[ ! "$LE_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+      print_color "red" "Invalid email format"
+      continue
+    fi
+    
+    break
   done
   
   echo
@@ -1267,14 +1183,7 @@ configure_ssl_letsencrypt() {
   print_color "gray" "  • This process takes 1-3 minutes"
   echo
   
-  local confirm
-  if is_noninteractive; then
-    # Headless: PAYRAM_SSL_MODE=letsencrypt + DOMAIN_NAME + LE_EMAIL already
-    # encode explicit intent — proceed without blocking.
-    confirm="y"
-  else
-    read -e -p "Ready to generate SSL certificate? (y/N): " confirm
-  fi
+  read -e -p "Ready to generate SSL certificate? (y/N): " confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     print_color "yellow" "SSL setup cancelled. Continuing without SSL..."
     SSL_CERT_PATH=""
@@ -1312,13 +1221,6 @@ configure_ssl_letsencrypt() {
     print_color "gray" "  • Another web server is running"
     echo
     
-    if is_noninteractive; then
-      # Headless: don't silently downgrade an explicit letsencrypt request to
-      # HTTP — fail with the fix list above, or re-run with PAYRAM_SSL_MODE=none.
-      print_color "red" "❌ Certificate generation failed (headless). Fix the issues above and re-run,"
-      print_color "gray" "   or re-run with PAYRAM_SSL_MODE=none to install on HTTP now and add SSL later."
-      exit 1
-    fi
     read -e -p "Continue without SSL? (y/N): " continue_without_ssl
     if [[ "$continue_without_ssl" =~ ^[Yy]$ ]]; then
       SSL_CERT_PATH=""
@@ -1426,14 +1328,7 @@ configure_ssl_external() {
   print_color "red" "  • Restrict direct access to PayRam ports (firewall rules)"
   echo
   
-  local confirm_external
-  if is_noninteractive; then
-    # Headless: reaching this function already encodes the no-SSL choice
-    # (PAYRAM_SSL_MODE=none or headless default) — don't block on a confirm.
-    confirm_external="y"
-  else
-    read -e -p "Do you want to continue with external SSL management? (y/N): " confirm_external
-  fi
+  read -e -p "Do you want to continue with external SSL management? (y/N): " confirm_external
   if [[ "$confirm_external" =~ ^[Yy]$ ]]; then
     SSL_CERT_PATH=""
     SSL_MODE="external"
@@ -1697,9 +1592,7 @@ generate_aes_key() {
   print_color "red" "  • Regular withdrawal of excess funds to cold wallet"
   echo
   
-  if ! is_noninteractive; then
-    read -e -p "Press [Enter] to generate AES-256 encryption key for hot wallet..."
-  fi
+  read -e -p "Press [Enter] to generate AES-256 encryption key for hot wallet..."
   
   print_color "cyan" "🔮 Summoning cryptographic magic..."
   print_color "yellow" "⚡ Generating quantum-secure randomness..."
@@ -1919,24 +1812,6 @@ configure_port_mapping() {
     fi
     PRIMARY_PORT_MAPPING="80:80 443:443"
     log "INFO" "Port mapping set to $PRIMARY_PORT_MAPPING (internal TLS)"
-    return 0
-  fi
-
-  # Headless / env-pinned: PAYRAM_HOST_PORT picks the published HTTP port
-  # (default 80). Validate once and fail fast — no prompt loop to hang on.
-  if [[ -n "${PAYRAM_HOST_PORT:-}" ]] || is_noninteractive; then
-    host_port="${PAYRAM_HOST_PORT:-80}"
-    if [[ ! "$host_port" =~ ^[0-9]+$ ]] || (( host_port < 1 || host_port > 65535 )); then
-      print_color "red" "❌ Invalid PAYRAM_HOST_PORT='${host_port}'. Use a number between 1 and 65535."
-      exit 1
-    fi
-    if ! is_port_free "$host_port"; then
-      print_color "red" "❌ Host port $host_port is already in use."
-      print_color "gray" "   Find the listener: sudo lsof -i :$host_port — stop it, or set PAYRAM_HOST_PORT to a free port (e.g. 8080)."
-      exit 1
-    fi
-    PRIMARY_PORT_MAPPING="${host_port}:80"
-    log "INFO" "Port mapping set to $PRIMARY_PORT_MAPPING (${PAYRAM_HOST_PORT:+via PAYRAM_HOST_PORT=}${PAYRAM_HOST_PORT:-headless default})"
     return 0
   fi
 
@@ -4192,9 +4067,7 @@ main() {
   print_color "gray" "  • Backup critical: AES key + database data"
   echo
   
-  if ! is_noninteractive; then
-    read -e -p "Press [Enter] to deploy PayRam container..."
-  fi
+  read -e -p "Press [Enter] to deploy PayRam container..."
   
   # Step 7: Deploy container
   if deploy_payram_container; then

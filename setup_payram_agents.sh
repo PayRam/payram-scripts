@@ -54,11 +54,8 @@ Headless commands:
 Env vars:
 	PAYRAM_NETWORK (testnet|mainnet)
 	PAYRAM_SETUP_MODE (merchant|operator; default merchant)
-	Headless fresh-install knobs (no TTY needed; every prompt resolves from env):
-	PAYRAM_DB_MODE (internal|external; default internal. external needs DB_NAME, DB_USER, DB_PASSWORD [+DB_HOST, DB_PORT])
-	PAYRAM_SSL_MODE (none|letsencrypt|custom; default none. letsencrypt needs DOMAIN_NAME + LE_EMAIL)
-	PAYRAM_HOST_PORT (HTTP host port; default 80 - the bundled nginx proxies everything inside the container. Fails fast if 80 is busy)
-	PAYRAM_NONINTERACTIVE=1 (force headless even with a TTY)
+	Fresh install: needs a terminal once (the installer asks DB/SSL/port).
+	Every step AFTER the install runs fully headless.
 	PAYRAM_OPERATOR_BTC_FEE_COLLECTOR, PAYRAM_OPERATOR_EVM_FEE_COLLECTOR
 	PAYRAM_OPERATOR_FEE_BPS (default 100 = 1%, max 1500)
 	PAYRAM_API_URL (default: derived from installed config.env / running container)
@@ -621,20 +618,17 @@ troubleshoot() {
 			fi
 			;;
 		install-interactive)
-			echo "The install did not complete. Headless installs resolve every choice from"
-			echo "env vars (defaults: internal DB, no SSL, port 80/first free) - the message"
-			echo "above this one names the exact problem. Most likely:"
-			echo "  [40%] Chosen host port is busy."
-			echo "        -> PAYRAM_HOST_PORT=8080 $0 --testnet   (or stop the listener)"
-			echo "  [25%] Disk below the 5GB minimum."
-			echo "        -> docker system prune -a; apt clean; then re-run"
-			echo "  [20%] PAYRAM_SSL_MODE=letsencrypt without DOMAIN_NAME/LE_EMAIL set,"
-			echo "        or PAYRAM_DB_MODE=external without DB_NAME/DB_USER/DB_PASSWORD."
-			echo "        -> export the named vars, or drop back to the defaults"
-			echo "  [10%] Docker missing / image pull failed (network)."
-			echo "        -> docker version; docker logs payram 2>&1 | tail -20"
-			echo "  [ 5%] Container exists but is stopped."
+			echo "Fresh install needs a terminal: setup_payram.sh asks one-time DB/SSL/port"
+			echo "questions. Everything AFTER the install is fully headless."
+			echo "  [70%] You ran the one-step flow without a TTY before PayRam was installed."
+			echo "        -> run once from a terminal: sudo ./setup_payram.sh --mainnet (or --testnet)"
+			echo "           then re-run this agent flow (it attaches to the existing install)."
+			echo "  [15%] The installer reported an error above (disk, docker, port busy) -"
+			echo "        fix what it printed and re-run."
+			echo "  [10%] Container exists but is stopped."
 			echo "        -> $0 --restart"
+			echo "  [ 5%] Docker missing / image pull failed (network)."
+			echo "        -> docker version; docker logs payram 2>&1 | tail -20"
 			;;
 		auth-env)
 			echo "Credentials are required but no terminal is available to prompt."
@@ -2279,22 +2273,18 @@ flow_main() {
 		log "Restarting PayRam container..."
 		(cd "$SCRIPT_DIR" && run_as_root ./setup_payram.sh --restart)
 	elif ! is_payram_running; then
-		# A FRESH install delegates to setup_payram.sh and ALWAYS runs it with
-		# zero questions: every choice resolves from PAYRAM_* env knobs with
-		# deterministic defaults (internal DB, no SSL, port 80). The bundled
-		# nginx inside the container reverse-proxies everything - 80 (and 443
-		# with TLS) are the only ports PayRam needs. If 80 is busy the
-		# installer fails fast with the listener + the PAYRAM_HOST_PORT
-		# override; we don't silently pick another port (links on :8080
-		# surprise people). Config-comes-later UX: SSL, ports, and DB can all
-		# be changed once the gateway works - the goal here is the payment
-		# link. Full interactive installer: sudo ./setup_payram.sh
-		export PAYRAM_NONINTERACTIVE=1
-		export PAYRAM_DB_MODE="${PAYRAM_DB_MODE:-internal}"
-		export PAYRAM_SSL_MODE="${PAYRAM_SSL_MODE:-none}"
-		log "Install defaults: DB=${PAYRAM_DB_MODE} SSL=${PAYRAM_SSL_MODE} port=${PAYRAM_HOST_PORT:-80} (${network_mode})"
-		log "All of this is changeable later - SSL included. Overrides: PAYRAM_DB_MODE / PAYRAM_SSL_MODE / PAYRAM_HOST_PORT."
+		# A FRESH install delegates to setup_payram.sh - the working installer
+		# from main, UNMODIFIED. It asks its one-time DB/SSL/port questions
+		# interactively, so this single step needs a terminal; everything
+		# after the install is fully headless. Without a TTY, fail fast with
+		# directions instead of letting the installer's prompts die on EOF.
+		if [[ ! -t 0 ]]; then
+			troubleshoot install-interactive
+			exit 1
+		fi
 		log "Installing/starting PayRam (${network_mode})..."
+		log "The installer will ask a few one-time questions (database, SSL, port)."
+		log "Tip: defaults are fine to start - SSL and ports can be changed later."
 		local install_rc=0
 		if [[ "$network_mode" == "mainnet" ]]; then
 			(cd "$SCRIPT_DIR" && run_as_root ./setup_payram.sh --mainnet) || install_rc=$?
