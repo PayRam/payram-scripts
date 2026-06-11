@@ -140,15 +140,31 @@ async function main() {
 
   console.log('Deploy tx confirmed:', txHash);
 
-  // 5) Register with backend
-  const registerUrl = `${PAYRAM_API_URL}/api/v1/wallets/deposit/scw/blockchains_contract/${factoryId}`;
-  const registerRes = await fetch(registerUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name: PAYRAM_SCW_NAME, transactionHash: txHash }),
-  });
-  if (!registerRes.ok) {
-    console.error('Failed to register SCW:', registerRes.status, await registerRes.text());
+  // 5) Register with backend. The route moved across core versions:
+  //    current core:  POST /api/v1/project/{projectID}/wallets/deposit/scw/blockchains_contract/{id}
+  //    older images:  POST /api/v1/wallets/deposit/scw/blockchains_contract/{id}
+  //    Body ({name, transactionHash}) is the same in both. Try the
+  //    project-scoped path when we know the project, fall back to legacy on
+  //    404/405 so the script works against whichever image is deployed.
+  const projectId = (process.env.PAYRAM_PROJECT_ID || '').trim();
+  const registerBody = JSON.stringify({ name: PAYRAM_SCW_NAME, transactionHash: txHash });
+  const registerHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const candidates = [];
+  if (projectId) {
+    candidates.push(`${PAYRAM_API_URL}/api/v1/project/${projectId}/wallets/deposit/scw/blockchains_contract/${factoryId}`);
+  }
+  candidates.push(`${PAYRAM_API_URL}/api/v1/wallets/deposit/scw/blockchains_contract/${factoryId}`);
+
+  let registerRes;
+  for (const url of candidates) {
+    registerRes = await fetch(url, { method: 'POST', headers: registerHeaders, body: registerBody });
+    if (registerRes.ok) break;
+    if (registerRes.status !== 404 && registerRes.status !== 405) break; // real error - don't retry blindly
+    console.log(`Register endpoint not found at ${url} - trying fallback...`);
+  }
+  if (!registerRes || !registerRes.ok) {
+    console.error('Failed to register SCW:', registerRes && registerRes.status, registerRes ? await registerRes.text() : '');
+    console.error('The deploy tx succeeded (' + txHash + ') - registration is retryable without re-paying gas.');
     process.exit(1);
   }
   const result = await registerRes.json();

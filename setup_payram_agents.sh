@@ -295,12 +295,23 @@ parse_auth_tokens() {
 	MEMBER_EMAIL=$(echo "$body" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
 }
 
+# List projects, spanning core versions: older images serve
+# /external-platform/all; current core serves /external-platform/details.
+# Try the new path first, fall back to the legacy one. Sets HTTP_CODE/HTTP_BODY.
+api_list_projects() {
+	local res
+	res=$(api GET "/api/v1/external-platform/details" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" == "404" || "$HTTP_CODE" == "405" ]]; then
+		res=$(api GET "/api/v1/external-platform/all" "" true)
+		parse_response "$res"
+	fi
+}
+
 # First project id - the script's "current project" policy, in ONE place.
 # Echoes the id; guidance goes to stderr so $(capture) stays clean.
 get_first_project_id() {
-	local res
-	res=$(api GET "/api/v1/external-platform/all" "" true)
-	parse_response "$res"
+	api_list_projects
 	if [[ "$HTTP_CODE" != "200" ]]; then
 		echo "Failed to list projects: $HTTP_BODY" >&2
 		return 1
@@ -744,7 +755,7 @@ run_node() {
 			api_override="${api_override/127.0.0.1/host.docker.internal}"
 			env_flags+=("-e" "PAYRAM_API_URL=${api_override}")
 		fi
-		for var in PAYRAM_API_URL PAYRAM_ACCESS_TOKEN PAYRAM_MNEMONIC_FILE PAYRAM_ETH_RPC_URL PAYRAM_FUND_COLLECTOR PAYRAM_SCW_NAME PAYRAM_BLOCKCHAIN_CODE PAYRAM_MNEMONIC PAYRAM_DEPLOYER_ADDRESS PAYRAM_SCW_MIN_BALANCE_ETH; do
+		for var in PAYRAM_API_URL PAYRAM_ACCESS_TOKEN PAYRAM_MNEMONIC_FILE PAYRAM_ETH_RPC_URL PAYRAM_FUND_COLLECTOR PAYRAM_SCW_NAME PAYRAM_BLOCKCHAIN_CODE PAYRAM_MNEMONIC PAYRAM_DEPLOYER_ADDRESS PAYRAM_SCW_MIN_BALANCE_ETH PAYRAM_PROJECT_ID; do
 			if [[ -n "${!var:-}" ]]; then
 				if [[ "$var" != "PAYRAM_API_URL" || -z "$api_override" ]]; then
 					env_flags+=("-e" "$var")
@@ -842,9 +853,9 @@ refresh_token() {
 ensure_token() {
 	load_tokens
 	if [[ -n "${ACCESS_TOKEN:-}" ]]; then
-		local check
-		check=$(api GET "/api/v1/external-platform/all" "" true)
-		parse_response "$check"
+		# Version-spanning auth probe (details on current core, /all on older
+		# images) - a 404 here must never be mistaken for "not signed in".
+		api_list_projects
 		if [[ "$HTTP_CODE" == "200" ]]; then
 			return 0
 		fi
@@ -1431,6 +1442,13 @@ cmd_deploy_scw() {
 	export PAYRAM_API_URL
 	export PAYRAM_ACCESS_TOKEN="$ACCESS_TOKEN"
 	export PAYRAM_MNEMONIC_FILE="${PAYRAM_INFO_DIR}/headless-wallet-secret.txt"
+	# Current core registers the SCW under the project; older images use the
+	# legacy unscoped route. Pass the project id so the deploy script can try
+	# the project-scoped path first (it falls back on 404). Best-effort.
+	if [[ -z "${PAYRAM_PROJECT_ID:-}" ]]; then
+		PAYRAM_PROJECT_ID="$(get_first_project_id 2>/dev/null || true)"
+	fi
+	[[ -n "${PAYRAM_PROJECT_ID:-}" ]] && export PAYRAM_PROJECT_ID
 	[[ -n "${PAYRAM_ETH_RPC_URL:-}" ]] && export PAYRAM_ETH_RPC_URL
 	if [[ -n "${PAYRAM_FUND_COLLECTOR:-}" ]] && [[ "$PAYRAM_FUND_COLLECTOR" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
 		export PAYRAM_FUND_COLLECTOR
