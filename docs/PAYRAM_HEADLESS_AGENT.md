@@ -74,12 +74,13 @@ with the exact fix command, and a non-zero exit.
   running container); default `http://localhost` (the installer publishes
   `80:80`). Override with `PAYRAM_API_URL` only if you know better.
 - Docker required if `PAYRAM_NODE_MODE=docker` (default) for JS tooling.
-- A **fresh install is fully headless** — without a TTY the installer resolves
-  every choice from env knobs with deterministic defaults: containerized DB,
-  no SSL (add later), HTTP on port 80 (first free of 8080/8081/8088/8888 if 80
-  is busy). Override with `PAYRAM_DB_MODE`, `PAYRAM_SSL_MODE`,
+- A **fresh install is fully headless and zero-question** (TTY or not): every
+  choice resolves from env knobs with deterministic defaults: containerized DB,
+  no SSL (add later), HTTP on **port 80** — the bundled nginx inside the
+  container reverse-proxies everything, so 80 (and 443 with TLS) are the only
+  ports PayRam needs. Override with `PAYRAM_DB_MODE`, `PAYRAM_SSL_MODE`,
   `PAYRAM_HOST_PORT`. Anything ambiguous (external DB without credentials,
-  letsencrypt without `DOMAIN_NAME`/`LE_EMAIL`, chosen port busy, low disk)
+  letsencrypt without `DOMAIN_NAME`/`LE_EMAIL`, port 80 busy, low disk)
   **fails fast naming the exact env var to set** — it never hangs on a prompt.
 
 ---
@@ -118,8 +119,8 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | Variable | Default | Notes |
 |----------|---------|--------|
 | `PAYRAM_API_URL` | derived (config.env / container; else `http://localhost`) | Backend API base |
-| `PAYRAM_EMAIL` | — | Root user email (setup/signin) |
-| `PAYRAM_PASSWORD` | — | Root user password |
+| `PAYRAM_EMAIL` | auto-created | Root user email; auto-defaults on first setup, saved to `.payraminfo/root-credentials.env` (600). Change in dashboard |
+| `PAYRAM_PASSWORD` | auto-created | Root password; auto-generated on first setup, same file. Change in dashboard |
 | `PAYRAM_PROJECT_NAME` | `Default Project` | Project name on setup |
 | `PAYRAM_PAYMENT_EMAIL` | — | Customer email for payment link |
 | `PAYRAM_PAYMENT_AMOUNT` | `10` | Amount in USD for payment link |
@@ -129,7 +130,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | **headless fresh install** | | |
 | `PAYRAM_DB_MODE` | `internal` | `internal` (containerized) or `external` (needs `DB_NAME`, `DB_USER`, `DB_PASSWORD`; `DB_HOST`/`DB_PORT` default `localhost`/`5432`) |
 | `PAYRAM_SSL_MODE` | `none` | `none`, `letsencrypt` (needs `DOMAIN_NAME` + `LE_EMAIL`), or `custom` (certs already in place) |
-| `PAYRAM_HOST_PORT` | `80` (auto-fallback) | Host port publishing HTTP; agent auto-picks first free of 80/8080/8081/8088/8888 |
+| `PAYRAM_HOST_PORT` | `80` | HTTP host port. Bundled nginx proxies everything inside the container - 80 (+443 with TLS) are the only ports needed. Fails fast if busy |
 | `PAYRAM_NONINTERACTIVE` | auto (no TTY) | Set `1` to force headless prompts even with a TTY |
 | `PAYRAM_NODE_MODE` | `docker` | JS runtime: `docker` or `host` |
 | `PAYRAM_NODE_DOCKER_IMAGE` | `node:20-bullseye-slim` | Docker image used for JS scripts |
@@ -212,17 +213,22 @@ The one-step flow does:
 5. `ensure-config` for local frontend/backend settings.
 6. Wallet flow (MVF: **USDC on Base**):
 	- Default: EVM smart-contract wallet deploy (blocking, guided gas funding).
-	  The master (deployer) wallet is generated locally and is **ops-only**;
-	  once all chains are set up, back it up offline and remove it from the
-	  host. On **mainnet** the sweep destination must be a human-provided cold
+	  The master (deployer) wallet is generated locally and is **ops-only** -
+	  but KEEP it: it's needed to deploy on more chains and to change the
+	  cold-wallet config on-chain. Back it up offline FIRST; remove it from
+	  the host only once ALL chains are deployed and the cold-wallet config is
+	  final. On **mainnet** the sweep destination must be a human-provided cold
 	  address (`PAYRAM_FUND_COLLECTOR`) — never a silent default.
-	- **Fund on either chain (mainnet)**: the human sends ETH to ONE address -
-	  ~\$5 on the **Base** network (easiest) or ~\$30 on Ethereum (higher fees).
-	  Same address on both; the flow watches both chains and deploys where the
-	  funds land - the human never has to understand networks. Explicit
+	- **Fund on either chain (mainnet)**: the human sends **~\$10 of ETH** to
+	  ONE address - Ethereum network or Base network, both work (same address;
+	  pick Base when unsure). The flow watches both chains and deploys where
+	  the funds land - the human never has to understand networks. Explicit
 	  `PAYRAM_BLOCKCHAIN_CODE=ETH/POLYGON` or `PAYRAM_ETH_RPC_URL` pins a
 	  single chain instead.
 	  Re-runs are idempotent: an already-linked EVM wallet skips the deploy.
+	- **Testnet note**: test tokens are free but faucets often have
+	  requirements (account, mainnet balance, social post). If they block you,
+	  mainnet with ~\$10 of ETH is usually the faster path.
 	- `--ensure-wallet`: BTC-first fast lane instead - **BTC XPUB** starter
 	  wallet (instant, zero gas); the SCW is then attempted after the link.
 	- `--skip-scw`: no gas at all - BTC-only fast lane.
@@ -345,7 +351,7 @@ admin/setup APIs; **API key** for merchant payment APIs and the MCP.
 
 ## Agent automation tips
 
-- Always set `PAYRAM_EMAIL`, `PAYRAM_PASSWORD`, and `PAYRAM_CUSTOMER_ID` for fully non-interactive runs.
+- Credentials are optional: first `setup` auto-creates root credentials (saved 600 to `.payraminfo/root-credentials.env`; change in dashboard) and later `signin` re-reads them. Set `PAYRAM_EMAIL`/`PAYRAM_PASSWORD` only to pin your own.
 - Use `PAYRAM_WALLET_CHOICE=1` and `PAYRAM_WALLET_QUIET=1` to avoid wallet prompts.
 - For SCW, set `PAYRAM_SCW_MIN_BALANCE_ETH` to a known safe threshold if your RPC has delayed balance reporting.
 - When using Docker node runtime, ensure Docker is running and has access to host networking.
