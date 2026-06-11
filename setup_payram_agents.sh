@@ -14,14 +14,14 @@ Usage:
 	setup_payram_agents.sh [options]            One-step flow (install -> payment link)
 	setup_payram_agents.sh <command> [args]     Headless commands only
 
-Quick start (non-interactive testnet trial -> BTC payment link in minutes):
-	PAYRAM_EMAIL=you@example.com PAYRAM_PASSWORD=... \
-	  ./setup_payram_agents.sh --testnet --skip-mcp-server
+Quick start (run from a terminal; defaults at the install questions are fine):
+	./setup_payram_agents.sh
 	# Default flow (MVF): EVM smart-contract wallet on BASE -> payment link
 	# that accepts USDC. Master wallet is local + ops-only; on mainnet the
 	# sweep destination is YOUR cold address (PAYRAM_FUND_COLLECTOR). The one
-	# human wait is funding the deployer with gas. BTC comes later:
-	#   ./setup_payram_agents.sh ensure-wallet
+	# human wait is funding the deployer with gas (~$10, Ethereum or Base).
+	# Credentials are auto-created if PAYRAM_EMAIL/PAYRAM_PASSWORD are unset.
+	# BTC comes later:  ./setup_payram_agents.sh ensure-wallet
 
 One-step options:
 	--mainnet               Install/run in mainnet mode (default - real payments)
@@ -442,7 +442,22 @@ ensure_fee_collector() {
 	local fam_id="$1" addr="$2" name="$3" existing_body="$4"
 	COLLECTOR_ID=$(echo "$existing_body" | json_find_id_by blockchainFamilyID "$fam_id")
 	if [[ -n "$COLLECTOR_ID" ]]; then
-		echo "Fee collector for family $fam_id already exists (id $COLLECTOR_ID)."
+		# Reuse the configured collector - but if the env var points at a
+		# DIFFERENT address, say so loudly: fee destination is a money-flow
+		# decision and must never change silently from either side.
+		local existing_addr
+		existing_addr=$(echo "$existing_body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+print(next((x.get('address','') for x in d if str(x.get('blockchainFamilyID'))=='$fam_id'),''))" 2>/dev/null || true)
+		if [[ -n "$existing_addr" && "$existing_addr" != "$addr" ]]; then
+			echo "WARNING: fee collector for family $fam_id (id $COLLECTOR_ID) is configured"
+			echo "  with address $existing_addr, but the env var asks for $addr."
+			echo "  Keeping the EXISTING one - change it in the dashboard (Setup -> Fee"
+			echo "  collectors) if the env address is the intended destination."
+		else
+			echo "Fee collector for family $fam_id already exists (id $COLLECTOR_ID)."
+		fi
 		return 0
 	fi
 	local res
@@ -495,7 +510,9 @@ print(next((k['key'] for k in d if k.get('status')=='active' and k.get('key')),'
 	echo "Merchant API key ready (project $project_id), saved to: $API_KEY_FILE"
 	echo "This is what server-to-server integrations and the PayRam MCP use:"
 	echo "  PAYRAM_BASE_URL=$PAYRAM_API_URL"
-	echo "  PAYRAM_API_KEY=$key"
+	# Never print the full key to stdout - it's a long-lived secret and stdout
+	# routinely ends up in logs/transcripts. The 600 file has the real value.
+	echo "  PAYRAM_API_KEY=${key:0:6}******** (full key in $API_KEY_FILE)"
 	return 0
 }
 
@@ -506,6 +523,14 @@ ensure_operator_config() {
 	local btc_addr="${PAYRAM_OPERATOR_BTC_FEE_COLLECTOR:-}"
 	local evm_addr="${PAYRAM_OPERATOR_EVM_FEE_COLLECTOR:-}"
 	local fee_bps="${PAYRAM_OPERATOR_FEE_BPS:-100}"
+	# Validate the fee before it reaches the API: integer basis points,
+	# 1..1500 (15% cap, enforced on-chain too). Catch typos like "10%" here
+	# with a clear message instead of a confusing backend error.
+	if [[ ! "$fee_bps" =~ ^[0-9]+$ ]] || (( fee_bps < 1 || fee_bps > 1500 )); then
+		echo "Invalid PAYRAM_OPERATOR_FEE_BPS='${fee_bps}'. Use an integer 1-1500"
+		echo "(basis points: 100 = 1%, max 1500 = 15%)."
+		return 1
+	fi
 	if [[ -z "$btc_addr" && -z "$evm_addr" ]]; then
 		echo ""
 		echo "=== Operator mode needs YOUR fee-collector addresses (ownership decision) ==="
@@ -959,7 +984,18 @@ cmd_setup() {
 	# Pick the role BEFORE creating a project - the first project locks the
 	# install into merchant mode. Default is merchant; operator must be asked
 	# for explicitly (PAYRAM_SETUP_MODE=operator or --operator).
-	ensure_setup_mode "${PAYRAM_SETUP_MODE:-merchant}" || true
+	# The FIRST project locks the install's role - so an operator request
+	# must not silently fall through to (merchant-locking) project creation
+	# when the setup-mode call fails. Merchant is the backend default, so a
+	# failed call is harmless in that case.
+	if ! ensure_setup_mode "${PAYRAM_SETUP_MODE:-merchant}"; then
+		if [[ "${PAYRAM_SETUP_MODE:-merchant}" == "operator" ]]; then
+			echo "Could not set operator mode - stopping BEFORE the first project is created"
+			echo "(creating it would lock this install into merchant mode). Fix the error"
+			echo "above and re-run; setup is resumable."
+			return 1
+		fi
+	fi
 
 	local project_name="${PAYRAM_PROJECT_NAME:-Default Project}"
 	res=$(api POST "/api/v1/external-platform" "{\"name\":\"$project_name\"}")
