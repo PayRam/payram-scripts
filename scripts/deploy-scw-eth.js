@@ -102,10 +102,38 @@ async function main() {
   // 3) Salt bytes32 (same idea as frontend: keccak256 of random)
   const salt = ethers.keccak256(ethers.toUtf8Bytes(`${Date.now()}-${Math.random().toString(36).slice(2)}`));
 
-  // 4) Call createFundSweeperContract(salt, fundCollector)
+  // 4) Call createFundSweeperContract - the factory has two generations:
+  //    V1: createFundSweeperContract(bytes32 salt, address fundCollector)
+  //    V2: createFundSweeperContract(address fundCollector, bytes32 salt,
+  //          address operatorFeeAdmin, address operatorFeeCollector, uint16 bps)
+  //    NOTE the argument ORDER FLIPS between them (V2 matches the Tron factory).
+  //    The backend serves the ABI of whichever factory is deployed, so detect
+  //    which overload exists and call that one. Merchant deploys pass
+  //    (deployer, deployer, 0) for the operator-fee args - bps=0 means the
+  //    addresses are never used at sweep time (mirrors the dashboard frontend).
   const contract = new ethers.Contract(factoryAddress, abi, signer);
-  console.log('Sending deploy tx (createFundSweeperContract)...');
-  const tx = await contract.createFundSweeperContract(salt, fundCollector, { gasLimit: 500000n });
+  const createFragments = abi.filter(
+    (f) => f && f.type === 'function' && f.name === 'createFundSweeperContract'
+  );
+  const hasV2 = createFragments.some((f) => (f.inputs || []).length === 5);
+  const hasV1 = createFragments.some((f) => (f.inputs || []).length === 2);
+  if (!hasV1 && !hasV2) {
+    console.error(
+      'Factory ABI has no createFundSweeperContract with 2 or 5 args - the backend served an unexpected ABI.'
+    );
+    process.exit(1);
+  }
+  console.log(`Sending deploy tx (createFundSweeperContract, ${hasV2 ? 'V2 5-arg' : 'V1 2-arg'})...`);
+  let tx;
+  if (hasV2) {
+    tx = await contract['createFundSweeperContract(address,bytes32,address,address,uint16)'](
+      fundCollector, salt, deployerAddress, deployerAddress, 0, { gasLimit: 900000n }
+    );
+  } else {
+    tx = await contract['createFundSweeperContract(bytes32,address)'](
+      salt, fundCollector, { gasLimit: 500000n }
+    );
+  }
   console.log('Tx sent, waiting for confirmation:', tx.hash);
   const receipt = await tx.wait();
   const txHash = receipt.hash;
