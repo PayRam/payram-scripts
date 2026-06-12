@@ -953,6 +953,27 @@ cmd_status() {
 	fi
 }
 
+# The backend's signup rule (password_complexity validator in payram-core):
+# >=8 chars with at least one lowercase, one uppercase, one digit, and one
+# special character. Mirrored here so generated passwords always pass and
+# user-provided ones can be pre-flighted with a clear message.
+password_meets_complexity() {
+	local p="$1"
+	[[ ${#p} -ge 8 && "$p" =~ [a-z] && "$p" =~ [A-Z] && "$p" =~ [0-9] && "$p" =~ [^a-zA-Z0-9] ]]
+}
+
+# Random password guaranteed to satisfy password_complexity: 12 random
+# alphanumerics + a fixed tail covering every required class.
+generate_compliant_password() {
+	local core
+	if command -v openssl >/dev/null 2>&1; then
+		core="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-12)"
+	else
+		core="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-12)"
+	fi
+	echo "${core}Aa1!"
+}
+
 # Zero-input credentials: when PAYRAM_EMAIL/PAYRAM_PASSWORD are not provided,
 # generate them (random password, local default email) and persist 600 next to
 # the auth tokens - both are changeable from the dashboard later, so this is
@@ -966,15 +987,20 @@ load_or_create_root_credentials() {
 		# shellcheck source=/dev/null
 		source "$CREDENTIALS_FILE"
 		export PAYRAM_EMAIL PAYRAM_PASSWORD
-		[[ -n "${PAYRAM_EMAIL:-}" && -n "${PAYRAM_PASSWORD:-}" ]] && return 0
+		if [[ -n "${PAYRAM_EMAIL:-}" && -n "${PAYRAM_PASSWORD:-}" ]]; then
+			# Heal credentials saved by versions whose generator couldn't
+			# satisfy the backend's complexity rule. Only reachable in the
+			# signup path (no root user yet), so regenerating is safe.
+			if password_meets_complexity "$PAYRAM_PASSWORD"; then
+				return 0
+			fi
+			echo "Saved auto-generated password predates the password rule - regenerating."
+			PAYRAM_PASSWORD=""
+		fi
 	fi
 	export PAYRAM_EMAIL="${PAYRAM_EMAIL:-admin@payram.local}"
 	if [[ -z "${PAYRAM_PASSWORD:-}" ]]; then
-		if command -v openssl >/dev/null 2>&1; then
-			PAYRAM_PASSWORD="$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)"
-		else
-			PAYRAM_PASSWORD="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | cut -c1-16)"
-		fi
+		PAYRAM_PASSWORD="$(generate_compliant_password)"
 		export PAYRAM_PASSWORD
 	fi
 	if [[ -n "$CREDENTIALS_FILE" ]]; then
@@ -1004,12 +1030,25 @@ cmd_setup() {
 	load_or_create_root_credentials
 	local email="$PAYRAM_EMAIL"
 	local password="$PAYRAM_PASSWORD"
+	# Pre-flight a user-provided password against the backend rule so the
+	# failure is a clear sentence here, not an opaque INVALID_JSON_DATA 400.
+	if ! password_meets_complexity "$password"; then
+		echo "PAYRAM_PASSWORD does not meet the backend's password rule:"
+		echo "  at least 8 characters, with a lowercase, an uppercase, a digit,"
+		echo "  and a special character. Set a compliant PAYRAM_PASSWORD and re-run"
+		echo "  (or unset it to auto-generate one)."
+		return 1
+	fi
 	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signup" \
 		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
 	body=$(echo "$res" | sed '$d')
 	code=$(echo "$res" | tail -1)
 	if [[ "$code" != "200" && "$code" != "201" ]]; then
 		echo "Signup failed (HTTP $code): $body"
+		if echo "$body" | grep -q "INVALID_JSON_DATA"; then
+			echo "INVALID_JSON_DATA on signup usually means a field failed validation:"
+			echo "  password rule (8+ chars, lower+upper+digit+special) or email format."
+		fi
 		troubleshoot auth-failed
 		return 1
 	fi
