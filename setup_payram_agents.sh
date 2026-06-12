@@ -295,14 +295,24 @@ parse_auth_tokens() {
 # List projects, spanning core versions: older images serve
 # /external-platform/all; current core serves /external-platform/details.
 # Try the new path first, fall back to the legacy one. Sets HTTP_CODE/HTTP_BODY.
+# Memoizes the winning path (parent-shell calls like ensure_token populate it;
+# $(...) subshell calls inherit it) so legacy images don't pay a guaranteed-404
+# probe on every listing.
+PROJECTS_API_PATH=""
 api_list_projects() {
 	local res
-	res=$(api GET "/api/v1/external-platform/details" "" true)
-	parse_response "$res"
-	if [[ "$HTTP_CODE" == "404" || "$HTTP_CODE" == "405" ]]; then
-		res=$(api GET "/api/v1/external-platform/all" "" true)
+	if [[ -z "$PROJECTS_API_PATH" || "$PROJECTS_API_PATH" == "/api/v1/external-platform/details" ]]; then
+		res=$(api GET "/api/v1/external-platform/details" "" true)
 		parse_response "$res"
+		if [[ "$HTTP_CODE" != "404" && "$HTTP_CODE" != "405" ]]; then
+			PROJECTS_API_PATH="/api/v1/external-platform/details"
+			return 0
+		fi
 	fi
+	res=$(api GET "/api/v1/external-platform/all" "" true)
+	parse_response "$res"
+	[[ "$HTTP_CODE" == "200" ]] && PROJECTS_API_PATH="/api/v1/external-platform/all"
+	return 0
 }
 
 # First project id - the script's "current project" policy, in ONE place.
@@ -350,6 +360,26 @@ print_testnet_faucets() {
 			echo "  https://www.alchemy.com/faucets/ethereum-sepolia"
 			;;
 	esac
+}
+
+# Single home for chain -> default RPC endpoint (PublicNode, keyless).
+# Every site that needs an RPC for a chain goes through this one table.
+# Usage: default_rpc_for_chain <ETH|BASE|POLYGON> <mainnet|testnet>
+default_rpc_for_chain() {
+	case "$1:$2" in
+		ETH:mainnet)     echo "https://ethereum-rpc.publicnode.com" ;;
+		BASE:mainnet)    echo "https://base-rpc.publicnode.com" ;;
+		POLYGON:mainnet) echo "https://polygon-bor-rpc.publicnode.com" ;;
+		ETH:testnet)     echo "https://ethereum-sepolia-rpc.publicnode.com" ;;
+		BASE:testnet)    echo "https://base-sepolia-rpc.publicnode.com" ;;
+		POLYGON:testnet) echo "https://polygon-amoy-bor-rpc.publicnode.com" ;;
+		*) return 1 ;;
+	esac
+}
+
+# EVM address shape check - one home for the regex.
+is_evm_address() {
+	[[ "$1" =~ ^0x[a-fA-F0-9]{40}$ ]]
 }
 
 # Find the id of the first JSON-list element whose <field> equals <value>.
@@ -440,16 +470,17 @@ ensure_setup_mode() {
 COLLECTOR_ID=""
 ensure_fee_collector() {
 	local fam_id="$1" addr="$2" name="$3" existing_body="$4"
-	COLLECTOR_ID=$(echo "$existing_body" | json_find_id_by blockchainFamilyID "$fam_id")
+	# One parse extracts both fields (id + address) of the matching collector.
+	local existing_addr=""
+	{ IFS='	' read -r COLLECTOR_ID existing_addr; } < <(echo "$existing_body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+m=next((x for x in d if str(x.get('blockchainFamilyID'))==sys.argv[1]),None)
+print((str(m['id'])+'\t'+m.get('address','')) if m else '')" "$fam_id" 2>/dev/null || true)
 	if [[ -n "$COLLECTOR_ID" ]]; then
 		# Reuse the configured collector - but if the env var points at a
 		# DIFFERENT address, say so loudly: fee destination is a money-flow
 		# decision and must never change silently from either side.
-		local existing_addr
-		existing_addr=$(echo "$existing_body" | python3 -c "
-import sys,json
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
-print(next((x.get('address','') for x in d if str(x.get('blockchainFamilyID'))=='$fam_id'),''))" 2>/dev/null || true)
 		if [[ -n "$existing_addr" && "$existing_addr" != "$addr" ]]; then
 			echo "WARNING: fee collector for family $fam_id (id $COLLECTOR_ID) is configured"
 			echo "  with address $existing_addr, but the env var asks for $addr."
@@ -673,7 +704,10 @@ troubleshoot() {
 		gas)
 			echo "Deployer wallet has insufficient ETH for gas (this is ops fuel, not savings)."
 			echo "  [90%] The deployer address was not funded (or not enough)."
-			if [[ "${PAYRAM_NETWORK:-testnet}" == "mainnet" && "${PAYRAM_SCW_CHAIN_DEFAULTED:-0}" == "1" ]]; then
+			if [[ "${PAYRAM_SCW_DUAL_WATCH:-0}" == "1" ]]; then
+				# Branch on the COMPUTED funding mode (exported by the flow),
+				# never re-derived - "either chain" advice is only true when
+				# the dual-chain watcher actually ran.
 				echo "        -> send ~\$10 of ETH to: ${PAYRAM_DEPLOYER_ADDRESS:-<deployer>}"
 				echo "           Ethereum or Base network - both work, same address; we detect"
 				echo "           where it lands. Pick Base if your wallet asks and you're unsure."
@@ -1129,61 +1163,57 @@ get_eth_deployer_address() {
 	echo "$addr"
 }
 
-# Watch the SAME deployer address on Base AND Ethereum mainnet at once.
-# Humans often don't know which network their wallet/exchange will use - so we
-# accept either and deploy on whichever chain the funds land. Per-chain
-# minimums reflect real gas costs (Base is ~100x cheaper than Ethereum L1).
-# Output: line1 OK|WAIT, line2 winning chain (or '-'), line3 balances summary.
-check_eth_balance_any() {
+# ONE balance checker for every funding wait. Watches N "CHAIN|rpc" pairs
+# (space-separated, $1) for the deployer's balance, all RPCs queried in
+# parallel. Any balance > 0 is a green light - we don't gate on a guessed gas
+# number; the deploy simply tries and an out-of-gas failure is resumable.
+# Setting PAYRAM_SCW_MIN_BALANCE_ETH restores a hard threshold (all chains).
+# Output: line1 OK|WAIT, line2 first funded chain (or '-'), line3 chain=balance summary.
+balance_watch() {
 	local script_dir="$SCRIPT_DIR/scripts"
 	ensure_node_deps "$script_dir" || return 1
-	PAYRAM_SCW_MIN_BASE="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_BASE:-0}}" \
-	PAYRAM_SCW_MIN_ETHL1="${PAYRAM_SCW_MIN_BALANCE_ETH:-${PAYRAM_SCW_MIN_ETHL1:-0}}" \
+	PAYRAM_WATCH="$1" PAYRAM_SCW_MIN_BALANCE_ETH="${PAYRAM_SCW_MIN_BALANCE_ETH:-0}" \
 	run_node "$script_dir" -e "
 		const { ethers } = require('ethers');
 		const addr = process.env.PAYRAM_DEPLOYER_ADDRESS;
-		const watch = [
-			['BASE', 'https://base-rpc.publicnode.com', process.env.PAYRAM_SCW_MIN_BASE],
-			['ETH', 'https://ethereum-rpc.publicnode.com', process.env.PAYRAM_SCW_MIN_ETHL1],
-		];
+		const min = process.env.PAYRAM_SCW_MIN_BALANCE_ETH || '0';
+		const watch = process.env.PAYRAM_WATCH.trim().split(/\s+/).map((t) => t.split('|'));
 		(async () => {
-			let summary = [], winner = '', anyOk = false, allFailed = true;
-			for (const [chain, rpc, min] of watch) {
-				try {
-					const bal = await new ethers.JsonRpcProvider(rpc).getBalance(addr);
-					allFailed = false;
-					summary.push(chain.toLowerCase() + '=' + ethers.formatEther(bal));
-					const ok = min === '0' ? bal > 0n : bal >= ethers.parseEther(min);
-					if (!anyOk && ok) { anyOk = true; winner = chain; }
-				} catch (e) { summary.push(chain.toLowerCase() + '=?'); }
-			}
+			const results = await Promise.allSettled(
+				watch.map(([, rpc]) => new ethers.JsonRpcProvider(rpc).getBalance(addr))
+			);
+			let summary = [], winner = '', allFailed = true;
+			results.forEach((r, i) => {
+				const chain = watch[i][0];
+				if (r.status !== 'fulfilled') { summary.push(chain.toLowerCase() + '=?'); return; }
+				allFailed = false;
+				const bal = r.value;
+				summary.push(chain.toLowerCase() + '=' + ethers.formatEther(bal));
+				const ok = min === '0' ? bal > 0n : bal >= ethers.parseEther(min);
+				if (!winner && ok) winner = chain;
+			});
 			if (allFailed) process.exit(1);
-			console.log(anyOk ? 'OK' : 'WAIT');
+			console.log(winner ? 'OK' : 'WAIT');
 			console.log(winner || '-');
 			console.log(summary.join(' '));
 		})().catch(() => process.exit(1));
 	" 2>/dev/null
 }
 
+# Fund-on-either-chain (mainnet): humans often don't know which network their
+# wallet/exchange will use, so watch the same address on Base AND Ethereum and
+# deploy wherever the funds land. BASE first = preferred when both are funded.
+check_eth_balance_any() {
+	balance_watch "BASE|$(default_rpc_for_chain BASE mainnet) ETH|$(default_rpc_for_chain ETH mainnet)"
+}
+
+# Single-chain check on the already-selected RPC. Keeps its 2-line output
+# contract (status, balance) by adapting balance_watch's 3-line form.
 check_eth_balance() {
-	local script_dir="$SCRIPT_DIR/scripts"
-	ensure_node_deps "$script_dir" || return 1
-	# Any balance > 0 is a green light: we don't gate on a guessed gas number -
-	# the deploy simply tries, and an out-of-gas failure is resumable. Setting
-	# PAYRAM_SCW_MIN_BALANCE_ETH explicitly restores a hard threshold.
-	PAYRAM_SCW_MIN_BALANCE_ETH="${PAYRAM_SCW_MIN_BALANCE_ETH:-0}" run_node "$script_dir" -e "
-		const { ethers } = require('ethers');
-		const rpc = process.env.PAYRAM_ETH_RPC_URL;
-		const addr = process.env.PAYRAM_DEPLOYER_ADDRESS;
-		const min = process.env.PAYRAM_SCW_MIN_BALANCE_ETH || '0';
-		const provider = new ethers.JsonRpcProvider(rpc);
-		(async () => {
-			const bal = await provider.getBalance(addr);
-			const ok = min === '0' ? bal > 0n : bal >= ethers.parseEther(min);
-			console.log(ok ? 'OK' : 'WAIT');
-			console.log(ethers.formatEther(bal));
-		})().catch(() => process.exit(1));
-	" 2>/dev/null
+	local out
+	out=$(balance_watch "${PAYRAM_BLOCKCHAIN_CODE:-ETH}|${PAYRAM_ETH_RPC_URL}") || return 1
+	echo "$out" | sed -n 1p
+	echo "$out" | sed -n 3p | awk '{print $1}' | cut -d'=' -f2
 }
 
 ensure_wallet() {
@@ -1427,14 +1457,14 @@ cmd_deploy_scw() {
 	# the cold wallet where swept customer funds land - that address must be a
 	# deliberate human decision, never a silent default.
 	if [[ "${PAYRAM_NETWORK:-}" == "mainnet" ]]; then
-		if [[ -z "${PAYRAM_FUND_COLLECTOR:-}" ]] || [[ ! "$PAYRAM_FUND_COLLECTOR" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+		if [[ -z "${PAYRAM_FUND_COLLECTOR:-}" ]] || ! is_evm_address "$PAYRAM_FUND_COLLECTOR"; then
 			echo ""
 			echo "MAINNET deploy requires PAYRAM_FUND_COLLECTOR - your COLD WALLET address"
 			echo "(where swept customer funds land; keys never on this server)."
 			if [[ -t 0 ]]; then
 				read -r -p "Cold wallet 0x address: " fc
 				fc=$(echo "$fc" | tr -d ' ')
-				if [[ "$fc" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+				if is_evm_address "$fc"; then
 					export PAYRAM_FUND_COLLECTOR="$fc"
 				else
 					echo "Invalid address. Aborting mainnet deploy."
@@ -1474,13 +1504,14 @@ cmd_deploy_scw() {
 	export PAYRAM_MNEMONIC_FILE="${PAYRAM_INFO_DIR}/headless-wallet-secret.txt"
 	# Current core registers the SCW under the project; older images use the
 	# legacy unscoped route. Pass the project id so the deploy script can try
-	# the project-scoped path first (it falls back on 404). Best-effort.
+	# the project-scoped path first (it falls back on 404). Best-effort -
+	# reuse the id the idempotency guard already resolved before refetching.
 	if [[ -z "${PAYRAM_PROJECT_ID:-}" ]]; then
-		PAYRAM_PROJECT_ID="$(get_first_project_id 2>/dev/null || true)"
+		PAYRAM_PROJECT_ID="${known_project_id:-$(get_first_project_id 2>/dev/null || true)}"
 	fi
 	[[ -n "${PAYRAM_PROJECT_ID:-}" ]] && export PAYRAM_PROJECT_ID
 	[[ -n "${PAYRAM_ETH_RPC_URL:-}" ]] && export PAYRAM_ETH_RPC_URL
-	if [[ -n "${PAYRAM_FUND_COLLECTOR:-}" ]] && [[ "$PAYRAM_FUND_COLLECTOR" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+	if [[ -n "${PAYRAM_FUND_COLLECTOR:-}" ]] && is_evm_address "$PAYRAM_FUND_COLLECTOR"; then
 		export PAYRAM_FUND_COLLECTOR
 	else
 		PAYRAM_FUND_COLLECTOR=""
@@ -1501,7 +1532,7 @@ cmd_deploy_scw() {
 		echo "(Testnet only - you can change the fund collector before going live.)"
 		read -r fc
 		fc=$(echo "$fc" | tr -d ' ')
-		if [[ -n "$fc" ]] && [[ "$fc" =~ ^0x[a-fA-F0-9]{40}$ ]]; then
+		if [[ -n "$fc" ]] && is_evm_address "$fc"; then
 			export PAYRAM_FUND_COLLECTOR="$fc"
 		fi
 	fi
@@ -1545,34 +1576,21 @@ cmd_deploy_scw_flow() {
 	# Fund-on-either-chain: when WE defaulted the chain (one-step mainnet flow,
 	# no explicit RPC), the human can send ETH to the deployer address on Base
 	# OR Ethereum - same address on both - and we deploy where the funds land.
-	local user_rpc_set="${PAYRAM_ETH_RPC_URL:+1}"
 	local dual_watch=""
-	if [[ "${PAYRAM_NETWORK:-}" == "mainnet" && "${PAYRAM_SCW_CHAIN_DEFAULTED:-0}" == "1" && -z "$user_rpc_set" ]]; then
+	if [[ "${PAYRAM_NETWORK:-}" == "mainnet" && "${PAYRAM_SCW_CHAIN_DEFAULTED:-0}" == "1" && -z "${PAYRAM_ETH_RPC_URL:-}" ]]; then
 		dual_watch="1"
 	fi
+	# The gas troubleshoot card tailors its advice to the COMPUTED funding
+	# mode - export the decision so it never re-derives (and mis-derives) it.
+	export PAYRAM_SCW_DUAL_WATCH="${dual_watch:-0}"
 
 	if [[ -z "${PAYRAM_ETH_RPC_URL:-}" ]]; then
 		local chain="${PAYRAM_BLOCKCHAIN_CODE:-ETH}"
-		if [[ "${PAYRAM_NETWORK:-}" == "mainnet" ]]; then
-			case "$chain" in
-				ETH)     PAYRAM_ETH_RPC_URL="https://ethereum-rpc.publicnode.com" ;;
-				BASE)    PAYRAM_ETH_RPC_URL="https://base-rpc.publicnode.com" ;;
-				POLYGON) PAYRAM_ETH_RPC_URL="https://polygon-bor-rpc.publicnode.com" ;;
-				*)
-					echo "No default RPC for chain '$chain' - set PAYRAM_ETH_RPC_URL explicitly."
-					return 1
-					;;
-			esac
-		else
-			case "$chain" in
-				ETH)     PAYRAM_ETH_RPC_URL="https://ethereum-sepolia-rpc.publicnode.com" ;;
-				BASE)    PAYRAM_ETH_RPC_URL="https://base-sepolia-rpc.publicnode.com" ;;
-				POLYGON) PAYRAM_ETH_RPC_URL="https://polygon-amoy-bor-rpc.publicnode.com" ;;
-				*)
-					echo "No default testnet RPC for chain '$chain' - set PAYRAM_ETH_RPC_URL to that chain's testnet RPC."
-					return 1
-					;;
-			esac
+		local net="testnet"
+		[[ "${PAYRAM_NETWORK:-}" == "mainnet" ]] && net="mainnet"
+		if ! PAYRAM_ETH_RPC_URL="$(default_rpc_for_chain "$chain" "$net")"; then
+			echo "No default $net RPC for chain '$chain' - set PAYRAM_ETH_RPC_URL explicitly."
+			return 1
 		fi
 		export PAYRAM_ETH_RPC_URL
 	fi
@@ -1621,10 +1639,7 @@ cmd_deploy_scw_flow() {
 				echo "Funds detected on ${chain} (${balances}) - deploying there."
 				if [[ "$chain" != "${PAYRAM_BLOCKCHAIN_CODE:-}" ]]; then
 					export PAYRAM_BLOCKCHAIN_CODE="$chain"
-					case "$chain" in
-						ETH)  PAYRAM_ETH_RPC_URL="https://ethereum-rpc.publicnode.com" ;;
-						BASE) PAYRAM_ETH_RPC_URL="https://base-rpc.publicnode.com" ;;
-					esac
+					PAYRAM_ETH_RPC_URL="$(default_rpc_for_chain "$chain" mainnet)"
 					export PAYRAM_ETH_RPC_URL
 				fi
 				break
@@ -2369,7 +2384,8 @@ flow_main() {
 			log "Provide the env vars above (or use the dashboard) and re-run; everything is resumable."
 			wallet_mode="skip"
 			create_payment_link="false"
-			attempt_scw="false"
+			# (attempt_scw is only consulted on the ensure-wallet path, which
+			# wallet_mode="skip" already excludes - nothing else to clear.)
 		fi
 	fi
 
