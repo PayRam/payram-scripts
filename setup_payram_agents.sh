@@ -47,6 +47,8 @@ Headless commands:
 	ensure-operator-config            Fee collectors + default fees (operator)
 	ensure-api-key                    Mint/reuse the project's merchant API key (for MCP/integrations)
 	create-payment-link [projectId] [email] [amountUSD]
+	node-status                       Per-chain sync verdict (lagging >10m; BTC >90m) + remediation
+	node-restart <chain|worker|all>   Restart a chain's listener worker (minimal remediation)
 	start-mcp-server
 	reset-local [-y]
 	menu | run
@@ -958,6 +960,145 @@ cmd_status() {
 	else
 		echo "Token: none (run 'signin' or 'setup')"
 	fi
+}
+
+# Node sync health. A chain is LAGGING when its newest block (from the
+# backend's per-node lastBlockTimestamp) is older than the chain's threshold:
+# 10 minutes for every chain EXCEPT BTC (whose blocks arrive every ~10m, so
+# 90 minutes there). A lagging/stopped chain still serves payment links but
+# deposit DETECTION is delayed until it catches up - that's why the one-step
+# flow runs this right after creating the link.
+node_stale_threshold() {
+	if [[ "$(echo "$1" | tr '[:lower:]' '[:upper:]')" == "BTC" ]]; then echo 5400; else echo 600; fi
+}
+
+# Per-chain verdict + remediation. Exit 0 = all healthy, 1 = issues found.
+cmd_node_status() {
+	ensure_token || return 1
+	if ! command -v python3 >/dev/null 2>&1; then
+		echo "python3 is required for node-status."
+		return 1
+	fi
+
+	local res chains workers_body
+	res=$(api GET "/api/v1/blockchains" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		log_api_error "List blockchains" "$HTTP_CODE" "$HTTP_BODY"
+		return 1
+	fi
+	chains=$(echo "$HTTP_BODY" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if not isinstance(d,list):
+    d=d.get('items') or d.get('data') or next((v for v in d.values() if isinstance(v,list)),[])
+print(' '.join(x['code'] for x in d if str(x.get('status','active')).lower()=='active'))" 2>/dev/null || true)
+	if [[ -z "$chains" ]]; then
+		echo "No active chains configured."
+		return 0
+	fi
+
+	res=$(api GET "/api/v1/system/workers/status" "" true)
+	parse_response "$res"
+	workers_body="$HTTP_BODY"
+
+	echo "Node sync status (thresholds: 10m, BTC 90m):"
+	local issues=0 chain
+	for chain in $chains; do
+		local threshold worker listener_up="no" verdict detail
+		threshold=$(node_stale_threshold "$chain")
+		worker="$(echo "$chain" | tr '[:upper:]' '[:lower:]')-listener"
+		if echo "$workers_body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+if not isinstance(d,list):
+    d=d.get('status') or d.get('items') or d.get('data') or next((v for v in d.values() if isinstance(v,list)),[])
+import re
+ok=any(x.get('name','').lower()=='$worker' and str(x.get('status','')).upper()=='RUNNING' for x in d)
+sys.exit(0 if ok else 1)" 2>/dev/null; then
+			listener_up="yes"
+		fi
+
+		res=$(api GET "/api/v1/blockchain/${chain}/test-connection" "" true)
+		parse_response "$res"
+		if [[ "$HTTP_CODE" != "200" ]]; then
+			verdict="unreachable"; detail="test-connection HTTP $HTTP_CODE"
+		else
+			# Prints: <verdict> <detail> based on connectivity + oldest block age.
+			read -r verdict detail < <(echo "$HTTP_BODY" | python3 -c "
+import sys,json,datetime
+d=json.load(sys.stdin)
+nodes=d.get('nodes') or []
+connected=[n for n in nodes if n.get('connected')]
+if not d.get('success') or not connected:
+    print('unreachable no-rpc-node-connected'); sys.exit(0)
+ages=[]
+now=datetime.datetime.now(datetime.timezone.utc)
+for n in connected:
+    ts=n.get('lastBlockTimestamp')
+    if not ts: continue
+    try:
+        t=datetime.datetime.fromisoformat(ts.replace('Z','+00:00'))
+        ages.append(int((now-t).total_seconds()))
+    except Exception: pass
+age=max(ages) if ages else -1
+if age>$threshold:
+    print('lagging block-age=%dm' % (age//60))
+elif age>=0:
+    print('healthy block-age=%ds' % age)
+else:
+    print('healthy no-timestamp')" 2>/dev/null || echo "unreachable parse-failed") || true
+		fi
+		[[ "$verdict" == "healthy" && "$listener_up" == "no" ]] && verdict="listener-down"
+
+		local flag="✓"
+		[[ "$verdict" == "lagging" ]] && flag="⚠"
+		[[ "$verdict" == "unreachable" || "$verdict" == "listener-down" ]] && flag="✗"
+		printf '  %s %-9s %-13s %s listener:%s\n' "$flag" "$chain" "$verdict" "${detail:-}" "$listener_up"
+
+		if [[ "$verdict" == "lagging" || "$verdict" == "listener-down" ]]; then
+			issues=$((issues + 1))
+			echo "      -> node may be lagging or not syncing; deposits on $chain are delayed."
+			echo "         Remediation: $0 node-restart $chain   (then re-run: $0 node-status after ~60s)"
+		elif [[ "$verdict" == "unreachable" ]]; then
+			issues=$((issues + 1))
+			echo "      -> no reachable RPC; a worker restart will NOT fix this - check the"
+			echo "         chain's RPC configuration in the dashboard."
+		fi
+	done
+	if [[ "$issues" -gt 0 ]]; then
+		echo "Node health: $issues issue(s) found."
+		return 1
+	fi
+	echo "Node health: all chains in sync."
+	return 0
+}
+
+# Minimal remediation: restart a chain's listener worker via the backend
+# (POST /system/workers/{name}/restart - names are whitelist-validated by
+# core). Accepts a chain code (BASE), a worker name (base-listener), or 'all'.
+cmd_node_restart() {
+	local target="${1:-}"
+	if [[ -z "$target" ]]; then
+		echo "Usage: $0 node-restart <chain|worker|all>   e.g. node-restart BASE"
+		return 1
+	fi
+	ensure_token || return 1
+	local res
+	if [[ "$target" == "all" ]]; then
+		res=$(api POST "/api/v1/system/workers/restart" "" true)
+	else
+		local worker
+		worker=$(echo "$target" | tr '[:upper:]' '[:lower:]')
+		[[ "$worker" != *-* ]] && worker="${worker}-listener"
+		res=$(api POST "/api/v1/system/workers/${worker}/restart" "" true)
+	fi
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		log_api_error "Restart worker(s)" "$HTTP_CODE" "$HTTP_BODY"
+		return 1
+	fi
+	echo "Restart requested. Wait ~60s, then verify recovery: $0 node-status"
 }
 
 # The backend's signup rule (password_complexity validator in payram-core):
@@ -2216,6 +2357,8 @@ headless_main() {
 		deploy-scw) cmd_deploy_scw ;;
 		deploy-scw-flow) cmd_deploy_scw_flow ;;
 		create-payment-link) cmd_create_payment_link "$@" ;;
+		node-status) cmd_node_status ;;
+		node-restart) cmd_node_restart "$@" ;;
 		start-mcp-server) cmd_start_mcp_server ;;
 		reset-local) cmd_reset_local "$@" ;;
 		menu)     cmd_menu "$@" ;;
@@ -2475,6 +2618,11 @@ flow_main() {
 	if [[ "$create_payment_link" == "true" ]]; then
 		log "Creating payment link..."
 		cmd_create_payment_link
+		# A lagging/stopped node doesn't break the link itself, but it DELAYS
+		# deposit detection - surface that right when the link goes live so
+		# the agent can remediate (node-restart) before a customer pays.
+		log "Checking node sync health..."
+		cmd_node_status || log "Node health needs attention (see above). Your link works; deposits on affected chains may be delayed until the node catches up."
 	else
 		log "Skipping payment link creation."
 	fi

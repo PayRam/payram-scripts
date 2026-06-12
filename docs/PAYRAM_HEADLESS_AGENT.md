@@ -93,7 +93,16 @@ Run from repo root: `./setup_payram_agents.sh [command]`
 - **One-step flow (install + headless):**
 	- `./setup_payram_agents.sh` (prompts for network, then runs setup/signin/config/wallet/payment)
 - **Headless-only commands:**
-	- `./setup_payram_agents.sh status|setup|signin|ensure-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|reset-local|menu|run`
+	- `./setup_payram_agents.sh status|setup|signin|ensure-config|ensure-wallet|deploy-scw|deploy-scw-flow|create-payment-link|node-status|node-restart|reset-local|menu|run`
+- **Node health (check → report → remediate):** `node-status` gives a per-chain
+  verdict (healthy / lagging / unreachable / listener-down) by computing how old
+  each chain's newest block is — older than **10 minutes** (BTC: **90 minutes**)
+  means lagging or not syncing, which delays deposit detection. The one-step
+  flow runs it automatically right after creating the payment link.
+  `node-restart <chain|worker|all>` is the minimal remediation (supervisor
+  restart via the backend); re-run `node-status` ~60s later to confirm
+  recovery. An UNREACHABLE verdict means the RPC config is wrong — a restart
+  won't fix that.
 
 | Command | Purpose |
 |--------|---------|
