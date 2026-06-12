@@ -155,15 +155,18 @@ async function main() {
   }
   candidates.push(`${PAYRAM_API_URL}/api/v1/wallets/deposit/scw/blockchains_contract/${factoryId}`);
 
+  // candidates always has at least the legacy URL, so registerRes is always set.
   let registerRes;
   for (const url of candidates) {
     registerRes = await fetch(url, { method: 'POST', headers: registerHeaders, body: registerBody });
     if (registerRes.ok) break;
     if (registerRes.status !== 404 && registerRes.status !== 405) break; // real error - don't retry blindly
-    console.log(`Register endpoint not found at ${url} - trying fallback...`);
+    if (url !== candidates[candidates.length - 1]) {
+      console.log(`Register endpoint not found at ${url} - trying fallback...`);
+    }
   }
-  if (!registerRes || !registerRes.ok) {
-    console.error('Failed to register SCW:', registerRes && registerRes.status, registerRes ? await registerRes.text() : '');
+  if (!registerRes.ok) {
+    console.error('Failed to register SCW:', registerRes.status, await registerRes.text());
     console.error('The deploy tx succeeded (' + txHash + ') - registration is retryable without re-paying gas.');
     process.exit(1);
   }
