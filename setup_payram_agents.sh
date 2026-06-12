@@ -472,11 +472,13 @@ ensure_fee_collector() {
 	local fam_id="$1" addr="$2" name="$3" existing_body="$4"
 	# One parse extracts both fields (id + address) of the matching collector.
 	local existing_addr=""
+	# Trailing || true is load-bearing: if python emits nothing (missing or
+	# failed), read hits EOF and returns 1 - set -e would kill the script.
 	{ IFS='	' read -r COLLECTOR_ID existing_addr; } < <(echo "$existing_body" | python3 -c "
 import sys,json
 d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
 m=next((x for x in d if str(x.get('blockchainFamilyID'))==sys.argv[1]),None)
-print((str(m['id'])+'\t'+m.get('address','')) if m else '')" "$fam_id" 2>/dev/null || true)
+print((str(m['id'])+'\t'+m.get('address','')) if m else '')" "$fam_id" 2>/dev/null || true) || true
 	if [[ -n "$COLLECTOR_ID" ]]; then
 		# Reuse the configured collector - but if the env var points at a
 		# DIFFERENT address, say so loudly: fee destination is a money-flow
@@ -808,7 +810,7 @@ run_node() {
 			api_override="${api_override/127.0.0.1/host.docker.internal}"
 			env_flags+=("-e" "PAYRAM_API_URL=${api_override}")
 		fi
-		for var in PAYRAM_API_URL PAYRAM_ACCESS_TOKEN PAYRAM_MNEMONIC_FILE PAYRAM_ETH_RPC_URL PAYRAM_FUND_COLLECTOR PAYRAM_SCW_NAME PAYRAM_BLOCKCHAIN_CODE PAYRAM_MNEMONIC PAYRAM_DEPLOYER_ADDRESS PAYRAM_SCW_MIN_BALANCE_ETH PAYRAM_PROJECT_ID; do
+		for var in PAYRAM_API_URL PAYRAM_ACCESS_TOKEN PAYRAM_MNEMONIC_FILE PAYRAM_ETH_RPC_URL PAYRAM_FUND_COLLECTOR PAYRAM_SCW_NAME PAYRAM_BLOCKCHAIN_CODE PAYRAM_MNEMONIC PAYRAM_DEPLOYER_ADDRESS PAYRAM_SCW_MIN_BALANCE_ETH PAYRAM_PROJECT_ID PAYRAM_WATCH; do
 			if [[ -n "${!var:-}" ]]; then
 				if [[ "$var" != "PAYRAM_API_URL" || -z "$api_override" ]]; then
 					env_flags+=("-e" "$var")
