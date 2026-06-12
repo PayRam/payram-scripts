@@ -2240,17 +2240,44 @@ cmd_run() {
 		local email="${PAYRAM_EMAIL:-}"
 		read -p "Email for root user [admin@example.com]: " email_in
 		email="${email_in:-${email:-admin@example.com}}"
+		# The backend enforces password_complexity (8+ chars, lower + upper +
+		# digit + special). State the rule UP FRONT, validate locally with a
+		# retry loop, and offer auto-generation - never let a human discover
+		# the rule via an opaque INVALID_JSON_DATA 400.
 		local password="${PAYRAM_PASSWORD:-}"
-		[[ -z "$password" ]] && read -s -p "Password: " password && echo
+		while ! password_meets_complexity "$password"; do
+			if [[ -n "$password" ]]; then
+				echo "That password doesn't meet the rule - try again."
+			fi
+			echo "Password rule: at least 8 characters, with a lowercase, an uppercase,"
+			echo "a digit, and a special character."
+			read -s -p "Password (press Enter to auto-generate a compliant one): " password && echo
+			if [[ -z "$password" ]]; then
+				password="$(generate_compliant_password)"
+				echo "Auto-generated. It will be saved to ${CREDENTIALS_FILE:-the credentials file} (mode 600);"
+				echo "change it anytime in the dashboard."
+			fi
+		done
 		res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signup" \
 			-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
 		parse_response "$res"
 		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
 			echo "Signup failed (HTTP $HTTP_CODE): $HTTP_BODY"
+			if echo "$HTTP_BODY" | grep -q "INVALID_JSON_DATA"; then
+				echo "INVALID_JSON_DATA on signup usually means a field failed validation:"
+				echo "  password rule (8+ chars, lower+upper+digit+special) or email format."
+			fi
 			return 1
 		fi
 		parse_auth_tokens "$HTTP_BODY"
 		save_tokens
+		# Persist the credentials (600) so later runs can sign in without
+		# re-asking - same file the headless flow uses.
+		if [[ -n "${CREDENTIALS_FILE:-}" ]]; then
+			mkdir -p "$(dirname "$CREDENTIALS_FILE")"
+			printf 'PAYRAM_EMAIL="%s"\nPAYRAM_PASSWORD="%s"\n' "$email" "$password" > "$CREDENTIALS_FILE"
+			chmod 600 "$CREDENTIALS_FILE"
+		fi
 		echo "Signed in as $email"
 		local project_name="${PAYRAM_PROJECT_NAME:-Default Project}"
 		read -p "Project name [$project_name]: " pn_in
