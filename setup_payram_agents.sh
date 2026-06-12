@@ -387,7 +387,11 @@ is_evm_address() {
 json_find_id_by() {
 	python3 -c "
 import sys,json
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+d=json.load(sys.stdin)
+if not isinstance(d,list):
+    # Unwrap any single-key list envelope: {items|data|blockchainFamilies|
+    # feeCollectors|...: [...]} - core wraps list responses in named keys.
+    d=d.get('items') or d.get('data') or next((v for v in d.values() if isinstance(v,list)),[])
 print(next((x['id'] for x in d if str(x.get(sys.argv[1]))==sys.argv[2]),''))
 " "$1" "$2" 2>/dev/null || true
 }
@@ -476,7 +480,9 @@ ensure_fee_collector() {
 	# failed), read hits EOF and returns 1 - set -e would kill the script.
 	{ IFS='	' read -r COLLECTOR_ID existing_addr; } < <(echo "$existing_body" | python3 -c "
 import sys,json
-d=json.load(sys.stdin); d=d if isinstance(d,list) else d.get('items') or d.get('data') or []
+d=json.load(sys.stdin)
+if not isinstance(d,list):
+    d=d.get('items') or d.get('data') or next((v for v in d.values() if isinstance(v,list)),[])
 m=next((x for x in d if str(x.get('blockchainFamilyID'))==sys.argv[1]),None)
 print((str(m['id'])+'\t'+m.get('address','')) if m else '')" "$fam_id" 2>/dev/null || true) || true
 	if [[ -n "$COLLECTOR_ID" ]]; then
@@ -894,7 +900,8 @@ refresh_token() {
 	res=$(curl -s -S -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/refresh" \
 		-H "Content-Type: application/json" -d "{\"refreshToken\":\"$REFRESH_TOKEN\"}")
 	parse_response "$res"
-	if [[ "$HTTP_CODE" != "200" ]]; then
+	# Core's RefreshToken handler responds 201 Created (auth_handler.go), not 200.
+	if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
 		return 1
 	fi
 	ACCESS_TOKEN=$(echo "$HTTP_BODY" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
@@ -1339,12 +1346,15 @@ ensure_wallet() {
 		# address generation fails at payment time. USDC/EVM comes from the
 		# deploy-scw step.
 		#
-		# Operator mode: the backend requires the wallet to be bound to a
-		# project at creation AND an operator fee (bps + collector) to resolve
-		# for BTC - run ensure_operator_config first if creation fails.
-		local payload proj_frag=""
-		[[ "$(get_setup_mode)" == "operator" ]] && proj_frag="\"projectID\":$project_id,"
-		payload="{\"name\":\"Headless\",${proj_frag}\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
+		# projectID is sent UNCONDITIONALLY: current core only binds the wallet
+		# to a project when the field is present (the silent auto-fan-to-projects
+		# behavior was removed in wallet_service_impl.go) - without it the wallet
+		# is created orphaned and payment links 500 with no deposit wallet.
+		# The field is binding:"omitempty", so older images accept it too.
+		# Operator mode additionally requires an operator fee (bps + collector)
+		# to resolve for BTC - run ensure_operator_config first if creation fails.
+		local payload
+		payload="{\"name\":\"Headless\",\"projectID\":$project_id,\"xpubs\":[{\"family\":\"BTC_Family\",\"xpub\":\"$xpub\"}]}"
 		res=$(api POST "/api/v1/wallets/deposit/eoa/bulk" "$payload" true)
 		parse_response "$res"
 		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
@@ -1374,8 +1384,15 @@ ensure_wallet() {
 	fi
 
 	if [[ "$choice" == "2" ]]; then
-		res=$(api GET "/api/v1/wallets" "" true)
+		# Current core lists wallets only project-scoped; ':project_id = all'
+		# is explicitly supported. Fall back to the legacy unscoped route for
+		# older images.
+		res=$(api GET "/api/v1/project/all/wallets" "" true)
 		parse_response "$res"
+		if [[ "$HTTP_CODE" == "404" || "$HTTP_CODE" == "405" ]]; then
+			res=$(api GET "/api/v1/wallets" "" true)
+			parse_response "$res"
+		fi
 		if [[ "$HTTP_CODE" != "200" ]]; then
 			echo "Failed to list wallets (HTTP $HTTP_CODE): $HTTP_BODY"
 			return 1
@@ -1783,6 +1800,12 @@ cmd_create_payment_link() {
 	local customer_id="${CUSTOMER_ID:-${PAYRAM_CUSTOMER_ID:-}}"
 	if [[ -z "$customer_id" ]]; then
 		echo "Missing customerID (required by API). Run 'signin' again to save your member customer_id, or set PAYRAM_CUSTOMER_ID."
+		return 1
+	fi
+	# customerEmail binds 'email' WITHOUT omitempty in core - an empty value
+	# 400s. Pre-flight it here with a clear message instead.
+	if [[ -z "$customer_email" ]]; then
+		echo "Missing customer email (required by API). Set PAYRAM_PAYMENT_EMAIL or pass it as the 2nd argument."
 		return 1
 	fi
 	local payload="{\"customerID\":\"$customer_id\",\"customerEmail\":\"$customer_email\",\"amountInUSD\":$amount_usd}"
