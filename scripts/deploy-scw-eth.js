@@ -102,25 +102,72 @@ async function main() {
   // 3) Salt bytes32 (same idea as frontend: keccak256 of random)
   const salt = ethers.keccak256(ethers.toUtf8Bytes(`${Date.now()}-${Math.random().toString(36).slice(2)}`));
 
-  // 4) Call createFundSweeperContract(salt, fundCollector)
+  // 4) Call createFundSweeperContract - the factory has two generations:
+  //    V1: createFundSweeperContract(bytes32 salt, address fundCollector)
+  //    V2: createFundSweeperContract(address fundCollector, bytes32 salt,
+  //          address operatorFeeAdmin, address operatorFeeCollector, uint16 bps)
+  //    NOTE the argument ORDER FLIPS between them (V2 matches the Tron factory).
+  //    The backend serves the ABI of whichever factory is deployed, so detect
+  //    which overload exists and call that one. Merchant deploys pass
+  //    (deployer, deployer, 0) for the operator-fee args - bps=0 means the
+  //    addresses are never used at sweep time (mirrors the dashboard frontend).
   const contract = new ethers.Contract(factoryAddress, abi, signer);
-  console.log('Sending deploy tx (createFundSweeperContract)...');
-  const tx = await contract.createFundSweeperContract(salt, fundCollector, { gasLimit: 500000n });
+  const createFragments = abi.filter(
+    (f) => f && f.type === 'function' && f.name === 'createFundSweeperContract'
+  );
+  const hasV2 = createFragments.some((f) => (f.inputs || []).length === 5);
+  const hasV1 = createFragments.some((f) => (f.inputs || []).length === 2);
+  if (!hasV1 && !hasV2) {
+    console.error(
+      'Factory ABI has no createFundSweeperContract with 2 or 5 args - the backend served an unexpected ABI.'
+    );
+    process.exit(1);
+  }
+  console.log(`Sending deploy tx (createFundSweeperContract, ${hasV2 ? 'V2 5-arg' : 'V1 2-arg'})...`);
+  let tx;
+  if (hasV2) {
+    tx = await contract['createFundSweeperContract(address,bytes32,address,address,uint16)'](
+      fundCollector, salt, deployerAddress, deployerAddress, 0, { gasLimit: 900000n }
+    );
+  } else {
+    tx = await contract['createFundSweeperContract(bytes32,address)'](
+      salt, fundCollector, { gasLimit: 500000n }
+    );
+  }
   console.log('Tx sent, waiting for confirmation:', tx.hash);
   const receipt = await tx.wait();
   const txHash = receipt.hash;
 
   console.log('Deploy tx confirmed:', txHash);
 
-  // 5) Register with backend
-  const registerUrl = `${PAYRAM_API_URL}/api/v1/wallets/deposit/scw/blockchains_contract/${factoryId}`;
-  const registerRes = await fetch(registerUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name: PAYRAM_SCW_NAME, transactionHash: txHash }),
-  });
+  // 5) Register with backend. The route moved across core versions:
+  //    current core:  POST /api/v1/project/{projectID}/wallets/deposit/scw/blockchains_contract/{id}
+  //    older images:  POST /api/v1/wallets/deposit/scw/blockchains_contract/{id}
+  //    Body ({name, transactionHash}) is the same in both. Try the
+  //    project-scoped path when we know the project, fall back to legacy on
+  //    404/405 so the script works against whichever image is deployed.
+  const projectId = (process.env.PAYRAM_PROJECT_ID || '').trim();
+  const registerBody = JSON.stringify({ name: PAYRAM_SCW_NAME, transactionHash: txHash });
+  const registerHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+  const candidates = [];
+  if (projectId) {
+    candidates.push(`${PAYRAM_API_URL}/api/v1/project/${projectId}/wallets/deposit/scw/blockchains_contract/${factoryId}`);
+  }
+  candidates.push(`${PAYRAM_API_URL}/api/v1/wallets/deposit/scw/blockchains_contract/${factoryId}`);
+
+  // candidates always has at least the legacy URL, so registerRes is always set.
+  let registerRes;
+  for (const url of candidates) {
+    registerRes = await fetch(url, { method: 'POST', headers: registerHeaders, body: registerBody });
+    if (registerRes.ok) break;
+    if (registerRes.status !== 404 && registerRes.status !== 405) break; // real error - don't retry blindly
+    if (url !== candidates[candidates.length - 1]) {
+      console.log(`Register endpoint not found at ${url} - trying fallback...`);
+    }
+  }
   if (!registerRes.ok) {
     console.error('Failed to register SCW:', registerRes.status, await registerRes.text());
+    console.error('The deploy tx succeeded (' + txHash + ') - registration is retryable without re-paying gas.');
     process.exit(1);
   }
   const result = await registerRes.json();
