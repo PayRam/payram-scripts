@@ -1000,7 +1000,16 @@ print(' '.join(x['code'] for x in d if str(x.get('status','active')).lower()=='a
 
 	res=$(api GET "/api/v1/system/workers/status" "" true)
 	parse_response "$res"
-	workers_body="$HTTP_BODY"
+	# A host without supervisord answers 500 here; without this guard every
+	# chain would falsely degrade to listener-down with a bogus restart hint.
+	local workers_available="yes"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		workers_available="no"
+		workers_body='{"status":[]}'
+		echo "Note: worker status unavailable (HTTP $HTTP_CODE) - listener state unknown; RPC/block-age checks still run."
+	else
+		workers_body="$HTTP_BODY"
+	fi
 
 	echo "Node sync status (thresholds: 10m, BTC 90m):"
 	local issues=0 chain
@@ -1049,7 +1058,9 @@ elif age>=0:
 else:
     print('healthy no-timestamp')" 2>/dev/null || echo "unreachable parse-failed") || true
 		fi
-		[[ "$verdict" == "healthy" && "$listener_up" == "no" ]] && verdict="listener-down"
+		# Only assert listener-down when worker status was actually available.
+		[[ "$workers_available" == "yes" && "$verdict" == "healthy" && "$listener_up" == "no" ]] && verdict="listener-down"
+		[[ "$workers_available" == "no" ]] && listener_up="unknown"
 
 		local flag="✓"
 		[[ "$verdict" == "lagging" ]] && flag="⚠"

@@ -110,7 +110,7 @@ Run from repo root: `./setup_payram_agents.sh [command]`
 | `status` | Check API reachable and auth (token saved / valid) |
 | `setup` | First-time: register root user + create default project |
 | `signin` | Sign in; saves token to `.payraminfo/headless-tokens.env` |
-| `ensure-config` | Seed `payram.frontend` and `payram.backend` for local API (needed for payment creation) |
+| `ensure-config` | Ensure the canonical server URL (`payram.server.url` via `/system/site-url`) is set — payment-link creation 500s without it. Falls back to the legacy `payram.frontend`/`payram.backend` keys on older cores |
 | `ensure-wallet` | Create random BTC wallet or link existing to project (for payment links) |
 | `deploy-scw` | Deploy ETH/EVM smart-contract deposit wallet; then auto-link to project |
 | `deploy-scw-flow` | Generate mnemonic -> fund deployer -> balance check -> deploy SCW |
@@ -133,7 +133,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_PAYMENT_EMAIL` | — | Customer email for payment link |
 | `PAYRAM_PAYMENT_AMOUNT` | `10` | Amount in USD for payment link |
 | `PAYRAM_CUSTOMER_ID` | from signin | Usually from token file after signin |
-| `PAYRAM_FRONTEND_URL` | `http://localhost` | Used by ensure-config (local) |
+| `PAYRAM_FRONTEND_URL` | `http://localhost` | Used by ensure-config's legacy fallback only (older cores; current cores derive the URL from the request) |
 | `PAYRAM_NETWORK` | `mainnet` | One-step flow network selection (`mainnet` default - real payments; `testnet` to try with free coins) |
 | `PAYRAM_NODE_MODE` | `docker` | JS runtime: `docker` or `host` |
 | `PAYRAM_NODE_DOCKER_IMAGE` | `node:20-bullseye-slim` | Docker image used for JS scripts |
@@ -213,7 +213,7 @@ The one-step flow does:
 2. Install or restart PayRam using `setup_payram.sh` (fresh install asks its one-time questions in the terminal; see Prerequisites).
 3. Re-reads `config.env` and waits for API readiness at the real port.
 4. Auth (`setup` if no root user, else `signin`).
-5. `ensure-config` for local frontend/backend settings.
+5. `ensure-config` so the server URL (`payram.server.url`) is set for payment links.
 6. Wallet flow (MVF: **USDC on Base**):
 	- Default: EVM smart-contract wallet deploy (blocking, guided gas funding).
 	  The master (deployer) wallet is generated locally and is **ops-only** -
