@@ -99,6 +99,18 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(PAYRAM_ETH_RPC_URL);
   const signer = wallet.connect(provider);
 
+  // Resolve the project BEFORE paying gas: current core registers SCWs only
+  // on the project-scoped route (the unscoped legacy route no longer exists),
+  // so an empty project id would burn the deploy gas and then fail to
+  // register the wallet with PayRam.
+  const projectId = (process.env.PAYRAM_PROJECT_ID || '').trim();
+  if (!projectId) {
+    console.error(
+      'PAYRAM_PROJECT_ID is not set - refusing to deploy. The tx would spend gas on-chain but SCW registration with PayRam would fail. Set PAYRAM_PROJECT_ID (the script normally resolves it via get_first_project_id) and retry.'
+    );
+    process.exit(1);
+  }
+
   // 3) Salt bytes32 (same idea as frontend: keccak256 of random)
   const salt = ethers.keccak256(ethers.toUtf8Bytes(`${Date.now()}-${Math.random().toString(36).slice(2)}`));
 
@@ -143,17 +155,15 @@ async function main() {
   // 5) Register with backend. The route moved across core versions:
   //    current core:  POST /api/v1/project/{projectID}/wallets/deposit/scw/blockchains_contract/{id}
   //    older images:  POST /api/v1/wallets/deposit/scw/blockchains_contract/{id}
-  //    Body ({name, transactionHash}) is the same in both. Try the
-  //    project-scoped path when we know the project, fall back to legacy on
-  //    404/405 so the script works against whichever image is deployed.
-  const projectId = (process.env.PAYRAM_PROJECT_ID || '').trim();
+  //    Body ({name, transactionHash}) is the same in both. projectId was
+  //    validated before the deploy tx, so the scoped path is always first;
+  //    legacy stays as a 404/405 fallback for older images.
   const registerBody = JSON.stringify({ name: PAYRAM_SCW_NAME, transactionHash: txHash });
   const registerHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
-  const candidates = [];
-  if (projectId) {
-    candidates.push(`${PAYRAM_API_URL}/api/v1/project/${projectId}/wallets/deposit/scw/blockchains_contract/${factoryId}`);
-  }
-  candidates.push(`${PAYRAM_API_URL}/api/v1/wallets/deposit/scw/blockchains_contract/${factoryId}`);
+  const candidates = [
+    `${PAYRAM_API_URL}/api/v1/project/${projectId}/wallets/deposit/scw/blockchains_contract/${factoryId}`,
+    `${PAYRAM_API_URL}/api/v1/wallets/deposit/scw/blockchains_contract/${factoryId}`,
+  ];
 
   // candidates always has at least the legacy URL, so registerRes is always set.
   let registerRes;
