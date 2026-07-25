@@ -1270,11 +1270,37 @@ cmd_signin() {
 ensure_config() {
 	ensure_token || return 1
 	local base_url="${PAYRAM_API_URL}"
+	local res
+	# Current cores keep ONE canonical server URL (payram.server.url), set via
+	# /system/site-url; the old payram.frontend/payram.backend keys are
+	# hard-deleted on boot, so writing them is a silent no-op and payment-link
+	# creation 500s while payram.server.url is unset. GET always returns 200,
+	# with {"siteUrl":null} when the key is absent.
+	res=$(api GET "/api/v1/system/site-url" "" true)
+	parse_response "$res"
+	if [[ "$HTTP_CODE" == "200" ]]; then
+		if echo "$HTTP_BODY" | grep -q '"siteUrl":[[:space:]]*null'; then
+			# POST takes no URL — core derives the origin from THIS request.
+			# Only the scheme is accepted in the body; pass it explicitly so
+			# an https install behind a proxy is not downgraded to http.
+			local scheme="http"
+			[[ "$base_url" == https://* ]] && scheme="https"
+			res=$(api POST "/api/v1/system/site-url" "{\"scheme\":\"$scheme\"}" true)
+			parse_response "$res"
+			case "$HTTP_CODE" in
+				200) echo "Set server URL (payram.server.url) from ${base_url}" ;;
+				403) echo "Server URL is unset and this token is not root — sign in as the root member and re-run ensure-config, or payment-link creation will fail." ;;
+				*) echo "Warning: could not set server URL (HTTP $HTTP_CODE) — payment-link creation may fail until it is set." ;;
+			esac
+		fi
+		return 0
+	fi
+	# Older cores (no /system/site-url): fall back to the legacy split keys,
+	# which only ever mattered on localhost installs.
 	local frontend_url="${PAYRAM_FRONTEND_URL:-http://localhost}"
 	if [[ "$base_url" != *"localhost"* && "$base_url" != *"127.0.0.1"* ]]; then
 		return 0
 	fi
-	local res
 	res=$(api GET "/api/v1/configuration/key/payram.frontend" "" true)
 	parse_response "$res"
 	if [[ "$HTTP_CODE" == "404" || "$HTTP_CODE" == "500" ]] || ! echo "$HTTP_BODY" | grep -q '"key"'; then
