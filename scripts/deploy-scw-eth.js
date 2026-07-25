@@ -88,8 +88,10 @@ async function main() {
   const factoryAddress = factoryData.address;
   const factoryId = factoryData.id;
   const abi = typeof factoryData.abi === 'string' ? JSON.parse(factoryData.abi) : factoryData.abi;
-  if (!factoryAddress || !abi) {
-    console.error('Factory contract missing address or abi');
+  // factoryId is part of the registration URL after the deploy tx — validate
+  // it here so a malformed response can't burn gas and then POST to /undefined.
+  if (!factoryAddress || !abi || factoryId == null || String(factoryId).trim() === '') {
+    console.error('Factory contract missing address, abi, or id');
     process.exit(1);
   }
   console.log('Factory contract OK:', factoryAddress);
