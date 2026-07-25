@@ -1300,8 +1300,8 @@ ensure_config() {
 			parse_response "$res"
 			case "$HTTP_CODE" in
 				200) echo "Set server URL (payram.server.url) from ${base_url}" ;;
-				403) echo "Server URL is unset and this token is not root — sign in as the root member and re-run ensure-config, or payment-link creation will fail." ;;
-				*) echo "Warning: could not set server URL (HTTP $HTTP_CODE) — payment-link creation may fail until it is set." ;;
+				403) echo "Server URL is unset and this token is not root — sign in as the root member and re-run ensure-config, or payment-link creation will fail." ; return 1 ;;
+				*) echo "Warning: could not set server URL (HTTP $HTTP_CODE) — payment-link creation may fail until it is set." ; return 1 ;;
 			esac
 		fi
 		return 0
@@ -2646,7 +2646,9 @@ flow_main() {
 	fi
 
 	log "Ensuring config..."
-	ensure_config
+	# Tolerated failure: the rest of the flow (wallets, gas) is still useful;
+	# ensure_config already printed why payment-link creation would fail.
+	ensure_config || log "Config warning: server URL not set — payment-link creation may fail (see above)."
 
 	if [[ "$setup_mode" == "operator" ]]; then
 		log "Operator lane: configuring fee collectors + default fees..."
