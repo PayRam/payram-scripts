@@ -1,6 +1,10 @@
 # PayRam Self-Hosted Crypto Payment Gateway
 
-Choose one of two paths:
+☁️ **Deploy on DigitalOcean** — no terminal needed, spins up a preconfigured droplet:
+
+[![Create a Droplet with PayRam](assets/do-btn-blue.svg)](https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&action=deploy)
+
+Or install onto a server you already have:
 
 - **Standard setup** (full install + UI)
 - **Agent setup** (single CLI flow for AI agents automation)
@@ -61,25 +65,33 @@ PayRam is a **self-hosted cryptocurrency payment gateway** that enables business
 
 ## 🚀 Quick Start
 
-### Option 1: Direct Install (Recommended)
+### Option 1: DigitalOcean 1-Click Droplet (Easiest)
+
+No terminal required — deploy PayRam from the DigitalOcean Marketplace and DigitalOcean provisions the droplet for you.
+
+[![Create a Droplet with PayRam](assets/do-btn-blue.svg)](https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&action=deploy)
+
+Marketplace listing: <https://marketplace.digitalocean.com/apps/payram>
+
+### Option 2: Direct Install (Recommended for existing servers)
 ```bash
 bash <(curl -fsSL https://payram.com/setup_payram.sh)
 ```
 
-### Option 2: One-Line with Arguments
+### Option 3: One-Line with Arguments
 ```bash
 # If the script asks for root privileges, rerun with sudo at the beginning
 sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --update'
 ```
 
-### Option 3: Download and Run
+### Option 4: Download and Run
 ```bash
 curl -O https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh
 chmod +x setup_payram.sh
 sudo ./setup_payram.sh
 ```
 
-### Option 4: Clone Repository
+### Option 5: Clone Repository
 ```bash
 git clone https://github.com/PayRam/payram-scripts.git
 cd payram-scripts
