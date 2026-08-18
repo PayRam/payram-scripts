@@ -1,6 +1,6 @@
 # PayRam Self-Hosted Crypto Payment Gateway
 
-☁️ **Deploy on DigitalOcean** — no terminal needed, spins up a preconfigured droplet:
+☁️ **Deploy on DigitalOcean** — 1-click deploy, no terminal needed. PayRam comes preinstalled on the droplet:
 
 <p align="center">
   <a href="https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&amp;action=deploy">
@@ -71,7 +71,8 @@ PayRam is a **self-hosted cryptocurrency payment gateway** that enables business
 
 ### Option 1: DigitalOcean 1-Click Droplet (Easiest)
 
-No terminal required — deploy PayRam from the DigitalOcean Marketplace and DigitalOcean provisions the droplet for you.
+The quickest way to get PayRam running. DigitalOcean provisions a droplet with
+PayRam already installed — nothing to compile, configure, or paste into a terminal.
 
 <p align="center">
   <a href="https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&amp;action=deploy">
@@ -79,7 +80,16 @@ No terminal required — deploy PayRam from the DigitalOcean Marketplace and Dig
   </a>
 </p>
 
-Marketplace listing: <https://marketplace.digitalocean.com/apps/payram>
+**What the 1-click deploy does:**
+
+- **Click the button above** — it opens the PayRam listing on the DigitalOcean Marketplace, then takes you to the droplet create page with the PayRam image already selected.
+- **Choose a region and plan**, then click *Create Droplet*. That is the whole install — no setup script, no SSH, no manual Docker steps.
+- **Give it 5-10 minutes.** On first boot the droplet pulls the PayRam Docker image and starts the service, so the dashboard is not reachable the instant the droplet turns green.
+- **Open `http://<your_droplet_ip>`** in a browser to reach the PayRam dashboard.
+- **Want shell access?** `ssh root@<your_droplet_ip>` — optional, only if you need it.
+- **Finish setup** with the [PayRam onboarding guide](https://docs.payram.com/onboarding-guide/introduction).
+
+Runs on Ubuntu 24.04 LTS. Marketplace listing: <https://marketplace.digitalocean.com/apps/payram>
 
 ### Option 2: Direct Install (Recommended for existing servers)
 ```bash
