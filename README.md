@@ -2,7 +2,11 @@
 
 ☁️ **Deploy on DigitalOcean** — no terminal needed, spins up a preconfigured droplet:
 
-[![Deploy PayRam on DigitalOcean](assets/do-logo-horizontal-blue.svg)](https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&action=deploy)
+<p align="center">
+  <a href="https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&amp;action=deploy">
+    <img src="assets/do-logo-horizontal-blue.svg" alt="Deploy PayRam on DigitalOcean" width="200">
+  </a>
+</p>
 
 Or install onto a server you already have:
 
@@ -69,7 +73,11 @@ PayRam is a **self-hosted cryptocurrency payment gateway** that enables business
 
 No terminal required — deploy PayRam from the DigitalOcean Marketplace and DigitalOcean provisions the droplet for you.
 
-[![Deploy PayRam on DigitalOcean](assets/do-logo-horizontal-blue.svg)](https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&action=deploy)
+<p align="center">
+  <a href="https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&amp;action=deploy">
+    <img src="assets/do-logo-horizontal-blue.svg" alt="Deploy PayRam on DigitalOcean" width="200">
+  </a>
+</p>
 
 Marketplace listing: <https://marketplace.digitalocean.com/apps/payram>
 
