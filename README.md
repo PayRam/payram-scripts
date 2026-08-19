@@ -1,6 +1,18 @@
 # PayRam Self-Hosted Crypto Payment Gateway
 
-Choose one of two paths:
+☁️ **Deploy on DigitalOcean** — 1-click deploy, no terminal needed. PayRam comes preinstalled on the droplet:
+
+<p align="center">
+  <a href="https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&amp;action=deploy">
+    <img src="assets/do-logo-horizontal-blue.svg" alt="Deploy PayRam on DigitalOcean" width="200">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://docs.payram.com/deployment-guide/digitalocean-1-click">DigitalOcean 1-Click deployment guide</a>
+</p>
+
+Or install onto a server you already have:
 
 - **Standard setup** (full install + UI)
 - **Agent setup** (single CLI flow for AI agents automation)
@@ -61,25 +73,49 @@ PayRam is a **self-hosted cryptocurrency payment gateway** that enables business
 
 ## 🚀 Quick Start
 
-### Option 1: Direct Install (Recommended)
+### Option 1: DigitalOcean 1-Click Droplet (Easiest)
+
+The quickest way to get PayRam running. DigitalOcean provisions a droplet with
+PayRam already installed — nothing to compile, configure, or paste into a terminal.
+
+<p align="center">
+  <a href="https://marketplace.digitalocean.com/apps/payram?refcode=908d23f4758a&amp;action=deploy">
+    <img src="assets/do-logo-horizontal-blue.svg" alt="Deploy PayRam on DigitalOcean" width="200">
+  </a>
+</p>
+
+**What the 1-click deploy does:**
+
+- **Click the button above** — it opens the PayRam listing on the DigitalOcean Marketplace, then takes you to the droplet create page with the PayRam image already selected.
+- **Choose a region and plan**, then click *Create Droplet*. That is the whole install — no setup script, no SSH, no manual Docker steps.
+- **Give it 5-10 minutes.** On first boot the droplet pulls the PayRam Docker image and starts the service, so the dashboard is not reachable the instant the droplet turns green.
+- **Open `http://<your_droplet_ip>`** in a browser to reach the PayRam dashboard.
+- **Want shell access?** `ssh root@<your_droplet_ip>` — optional, only if you need it.
+- **Finish setup** with the [PayRam onboarding guide](https://docs.payram.com/onboarding-guide/introduction).
+
+Full walkthrough: **[DigitalOcean 1-Click deployment guide](https://docs.payram.com/deployment-guide/digitalocean-1-click)**
+
+Runs on Ubuntu 24.04 LTS. Marketplace listing: <https://marketplace.digitalocean.com/apps/payram>
+
+### Option 2: Direct Install (Recommended for existing servers)
 ```bash
 bash <(curl -fsSL https://payram.com/setup_payram.sh)
 ```
 
-### Option 2: One-Line with Arguments
+### Option 3: One-Line with Arguments
 ```bash
 # If the script asks for root privileges, rerun with sudo at the beginning
 sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --update'
 ```
 
-### Option 3: Download and Run
+### Option 4: Download and Run
 ```bash
 curl -O https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram.sh
 chmod +x setup_payram.sh
 sudo ./setup_payram.sh
 ```
 
-### Option 4: Clone Repository
+### Option 5: Clone Repository
 ```bash
 git clone https://github.com/PayRam/payram-scripts.git
 cd payram-scripts
@@ -129,27 +165,18 @@ sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --tag=latest
 sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --reset'
 ```
 
-### Environment Variables
-
-```bash
-# Specify Docker image tag
-PAYRAM_TAG=latest sudo ./setup_payram.sh
-
-# Skip interactive prompts (use defaults)
-PAYRAM_AUTO=true sudo ./setup_payram.sh
-```
-
 ## 📋 Requirements
 
 ### System Requirements
-- **OS**: Ubuntu 18.04+, Debian 9+, CentOS 7+, RHEL 7+, Fedora 30+, Arch Linux, Alpine Linux, macOS 10.14+
-- **RAM**: 2GB minimum, 4GB recommended
-- **Storage**: 5GB minimum, 10GB recommended
+- **CPU**: 2 cores
+- **RAM**: 4 GB
+- **Storage**: 50 GB SSD — the installer refuses to continue below 5 GB free and recommends 10 GB
+- **OS**: Ubuntu 22.04, or another supported distribution — Debian, CentOS, RHEL, Fedora, Arch, Alpine, macOS
 - **Network**: Internet connection for Docker images and dependencies
 
 ### Automatic Dependencies
 The script automatically installs:
-- Docker & Docker Compose
+- Docker
 - PostgreSQL client tools
 - SSL certificate utilities
 - Required system packages
@@ -197,8 +224,8 @@ The script automatically installs:
 └── ssl/                         # SSL certificates
 
 /home/$USER/.payram-core/         # Application data
-├── data/                        # Persistent application data
-└── logs/                        # Application logs
+├── db/postgres/                 # Internal database storage
+└── log/supervisord/             # Application logs
 ```
 
 ## 🚨 Troubleshooting
@@ -225,9 +252,9 @@ sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh)'
 docker --version
 ```
 
-**Port Conflicts**: Check if ports 80, 443, 8080, 8443 are available
+**Port Conflicts**: PayRam publishes port 80, plus 443 when TLS terminates in the container. Check both are free:
 ```bash
-sudo netstat -tlnp | grep ':80\|:443\|:8080\|:8443'
+sudo lsof -i :80 -i :443
 ```
 
 **SSL Certificate Issues**: Verify domain DNS points to your server
@@ -236,9 +263,9 @@ dig +short yourdomain.com
 ```
 
 ### Log Files
-- **Setup Log**: `/tmp/payram-setup.log`
-- **Application Logs**: `/home/$USER/.payram-core/logs/`
-- **Docker Logs**: `docker logs payram-core`
+- **Setup Log**: `/tmp/payram-setup.log` (falls back to `$HOME/payram-setup.log` if `/tmp` is not writable)
+- **Application Logs**: `~/.payram-core/log/supervisord/`
+- **Docker Logs**: `docker logs payram`
 
 
 ## 🤖 Agent / Headless CLI
