@@ -8,6 +8,10 @@
   </a>
 </p>
 
+<p align="center">
+  <a href="https://docs.payram.com/deployment-guide/digitalocean-1-click">DigitalOcean 1-Click deployment guide</a>
+</p>
+
 Or install onto a server you already have:
 
 - **Standard setup** (full install + UI)
@@ -88,6 +92,8 @@ PayRam already installed — nothing to compile, configure, or paste into a term
 - **Open `http://<your_droplet_ip>`** in a browser to reach the PayRam dashboard.
 - **Want shell access?** `ssh root@<your_droplet_ip>` — optional, only if you need it.
 - **Finish setup** with the [PayRam onboarding guide](https://docs.payram.com/onboarding-guide/introduction).
+
+Full walkthrough: **[DigitalOcean 1-Click deployment guide](https://docs.payram.com/deployment-guide/digitalocean-1-click)**
 
 Runs on Ubuntu 24.04 LTS. Marketplace listing: <https://marketplace.digitalocean.com/apps/payram>
 
