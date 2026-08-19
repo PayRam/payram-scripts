@@ -165,27 +165,18 @@ sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --tag=latest
 sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh) --reset'
 ```
 
-### Environment Variables
-
-```bash
-# Specify Docker image tag
-PAYRAM_TAG=latest sudo ./setup_payram.sh
-
-# Skip interactive prompts (use defaults)
-PAYRAM_AUTO=true sudo ./setup_payram.sh
-```
-
 ## 📋 Requirements
 
 ### System Requirements
-- **OS**: Ubuntu 18.04+, Debian 9+, CentOS 7+, RHEL 7+, Fedora 30+, Arch Linux, Alpine Linux, macOS 10.14+
-- **RAM**: 2GB minimum, 4GB recommended
-- **Storage**: 5GB minimum, 10GB recommended
+- **CPU**: 2 cores
+- **RAM**: 4 GB
+- **Storage**: 50 GB SSD — the installer refuses to continue below 5 GB free and recommends 10 GB
+- **OS**: Ubuntu 22.04, or another supported distribution — Debian, CentOS, RHEL, Fedora, Arch, Alpine, macOS
 - **Network**: Internet connection for Docker images and dependencies
 
 ### Automatic Dependencies
 The script automatically installs:
-- Docker & Docker Compose
+- Docker
 - PostgreSQL client tools
 - SSL certificate utilities
 - Required system packages
@@ -233,8 +224,8 @@ The script automatically installs:
 └── ssl/                         # SSL certificates
 
 /home/$USER/.payram-core/         # Application data
-├── data/                        # Persistent application data
-└── logs/                        # Application logs
+├── db/postgres/                 # Internal database storage
+└── log/supervisord/             # Application logs
 ```
 
 ## 🚨 Troubleshooting
@@ -261,9 +252,9 @@ sudo bash -c 'bash <(curl -fsSL https://payram.com/setup_payram.sh)'
 docker --version
 ```
 
-**Port Conflicts**: Check if ports 80, 443, 8080, 8443 are available
+**Port Conflicts**: PayRam publishes port 80, plus 443 when TLS terminates in the container. Check both are free:
 ```bash
-sudo netstat -tlnp | grep ':80\|:443\|:8080\|:8443'
+sudo lsof -i :80 -i :443
 ```
 
 **SSL Certificate Issues**: Verify domain DNS points to your server
@@ -272,9 +263,9 @@ dig +short yourdomain.com
 ```
 
 ### Log Files
-- **Setup Log**: `/tmp/payram-setup.log`
-- **Application Logs**: `/home/$USER/.payram-core/logs/`
-- **Docker Logs**: `docker logs payram-core`
+- **Setup Log**: `/tmp/payram-setup.log` (falls back to `$HOME/payram-setup.log` if `/tmp` is not writable)
+- **Application Logs**: `~/.payram-core/log/supervisord/`
+- **Docker Logs**: `docker logs payram`
 
 
 ## 🤖 Agent / Headless CLI
