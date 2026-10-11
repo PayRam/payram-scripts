@@ -137,9 +137,18 @@ load_env() {
 set_env() {
   local var="$1" val="$2"
   if grep -q "^${var}=" "$ENV_FILE" 2>/dev/null; then
-    sed -i "s|^${var}=.*|${var}=${val}|" "$ENV_FILE"
+    local escaped_val tmp
+    escaped_val=$(printf '%s\n' "$val" | sed 's/[\\&|]/\\&/g')
+    tmp=$(mktemp "${ENV_FILE}.tmp.XXXXXX") || return 1
+    # BSD and GNU sed disagree on -i; write a temporary copy instead.
+    if ! cp -p "$ENV_FILE" "$tmp" || \
+       ! sed "s|^${var}=.*|${var}=${escaped_val}|" "$ENV_FILE" > "$tmp" || \
+       ! mv "$tmp" "$ENV_FILE"; then
+      rm -f "$tmp"
+      return 1
+    fi
   else
-    echo "${var}=${val}" >> "$ENV_FILE"
+    printf '%s=%s\n' "$var" "$val" >> "$ENV_FILE"
   fi
   export "${var}=${val}"
 }
@@ -356,7 +365,10 @@ if [ -z "${SHOPIFY_STORE_DOMAIN:-}" ]; then
     sh -c 'timeout 20 npx shopify store list 2>/dev/null || true' 2>/dev/null || true)
 
   # Extract .myshopify.com domains from CLI table output
-  mapfile -t STORES_ARRAY < <(echo "$STORES_RAW" | grep -oE '[a-zA-Z0-9-]+\.myshopify\.com' | sort -u)
+  STORES_ARRAY=()
+  while IFS= read -r store; do
+    STORES_ARRAY+=("$store")
+  done < <(printf '%s\n' "$STORES_RAW" | grep -oE '[a-zA-Z0-9-]+\.myshopify\.com' | sort -u)
 
   store_domain_input=""
 
