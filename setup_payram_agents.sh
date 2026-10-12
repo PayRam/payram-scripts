@@ -226,7 +226,11 @@ load_install_config() {
 	local tok host cont http_port="" https_port=""
 	for tok in $retained_ports; do
 		tok="${tok%%/*}"
-		host="${tok%%:*}"
+		# Strip protocol suffix already handled above; drop container port, then
+		# take the last remaining field so bind-IP mappings (127.0.0.1:8080:80,
+		# [::1]:8080:80) yield the host port, not the IP or a truncated bracket.
+		host="${tok%:*}"
+		host="${host##*:}"
 		cont="${tok##*:}"
 		[[ "$cont" == "80" && -z "$http_port" ]] && http_port="$host"
 		[[ "$cont" == "443" && -z "$https_port" ]] && https_port="$host"
