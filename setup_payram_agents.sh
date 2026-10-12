@@ -225,9 +225,15 @@ load_install_config() {
 	# http on whatever host port maps to container port 80.
 	local tok host cont http_port="" https_port=""
 	for tok in $retained_ports; do
+		# Strip the optional /tcp protocol suffix (e.g. "80:80/tcp").
 		tok="${tok%%/*}"
-		host="${tok%%:*}"
+		# Container port is always the last colon-delimited field.
 		cont="${tok##*:}"
+		# RETAINED_PORTS entries are either "host:cont" or "ip:host:cont".
+		# Strip the container port, then take the LAST remaining field —
+		# that is the host port whether or not a bind IP is present.
+		host="${tok%:*}"
+		host="${host##*:}"
 		[[ "$cont" == "80" && -z "$http_port" ]] && http_port="$host"
 		[[ "$cont" == "443" && -z "$https_port" ]] && https_port="$host"
 	done
