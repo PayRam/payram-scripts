@@ -1056,18 +1056,21 @@ if age>$threshold:
 elif age>=0:
     print('healthy block-age=%ds' % age)
 else:
-    print('healthy no-timestamp')" 2>/dev/null || echo "unreachable parse-failed") || true
+    print('unknown no-parseable-block-timestamp')" 2>/dev/null || echo "unreachable parse-failed") || true
 		fi
 		# Only assert listener-down when worker status was actually available.
 		[[ "$workers_available" == "yes" && "$verdict" == "healthy" && "$listener_up" == "no" ]] && verdict="listener-down"
 		[[ "$workers_available" == "no" ]] && listener_up="unknown"
 
 		local flag="✓"
-		[[ "$verdict" == "lagging" ]] && flag="⚠"
+		[[ "$verdict" == "lagging" || "$verdict" == "unknown" ]] && flag="⚠"
 		[[ "$verdict" == "unreachable" || "$verdict" == "listener-down" ]] && flag="✗"
 		printf '  %s %-9s %-13s %s listener:%s\n' "$flag" "$chain" "$verdict" "${detail:-}" "$listener_up"
 
-		if [[ "$verdict" == "lagging" || "$verdict" == "listener-down" ]]; then
+		if [[ "$verdict" == "unknown" ]]; then
+			issues=$((issues + 1))
+			echo "      -> connected RPC reported no parseable block time; chain freshness cannot be verified."
+		elif [[ "$verdict" == "lagging" || "$verdict" == "listener-down" ]]; then
 			issues=$((issues + 1))
 			echo "      -> node may be lagging or not syncing; deposits on $chain are delayed."
 			echo "         Remediation: $0 node-restart $chain   (then re-run: $0 node-status after ~60s)"
