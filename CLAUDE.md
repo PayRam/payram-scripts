@@ -50,7 +50,7 @@ sudo ./setup_payram.sh --reset            # must type DELETE to confirm
 ./setup_payram_agents.sh status|signin|ensure-config|ensure-wallet|deploy-scw|create-payment-link
 
 # Node helpers (run from repo root; deps live in scripts/)
-cd scripts && npm install && cd ..
+cd scripts && npm ci && cd ..
 node scripts/generate-deposit-wallet.js       # BTC xpub  (m/44'/0'/0')  -> {mnemonic, xpub}
 node scripts/generate-deposit-wallet-eth.js   # ETH xpub  (m/44'/60'/0') -> {mnemonic, xpub}
 node scripts/deploy-scw-eth.js                # deploy + register one EVM SCW deposit wallet
