@@ -1767,8 +1767,8 @@ validate_docker_tag() {
 # host port. That choice is captured in PRIMARY_PORT_MAPPING at install time.
 #
 # An existing install being UPDATED may also have extra/legacy ports
-# published on its container (e.g. 8080, 8443, 5432, or operator-added
-# custom ports). Recreating the container would silently drop those, so
+# published on its container (e.g. 8080, 8443, or operator-added custom
+# ports). Recreating the container would silently drop those, so
 # we detect whatever the live container already publishes, union it with
 # the install-time mapping, and persist the result (RETAINED_PORTS) so it
 # is kept on every future update — even after the original container is
@@ -1786,7 +1786,17 @@ PRIMARY_PORT_MAPPING=""
 # historical production port set so an existing deployment is never
 # updated into having fewer ports than it had. Never reached on a fresh
 # install, where PRIMARY_PORT_MAPPING is always set.
-LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443" "5432:5432")
+# 5432 is left out on purpose: see DATABASE_CONTAINER_PORT below.
+LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443")
+
+# The bundled PostgreSQL's port inside the container. Installs made before
+# 28 May 2026 published it on every interface, and the bundled database
+# accepted the shared default password from anywhere, so the payments
+# database was open to the internet. Nothing outside the container needs
+# it (backups use `docker exec payram pg_dump`), and current payram-core
+# images only let it listen on localhost inside the container, so updates
+# drop any mapping to it instead of carrying it forward.
+DATABASE_CONTAINER_PORT="5432"
 
 # Decide the install-time host port mapping based on where TLS terminates.
 # This keys off SSL_CERT_PATH (NOT SSL_MODE): certbot and custom certs both
@@ -1868,7 +1878,7 @@ detect_container_published_ports() {
 # updates. MUST be called BEFORE the existing container is removed
 # (docker rm), otherwise detection finds nothing.
 build_publish_args() {
-  local token seen=" "
+  local token container_port seen=" "
   local all=() retained=()
   PUBLISH_ARGS=()
   RETAINED_PORTS="${RETAINED_PORTS:-}"
@@ -1884,6 +1894,14 @@ build_publish_args() {
   # ${all[@]+...} guard: iterating an empty array under `set -u` errors on
   # bash < 4.4 (incl. macOS bash 3.2). Expands to nothing when empty.
   for token in ${all[@]+"${all[@]}"}; do
+    # Container port = last ":" field, without a "/proto" suffix, whether
+    # the token is "5432:5432", "127.0.0.1:5432:5432" or "15432:5432/tcp".
+    container_port="${token##*:}"
+    container_port="${container_port%%/*}"
+    if [[ "$container_port" == "$DATABASE_CONTAINER_PORT" ]]; then
+      log "WARN" "No longer publishing $token: the PayRam database is only reachable from inside the container"
+      continue
+    fi
     case "$seen" in
       *" $token "*) ;;
       *)
