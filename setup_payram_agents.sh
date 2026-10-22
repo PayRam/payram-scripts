@@ -67,7 +67,7 @@ Env vars:
 	PAYRAM_ETH_RPC_URL, PAYRAM_FUND_COLLECTOR, PAYRAM_SCW_NAME, PAYRAM_BLOCKCHAIN_CODE, PAYRAM_MNEMONIC
 	PAYRAM_FORCE_DEPLOY=1 (deploy another SCW even if one is already linked)
 	PAYRAM_ACCEPT_MAINNET_COSTS=1 (required for non-interactive mainnet SCW deploy)
-	PAYRAM_NODE_DOCKER_IMAGE (default node:20-bullseye-slim)
+	PAYRAM_NODE_DOCKER_IMAGE (default node:26.12.1-trixie-slim)
 	PAYRAM_SCRIPTS_REF (default main)
 	PAYRAM_MCP_VERSION (default v1.1.0)
 	PAYRAM_MCP_PORT (default 3333)
@@ -846,14 +846,16 @@ run_npm_install() {
 		local uid gid
 		uid=$(id -u)
 		gid=$(id -g)
-		docker run --rm -i -u "${uid}:${gid}" -v "${workdir}:/work" -w /work \
-			"$PAYRAM_NODE_DOCKER_IMAGE" npm install --silent
+		# npm's cache goes in /tmp: a non-root user has no writable home in
+		# the container, and npm would stop with EACCES on /.npm.
+		docker run --rm -i -u "${uid}:${gid}" -v "${workdir}:/work" -w /work -e npm_config_cache=/tmp/.npm \
+			"$PAYRAM_NODE_DOCKER_IMAGE" npm ci --silent
 	else
 		if ! command -v npm >/dev/null 2>&1; then
 			echo "npm is required to install wallet generator dependencies."
 			return 1
 		fi
-		(cd "$workdir" && npm install --silent)
+		(cd "$workdir" && npm ci --silent)
 	fi
 }
 
@@ -2824,7 +2826,7 @@ main() {
 	export LOG_FILE="${LOG_FILE:-${WORK_DIR}/.payram-setup.log}"
 	export PAYRAM_API_URL="${PAYRAM_API_URL:-$DERIVED_API_URL}"
 	export PAYRAM_NODE_MODE="${PAYRAM_NODE_MODE:-docker}"
-	export PAYRAM_NODE_DOCKER_IMAGE="${PAYRAM_NODE_DOCKER_IMAGE:-node:20-bullseye-slim}"
+	export PAYRAM_NODE_DOCKER_IMAGE="${PAYRAM_NODE_DOCKER_IMAGE:-node:26.12.1-trixie-slim}"
 	if [[ -z "${PAYRAM_NETWORK:-}" && -n "$INSTALL_NETWORK" ]]; then
 		export PAYRAM_NETWORK="$INSTALL_NETWORK"
 	fi
