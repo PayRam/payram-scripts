@@ -1133,6 +1133,35 @@ generate_compliant_password() {
 	echo "${core}Aa1!"
 }
 
+# Encode a Bash string as a JSON string without an extra runtime dependency.
+# Escape backslashes first, then quotes and every representable JSON control
+# character (Bash strings cannot contain NUL). Preserve UTF-8 bytes unchanged.
+json_string() {
+	local value="$1" character escaped code
+	value="${value//\\/\\\\}"
+	value="${value//\"/\\\"}"
+	for ((code=1; code<32; code++)); do
+		printf -v escaped '\\%03o' "$code"
+		printf -v character '%b' "$escaped"
+		printf -v escaped '\\u%04x' "$code"
+		value="${value//"$character"/"$escaped"}"
+	done
+	printf '"%s"' "$value"
+}
+
+auth_request_json() {
+	printf '{"email":%s,"password":%s}' "$(json_string "$1")" "$(json_string "$2")"
+}
+
+# The file is sourced by Bash on subsequent signins: use shell quoting, not
+# JSON quoting or double-quoted assignments that can expand password text.
+save_root_credentials() {
+	[[ -n "${CREDENTIALS_FILE:-}" ]] || return 0
+	mkdir -p "$(dirname "$CREDENTIALS_FILE")"
+	(umask 077; printf 'PAYRAM_EMAIL=%q\nPAYRAM_PASSWORD=%q\n' "$1" "$2" > "$CREDENTIALS_FILE")
+	chmod 600 "$CREDENTIALS_FILE"
+}
+
 # Zero-input credentials: when PAYRAM_EMAIL/PAYRAM_PASSWORD are not provided,
 # generate them (random password, local default email) and persist 600 next to
 # the auth tokens - both are changeable from the dashboard later, so this is
@@ -1162,11 +1191,7 @@ load_or_create_root_credentials() {
 		PAYRAM_PASSWORD="$(generate_compliant_password)"
 		export PAYRAM_PASSWORD
 	fi
-	if [[ -n "$CREDENTIALS_FILE" ]]; then
-		mkdir -p "$(dirname "$CREDENTIALS_FILE")"
-		printf 'PAYRAM_EMAIL="%s"\nPAYRAM_PASSWORD="%s"\n' "$PAYRAM_EMAIL" "$PAYRAM_PASSWORD" > "$CREDENTIALS_FILE"
-		chmod 600 "$CREDENTIALS_FILE"
-	fi
+	save_root_credentials "$PAYRAM_EMAIL" "$PAYRAM_PASSWORD"
 	echo "Root credentials auto-created (change anytime in the dashboard):"
 	echo "  email: $PAYRAM_EMAIL"
 	echo "  saved to: ${CREDENTIALS_FILE:-<not persisted>} (password inside, mode 600)"
@@ -1199,7 +1224,7 @@ cmd_setup() {
 		return 1
 	fi
 	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signup" \
-		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
+		-H "Content-Type: application/json" -d "$(auth_request_json "$email" "$password")")
 	body=$(echo "$res" | sed '$d')
 	code=$(echo "$res" | tail -1)
 	if [[ "$code" != "200" && "$code" != "201" ]]; then
@@ -1266,7 +1291,7 @@ cmd_signin() {
 	fi
 	local res
 	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
-		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
+		-H "Content-Type: application/json" -d "$(auth_request_json "$email" "$password")")
 	parse_response "$res"
 	if [[ "$HTTP_CODE" != "200" ]]; then
 		echo "Signin failed (HTTP $HTTP_CODE): $HTTP_BODY"
@@ -2262,7 +2287,7 @@ cmd_run() {
 			local password="${PAYRAM_PASSWORD:-}"
 			[[ -z "$password" ]] && read -s -p "Password: " password && echo
 			res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
-				-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
+				-H "Content-Type: application/json" -d "$(auth_request_json "$email" "$password")")
 			parse_response "$res"
 			if [[ "$HTTP_CODE" != "200" ]]; then
 				echo "Signin failed (HTTP $HTTP_CODE): $HTTP_BODY"
@@ -2296,7 +2321,7 @@ cmd_run() {
 			fi
 		done
 		res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signup" \
-			-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
+			-H "Content-Type: application/json" -d "$(auth_request_json "$email" "$password")")
 		parse_response "$res"
 		if [[ "$HTTP_CODE" != "200" && "$HTTP_CODE" != "201" ]]; then
 			echo "Signup failed (HTTP $HTTP_CODE): $HTTP_BODY"
@@ -2310,11 +2335,7 @@ cmd_run() {
 		save_tokens
 		# Persist the credentials (600) so later runs can sign in without
 		# re-asking - same file the headless flow uses.
-		if [[ -n "${CREDENTIALS_FILE:-}" ]]; then
-			mkdir -p "$(dirname "$CREDENTIALS_FILE")"
-			printf 'PAYRAM_EMAIL="%s"\nPAYRAM_PASSWORD="%s"\n' "$email" "$password" > "$CREDENTIALS_FILE"
-			chmod 600 "$CREDENTIALS_FILE"
-		fi
+		save_root_credentials "$email" "$password"
 		echo "Signed in as $email"
 		local project_name="${PAYRAM_PROJECT_NAME:-Default Project}"
 		read -p "Project name [$project_name]: " pn_in
