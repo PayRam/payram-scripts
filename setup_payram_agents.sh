@@ -67,7 +67,7 @@ Env vars:
 	PAYRAM_ETH_RPC_URL, PAYRAM_FUND_COLLECTOR, PAYRAM_SCW_NAME, PAYRAM_BLOCKCHAIN_CODE, PAYRAM_MNEMONIC
 	PAYRAM_FORCE_DEPLOY=1 (deploy another SCW even if one is already linked)
 	PAYRAM_ACCEPT_MAINNET_COSTS=1 (required for non-interactive mainnet SCW deploy)
-	PAYRAM_NODE_DOCKER_IMAGE (default node:20-bullseye-slim)
+	PAYRAM_NODE_DOCKER_IMAGE (default node:26.12.1-trixie-slim)
 	PAYRAM_SCRIPTS_REF (default main)
 	PAYRAM_MCP_VERSION (default v1.1.0)
 	PAYRAM_MCP_PORT (default 3333)
@@ -102,7 +102,7 @@ TEMP_DIR=""
 ORIG_DIR="$PWD"
 
 ensure_assets() {
-	if [[ -f "$ASSET_DIR/setup_payram.sh" && -f "$ASSET_DIR/scripts/package.json" && -f "$ASSET_DIR/scripts/deploy-scw-eth.js" ]]; then
+	if [[ -f "$ASSET_DIR/setup_payram.sh" && -f "$ASSET_DIR/scripts/package.json" && -f "$ASSET_DIR/scripts/package-lock.json" && -f "$ASSET_DIR/scripts/deploy-scw-eth.js" ]]; then
 		return 0
 	fi
 
@@ -114,6 +114,8 @@ ensure_assets() {
 
 	fetch_file "$base_url/setup_payram.sh" "$ASSET_DIR/setup_payram.sh"
 	fetch_file "$base_url/scripts/package.json" "$ASSET_DIR/scripts/package.json"
+	# npm ci installs exactly the locked wallet libraries, and refuses to run without the lockfile.
+	fetch_file "$base_url/scripts/package-lock.json" "$ASSET_DIR/scripts/package-lock.json"
 	fetch_file "$base_url/scripts/generate-deposit-wallet.js" "$ASSET_DIR/scripts/generate-deposit-wallet.js"
 	fetch_file "$base_url/scripts/generate-deposit-wallet-eth.js" "$ASSET_DIR/scripts/generate-deposit-wallet-eth.js"
 	fetch_file "$base_url/scripts/deploy-scw-eth.js" "$ASSET_DIR/scripts/deploy-scw-eth.js"
@@ -846,20 +848,27 @@ run_npm_install() {
 		local uid gid
 		uid=$(id -u)
 		gid=$(id -g)
-		docker run --rm -i -u "${uid}:${gid}" -v "${workdir}:/work" -w /work \
-			"$PAYRAM_NODE_DOCKER_IMAGE" npm install --silent
+		# npm's cache goes in /tmp: a non-root user has no writable home in
+		# the container, and npm would stop with EACCES on /.npm.
+		docker run --rm -i -u "${uid}:${gid}" -v "${workdir}:/work" -w /work -e npm_config_cache=/tmp/.npm \
+			"$PAYRAM_NODE_DOCKER_IMAGE" npm ci --silent
 	else
 		if ! command -v npm >/dev/null 2>&1; then
 			echo "npm is required to install wallet generator dependencies."
 			return 1
 		fi
-		(cd "$workdir" && npm install --silent)
+		(cd "$workdir" && npm ci --silent)
 	fi
 }
 
+# A copy of the lockfile that node_modules was installed from. node_modules
+# alone proves nothing: an install that failed halfway leaves one behind, and a
+# clone keeps its old wallet libraries after the lockfile moves on.
+NODE_DEPS_STAMP=".payram-package-lock.json"
+
 ensure_node_deps() {
 	local workdir="$1"
-	if [[ -d "$workdir/node_modules" ]]; then
+	if [[ -d "$workdir/node_modules" ]] && cmp -s "$workdir/package-lock.json" "$workdir/node_modules/$NODE_DEPS_STAMP"; then
 		return 0
 	fi
 	if ! run_npm_install "$workdir"; then
@@ -870,6 +879,7 @@ ensure_node_deps() {
 		echo "Node.js dependencies are missing after install in $workdir"
 		return 1
 	fi
+	cp "$workdir/package-lock.json" "$workdir/node_modules/$NODE_DEPS_STAMP"
 	return 0
 }
 
@@ -2824,7 +2834,7 @@ main() {
 	export LOG_FILE="${LOG_FILE:-${WORK_DIR}/.payram-setup.log}"
 	export PAYRAM_API_URL="${PAYRAM_API_URL:-$DERIVED_API_URL}"
 	export PAYRAM_NODE_MODE="${PAYRAM_NODE_MODE:-docker}"
-	export PAYRAM_NODE_DOCKER_IMAGE="${PAYRAM_NODE_DOCKER_IMAGE:-node:20-bullseye-slim}"
+	export PAYRAM_NODE_DOCKER_IMAGE="${PAYRAM_NODE_DOCKER_IMAGE:-node:26.12.1-trixie-slim}"
 	if [[ -z "${PAYRAM_NETWORK:-}" && -n "$INSTALL_NETWORK" ]]; then
 		export PAYRAM_NETWORK="$INSTALL_NETWORK"
 	fi

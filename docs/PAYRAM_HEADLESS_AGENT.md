@@ -136,7 +136,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_FRONTEND_URL` | `http://localhost` | Used by ensure-config's legacy fallback only (older cores; current cores derive the URL from the request) |
 | `PAYRAM_NETWORK` | `mainnet` | One-step flow network selection (`mainnet` default - real payments; `testnet` to try with free coins) |
 | `PAYRAM_NODE_MODE` | `docker` | JS runtime: `docker` or `host` |
-| `PAYRAM_NODE_DOCKER_IMAGE` | `node:20-bullseye-slim` | Docker image used for JS scripts |
+| `PAYRAM_NODE_DOCKER_IMAGE` | `node:26.12.1-trixie-slim` | Docker image used for JS scripts |
 | **deploy-scw** | | |
 | `PAYRAM_ETH_RPC_URL` | `https://ethereum-sepolia-rpc.publicnode.com` | No API key needed. Placeholder values (e.g. YOUR_ACTUAL_ALCHEMY_KEY) are ignored and default used. |
 | `PAYRAM_FUND_COLLECTOR` | deployer address | Cold wallet 0x (40 hex). Omit or leave empty to use deployer address from mnemonic. |
