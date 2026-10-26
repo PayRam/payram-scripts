@@ -280,9 +280,10 @@ Three ways, lowest friction first:
 3. **MCP for app integration**: connect the PayRam MCP
    (`https://mcp.payram.com/mcp`, repo `payram-mcp`) — it generates payment
    routes/webhooks for your stack and can create payment links via
-   `POST /api/v1/payment` with the **merchant API key**. (The MCP server
-   started by this script is **analytics-only**; it does not create payment
-   links.)
+   `POST /api/v1/payment` with the **merchant API key**. (This script no
+   longer starts the separate analytics MCP server: it is retired, and a
+   built-in MCP in PayRam will replace it. Running the script stops one
+   that an earlier version started and deletes its files.)
 
 ## Merchant API key (the MCP/integration credential)
 
