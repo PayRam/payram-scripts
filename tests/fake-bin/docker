@@ -1,0 +1,132 @@
+#!/bin/bash
+# Stand-in for the docker CLI, used by tests/setup_payram_update_test.sh.
+# It models one container named "payram" and a set of local images as files
+# under $FAKE_DOCKER_STATE, and appends every call to $FAKE_DOCKER_STATE/calls.
+#
+#   container/image    image reference the container was created from
+#   container/ports    published "[ip:]host:container[/proto]" tokens, one per line
+#   container/running  present while the container runs
+#   images/<ref>       a local image; the file holds its ID
+#
+# Failure switches: FAKE_PULL_FAIL (pulls fail, like a Docker Hub rate limit),
+# FAKE_RUN_FAIL (the container is created but cannot start, like a taken port),
+# FAKE_RESTART_FAIL (restart/start fail).
+set -u
+st="${FAKE_DOCKER_STATE:?FAKE_DOCKER_STATE is not set}"
+ct="$st/container"
+mkdir -p "$st/images"
+echo "docker $*" >> "$st/calls"
+
+image_file() { printf '%s/images/%s' "$st" "$(printf '%s' "$1" | tr '/:@' '___')"; }
+image_id() { printf 'sha256:%s' "$(printf '%s' "$1" | cksum | cut -d' ' -f1)"; }
+last_arg() { local a=""; for a in "$@"; do :; done; printf '%s' "$a"; }
+format_arg() {
+  local a prev=""
+  for a in "$@"; do
+    case "$a" in --format=*) printf '%s' "${a#--format=}"; return 0 ;; esac
+    if [[ "$prev" == "--format" ]]; then printf '%s' "$a"; return 0; fi
+    prev="$a"
+  done
+}
+no_container() { echo "Error response from daemon: No such container: payram" >&2; exit 1; }
+
+case "${1:-}" in
+  inspect)
+    [[ -d "$ct" ]] || { echo "Error: No such object: payram" >&2; exit 1; }
+    fmt="$(format_arg "$@")"
+    case "$fmt" in
+      *Config.Image*) cat "$ct/image"; echo ;;
+      *PortBindings*) cat "$ct/ports" 2>/dev/null ;;
+      "") echo "[{}]" ;;
+    esac
+    exit 0 ;;
+  image)
+    [[ "${2:-}" == "inspect" ]] || exit 0
+    ref="$(last_arg "$@")"
+    f="$(image_file "$ref")"
+    [[ -f "$f" ]] || { echo "Error: No such image: $ref" >&2; exit 1; }
+    if [[ -n "$(format_arg "$@")" ]]; then cat "$f"; echo; else echo "[{}]"; fi
+    exit 0 ;;
+  images)
+    for f in "$st"/images/*; do [[ -f "$f" ]] && { cat "$f"; echo; }; done | sort -u
+    exit 0 ;;
+  rmi)
+    shift
+    for a in "$@"; do
+      [[ "$a" == -* ]] && continue
+      for f in "$st"/images/*; do
+        [[ -f "$f" ]] || continue
+        if [[ "$(cat "$f")" == "$a" || "$f" == "$(image_file "$a")" ]]; then rm -f "$f"; fi
+      done
+    done
+    exit 0 ;;
+  pull)
+    ref="$(last_arg "$@")"
+    if [[ -n "${FAKE_PULL_FAIL:-}" ]]; then
+      echo "Error response from daemon: toomanyrequests: You have reached your pull rate limit."
+      exit 1
+    fi
+    image_id "$ref" > "$(image_file "$ref")"
+    echo "Status: Downloaded newer image for $ref"
+    exit 0 ;;
+  ps)
+    case " $* " in
+      *status=running*) [[ -f "$ct/running" ]] && echo payram ;;
+      *" -a "*) [[ -d "$ct" ]] && echo payram ;;
+      *name=*) [[ -f "$ct/running" ]] && echo payram ;;
+    esac
+    exit 0 ;;
+  stop)
+    [[ -d "$ct" ]] || no_container
+    rm -f "$ct/running"; echo payram; exit 0 ;;
+  start|restart)
+    [[ -d "$ct" ]] || no_container
+    if [[ -n "${FAKE_RESTART_FAIL:-}" ]]; then
+      rm -f "$ct/running"
+      echo "Error response from daemon: failed to start container payram" >&2
+      exit 1
+    fi
+    touch "$ct/running"; echo payram; exit 0 ;;
+  rm)
+    [[ -d "$ct" ]] || no_container
+    if [[ -f "$ct/running" ]]; then
+      echo "Error response from daemon: cannot remove container payram: container is running" >&2
+      exit 1
+    fi
+    rm -rf "$ct"; exit 0 ;;
+  run)
+    if [[ -d "$ct" ]]; then
+      echo "docker: Error response from daemon: Conflict. The container name \"/payram\" is already in use." >&2
+      exit 125
+    fi
+    ref="$(last_arg "$@")"
+    if [[ ! -f "$(image_file "$ref")" ]]; then
+      # Real docker pulls a missing image on its own; record it so a test
+      # can tell that the script let that happen.
+      echo "docker run-implicit-pull $ref" >> "$st/calls"
+      if [[ -n "${FAKE_PULL_FAIL:-}" ]]; then
+        echo "docker: Error response from daemon: toomanyrequests." >&2
+        exit 125
+      fi
+      image_id "$ref" > "$(image_file "$ref")"
+    fi
+    mkdir -p "$ct"
+    printf '%s' "$ref" > "$ct/image"
+    : > "$ct/ports"
+    prev=""
+    for a in "$@"; do
+      [[ "$prev" == "--publish" ]] && printf '%s\n' "${a%/tcp}" >> "$ct/ports"
+      prev="$a"
+    done
+    echo "$*" > "$st/lastrun"
+    if [[ -n "${FAKE_RUN_FAIL:-}" ]]; then
+      echo "docker: Error response from daemon: Bind for 0.0.0.0:80 failed: port is already allocated." >&2
+      exit 125
+    fi
+    touch "$ct/running"
+    echo "0123456789ab"
+    exit 0 ;;
+  logs) echo "server started"; exit 0 ;;
+  exec) echo "  HTTP/1.1 200 OK" >&2; exit 0 ;;
+  *) exit 0 ;;
+esac
