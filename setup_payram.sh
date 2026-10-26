@@ -1767,8 +1767,8 @@ validate_docker_tag() {
 # host port. That choice is captured in PRIMARY_PORT_MAPPING at install time.
 #
 # An existing install being UPDATED may also have extra/legacy ports
-# published on its container (e.g. 8080, 8443, 5432, or operator-added
-# custom ports). Recreating the container would silently drop those, so
+# published on its container (e.g. 8080, 8443, or operator-added custom
+# ports). Recreating the container would silently drop those, so
 # we detect whatever the live container already publishes, union it with
 # the install-time mapping, and persist the result (RETAINED_PORTS) so it
 # is kept on every future update — even after the original container is
@@ -1786,7 +1786,35 @@ PRIMARY_PORT_MAPPING=""
 # historical production port set so an existing deployment is never
 # updated into having fewer ports than it had. Never reached on a fresh
 # install, where PRIMARY_PORT_MAPPING is always set.
-LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443" "5432:5432")
+# 5432 is left out on purpose: see DATABASE_CONTAINER_PORT below.
+LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443")
+
+# The bundled PostgreSQL's port inside the container. Installs made before
+# 28 May 2026 published it on every interface, and the bundled database
+# accepted the shared default password from anywhere, so the payments
+# database was open to the internet. Nothing outside the container needs
+# it (backups use `docker exec payram pg_dump`), and images released before
+# the bundled database was limited to localhost still accept that password
+# from anywhere, so updates drop any mapping to it instead of carrying it
+# forward.
+DATABASE_CONTAINER_PORT="5432"
+
+# True when a "[ip:]host:container[/proto]" token maps to the bundled
+# database: the container port is the last ":" field, without "/proto".
+is_database_mapping() {
+  local container_port="${1##*:}"
+  container_port="${container_port%%/*}"
+  [[ "$container_port" == "$DATABASE_CONTAINER_PORT" ]]
+}
+
+# True when the existing payram container publishes the database port.
+publishes_database_port() {
+  local token
+  while IFS= read -r token; do
+    is_database_mapping "$token" && return 0
+  done < <(detect_container_published_ports)
+  return 1
+}
 
 # Decide the install-time host port mapping based on where TLS terminates.
 # This keys off SSL_CERT_PATH (NOT SSL_MODE): certbot and custom certs both
@@ -1884,6 +1912,10 @@ build_publish_args() {
   # ${all[@]+...} guard: iterating an empty array under `set -u` errors on
   # bash < 4.4 (incl. macOS bash 3.2). Expands to nothing when empty.
   for token in ${all[@]+"${all[@]}"}; do
+    if is_database_mapping "$token"; then
+      log "WARN" "No longer publishing $token: the PayRam database is only reachable from inside the container"
+      continue
+    fi
     case "$seen" in
       *" $token "*) ;;
       *)
@@ -2280,13 +2312,18 @@ update_payram_container() {
   
   read -e -p "Press [Enter] to proceed with update..."
 
-  # If staying on the same tag, just restart — no pull/redeploy needed
+  # If staying on the same tag, just restart — no pull/redeploy needed.
+  # A restart keeps every published port, so a container that still
+  # publishes the database port is recreated instead, which drops it.
   if [[ "$IMAGE_TAG" == "$current_tag" ]]; then
-    log "INFO" "Same version selected — restarting container without re-pulling..."
-    docker restart payram
-    log "SUCCESS" "PayRam restarted on $IMAGE_TAG"
-    install_payram_updater
-    return 0
+    if ! publishes_database_port; then
+      log "INFO" "Same version selected — restarting container without re-pulling..."
+      docker restart payram
+      log "SUCCESS" "PayRam restarted on $IMAGE_TAG"
+      install_payram_updater
+      return 0
+    fi
+    log "INFO" "Same version selected, but the container still publishes the database port — recreating it without that port..."
   fi
 
   # Validate Docker tag BEFORE stopping container
