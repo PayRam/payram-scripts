@@ -1,0 +1,5 @@
+#!/bin/bash
+# Stand-in for df, used by the tests in this directory: always reports
+# 100 GB free so the disk-space prompt never consumes a test's keystrokes.
+echo "Filesystem 1K-blocks Used Available Use% Mounted on"
+echo "fake 209715200 104857600 104857600 50% /"

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Deployment & operations tooling for the **self-hosted PayRam crypto payment gateway**. It does **not** contain the gateway application — that ships as the `payramapp/payram` Docker image, built from other repos (`payram-core`, `payram-frontend`, …). Those repos are **read-only** from here; this repo only installs, configures, updates, and drives that image.
 
-Everything is shell + a little Node. There is no compiled app, no test suite, no package manager at the repo root.
+Everything is shell + a little Node. There is no compiled app and no package manager at the repo root. `tests/` holds shell tests that run the scripts' real functions against a stand-in `docker`/`curl` (`tests/fake-bin`).
 
 ## The three entrypoints
 
@@ -39,6 +39,10 @@ Consequences that shape every change:
 bash -n setup_payram.sh
 bash -n setup_payram_agents.sh
 bash -n setup_payram_shopify.sh
+
+# Update-path tests: no real container, image or network is touched.
+# Run as a regular user, on macOS bash 3.2 (/bin/bash) and on bash 5.
+bash tests/setup_payram_update_test.sh
 
 # Run the installer locally (root needed for system/Docker changes)
 sudo ./setup_payram.sh --testnet          # recommended for first run
