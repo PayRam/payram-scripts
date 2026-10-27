@@ -6,14 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Deployment & operations tooling for the **self-hosted PayRam crypto payment gateway**. It does **not** contain the gateway application — that ships as the `payramapp/payram` Docker image, built from other repos (`payram-core`, `payram-frontend`, …). Those repos are **read-only** from here; this repo only installs, configures, updates, and drives that image.
 
-Everything is shell + a little Node. There is no compiled app, no test suite, no package manager at the repo root.
+Everything is shell + a little Node. There is no compiled app and no package manager at the repo root. `tests/` holds shell tests that run the scripts' real functions against a stand-in `docker`/`curl` (`tests/fake-bin`).
 
 ## The three entrypoints
 
 | Script | Role |
 |--------|------|
 | `setup_payram.sh` (~4k lines) | Primary installer/updater for the full gateway (Docker + UI). Fresh install, `--update`, `--reset`, `--testnet`/`--mainnet`, `--tag=<ver>`. |
-| `setup_payram_agents.sh` | Headless CLI for AI agents / automation — installs *and* operates PayRam over its REST API (signin, config, wallet deploy, payment links, Analytics MCP server). Still in testing; not for regular clients. |
+| `setup_payram_agents.sh` | Headless CLI for AI agents / automation — installs *and* operates PayRam over its REST API (signin, config, wallet deploy, payment links). Still in testing; not for regular clients. |
 | `setup_payram_shopify.sh` | Optional add-on installer for the Shopify "Pay with Crypto" connector (Docker-only; handles Shopify CLI auth + deploys the checkout extension). |
 
 `scripts/` holds Node helpers the agent flow invokes; `updater-configs/` holds JSON read by the in-container self-updater; `docs/` documents the agent and Shopify flows.
@@ -40,6 +40,11 @@ bash -n setup_payram.sh
 bash -n setup_payram_agents.sh
 bash -n setup_payram_shopify.sh
 
+# Update-path and agent tests: no real container, image or network is touched.
+# Run as a regular user, on macOS bash 3.2 (/bin/bash) and on bash 5.
+bash tests/setup_payram_update_test.sh
+bash tests/setup_payram_agents_mcp_test.sh
+
 # Run the installer locally (root needed for system/Docker changes)
 sudo ./setup_payram.sh --testnet          # recommended for first run
 sudo ./setup_payram.sh --update --tag=vX.Y.Z
@@ -50,7 +55,7 @@ sudo ./setup_payram.sh --reset            # must type DELETE to confirm
 ./setup_payram_agents.sh status|signin|ensure-config|ensure-wallet|deploy-scw|create-payment-link
 
 # Node helpers (run from repo root; deps live in scripts/)
-cd scripts && npm install && cd ..
+cd scripts && npm ci && cd ..
 node scripts/generate-deposit-wallet.js       # BTC xpub  (m/44'/0'/0')  -> {mnemonic, xpub}
 node scripts/generate-deposit-wallet-eth.js   # ETH xpub  (m/44'/60'/0') -> {mnemonic, xpub}
 node scripts/deploy-scw-eth.js                # deploy + register one EVM SCW deposit wallet
@@ -64,12 +69,12 @@ No linter is configured. Manual testing across OS families is the expected valid
 Built around a **single OS-detection function** (`detect_system_info`) whose output (family/distro/pkg-manager/service-manager) feeds universal wrappers (`pkg_install`, `service_start`, …) so there is no per-OS branching duplicated through the file. Bands, in order: core utils (logging, `show_progress`, `print_color`, `check_privileges`) → system detection/validation → Docker & PostgreSQL install → interactive config (DB, SSL, ports) → container lifecycle (`deploy_payram_container`, `update_payram_container`, `reset_payram_environment`) → health check → banners/menu → `main` (arg parsing). When adding OS support or a config step, extend the relevant band and reuse the universal wrappers — do not add OS-specific blocks.
 
 ### Runtime state (on the host, gitignored)
-- `~/.payraminfo/` — `config.env` (chmod 600), `aes/` keys, `ssl/` certs, and the agent's `mcp.bin`/pid/log. **Fund-collection keys are never stored server-side.**
+- `~/.payraminfo/` — `config.env` (chmod 600), `aes/` keys, `ssl/` certs, and the agent's tokens and wallet state. **Fund-collection keys are never stored server-side.** (The agent deletes any `mcp.bin`/`mcp.bin.sha256`/`mcp.bin.version`/`mcp-server.pid` left by the retired analytics MCP server.)
 - `~/.payram-core/` — `data/` (persistent) + `logs/`.
 - `run_local.sh`-style local runs use repo-local `.payraminfo/` / `.payram-core/` (both gitignored).
 
 ### `setup_payram_agents.sh` — headless operator
-Subcommand dispatcher (`headless_main` → `cmd_*`) plus a guided `flow_main`. Talks to the running gateway's REST API at `PAYRAM_API_URL` (default `http://localhost:8080`) — endpoints like `/api/v1/signin`, `/api/v1/external-platform`, `/api/v1/member/root/exist`. Runs the Node helpers either on the host or inside Docker via `PAYRAM_NODE_MODE` (default `docker`), rewriting `localhost`/`127.0.0.1` → `host.docker.internal` so a containerized node can reach a host-port API. Also manages auth tokens (`ensure_token`/`refresh_token`) and can launch the Analytics **MCP server** (`start-mcp-server`, default port 3333). The wallet helpers mirror the frontend's `DepositWalletDeployDialog` flow but sign locally instead of in a browser.
+Subcommand dispatcher (`headless_main` → `cmd_*`) plus a guided `flow_main`. Talks to the running gateway's REST API at `PAYRAM_API_URL` (default `http://localhost:8080`) — endpoints like `/api/v1/signin`, `/api/v1/external-platform`, `/api/v1/member/root/exist`. Runs the Node helpers either on the host or inside Docker via `PAYRAM_NODE_MODE` (default `docker`), rewriting `localhost`/`127.0.0.1` → `host.docker.internal` so a containerized node can reach a host-port API. Also manages auth tokens (`ensure_token`/`refresh_token`). The analytics MCP server it used to launch is **retired** (no caller authentication, and callers could redirect the dashboard token): every run stops an instance an earlier version started and deletes its files, `start-mcp-server` only says it is retired, and `--skip-mcp-server` / `--mcp-port` / `PAYRAM_SKIP_MCP_SERVER` are accepted and ignored. A built-in MCP in PayRam will replace it. The wallet helpers mirror the frontend's `DepositWalletDeployDialog` flow but sign locally instead of in a browser.
 
 ### `updater-configs/` — consumed by the in-container updater, not by these scripts
 - `upgrade-policy.json` — `latest`, full `releases` list, `breakpoints` (versions requiring a manual stop, e.g. 2.0.0), `arch_support` (e.g. arm64 floor), `dashboard_max`. Update this when cutting a gateway release so clients upgrade along a safe path.

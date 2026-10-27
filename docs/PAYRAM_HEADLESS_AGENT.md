@@ -136,7 +136,7 @@ Set these for non-interactive or scripted runs. For agents, prefer env-driven, n
 | `PAYRAM_FRONTEND_URL` | `http://localhost` | Used by ensure-config's legacy fallback only (older cores; current cores derive the URL from the request) |
 | `PAYRAM_NETWORK` | `mainnet` | One-step flow network selection (`mainnet` default - real payments; `testnet` to try with free coins) |
 | `PAYRAM_NODE_MODE` | `docker` | JS runtime: `docker` or `host` |
-| `PAYRAM_NODE_DOCKER_IMAGE` | `node:20-bullseye-slim` | Docker image used for JS scripts |
+| `PAYRAM_NODE_DOCKER_IMAGE` | `node:26.12.1-trixie-slim` | Docker image used for JS scripts |
 | **deploy-scw** | | |
 | `PAYRAM_ETH_RPC_URL` | `https://ethereum-sepolia-rpc.publicnode.com` | No API key needed. Placeholder values (e.g. YOUR_ACTUAL_ALCHEMY_KEY) are ignored and default used. |
 | `PAYRAM_FUND_COLLECTOR` | deployer address | Cold wallet 0x (40 hex). Omit or leave empty to use deployer address from mnemonic. |
@@ -280,9 +280,10 @@ Three ways, lowest friction first:
 3. **MCP for app integration**: connect the PayRam MCP
    (`https://mcp.payram.com/mcp`, repo `payram-mcp`) — it generates payment
    routes/webhooks for your stack and can create payment links via
-   `POST /api/v1/payment` with the **merchant API key**. (The MCP server
-   started by this script is **analytics-only**; it does not create payment
-   links.)
+   `POST /api/v1/payment` with the **merchant API key**. (This script no
+   longer starts the separate analytics MCP server: it is retired, and a
+   built-in MCP in PayRam will replace it. Running the script stops one
+   that an earlier version started and deletes its files.)
 
 ## Merchant API key (the MCP/integration credential)
 

@@ -1,0 +1,15 @@
+#!/bin/bash
+# Stand-in for curl, used by the tests in this directory: answers the Docker
+# Hub tag lookups setup_payram.sh makes and fails every other request, so no
+# test reaches the network. Each call is appended to $FAKE_DOCKER_STATE/calls.
+[[ -n "${FAKE_DOCKER_STATE:-}" ]] && echo "curl $*" >> "$FAKE_DOCKER_STATE/calls"
+for a in "$@"; do
+  case "$a" in
+    *registry.hub.docker.com/v2/repositories/payramapp/payram/tags/\?page_size*)
+      echo '{"results":[{"name":"3.10.0"},{"name":"3.8.0"}]}'; exit 0 ;;
+    *registry.hub.docker.com/v2/repositories/payramapp/payram/tags/*)
+      echo '{"name":"x"}'; exit 0 ;;
+    *registry-1.docker.io*) exit 0 ;;
+  esac
+done
+exit 22

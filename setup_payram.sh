@@ -1655,7 +1655,9 @@ save_configuration() {
   # Create directory with proper permissions
   mkdir -p "$PAYRAM_INFO_DIR"
   
-  # Write configuration with restrictive permissions
+  # Write configuration with restrictive permissions.
+  # RETAINED_PORTS uses ${VAR-default}, not ${VAR:-default}: an empty value
+  # set by build_publish_args is a decision to publish nothing and is kept.
   umask 077
   cat > "$config_file" << EOL
 # PayRam Configuration - Generated $(date)
@@ -1670,7 +1672,9 @@ AES_KEY="${AES_KEY:-}"
 # Published host ports retained across updates (space-separated
 # host:container[/proto] tokens). Set from the install-time port mapping;
 # extra ports detected on an existing container are preserved here forever.
-RETAINED_PORTS="${RETAINED_PORTS:-${PRIMARY_PORT_MAPPING:-80:80}}"
+# Empty means publish no ports (the container only ever published the
+# database port).
+RETAINED_PORTS="${RETAINED_PORTS-${PRIMARY_PORT_MAPPING:-80:80}}"
 
 # Database Configuration
 DB_HOST="${DB_HOST:-localhost}"
@@ -1767,8 +1771,8 @@ validate_docker_tag() {
 # host port. That choice is captured in PRIMARY_PORT_MAPPING at install time.
 #
 # An existing install being UPDATED may also have extra/legacy ports
-# published on its container (e.g. 8080, 8443, 5432, or operator-added
-# custom ports). Recreating the container would silently drop those, so
+# published on its container (e.g. 8080, 8443, or operator-added custom
+# ports). Recreating the container would silently drop those, so
 # we detect whatever the live container already publishes, union it with
 # the install-time mapping, and persist the result (RETAINED_PORTS) so it
 # is kept on every future update — even after the original container is
@@ -1786,7 +1790,35 @@ PRIMARY_PORT_MAPPING=""
 # historical production port set so an existing deployment is never
 # updated into having fewer ports than it had. Never reached on a fresh
 # install, where PRIMARY_PORT_MAPPING is always set.
-LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443" "5432:5432")
+# 5432 is left out on purpose: see DATABASE_CONTAINER_PORT below.
+LEGACY_FALLBACK_PORTS=("80:80" "443:443" "8080:8080" "8443:8443")
+
+# The bundled PostgreSQL's port inside the container. Installs made before
+# 28 May 2026 published it on every interface, and the bundled database
+# accepted the shared default password from anywhere, so the payments
+# database was open to the internet. Nothing outside the container needs
+# it (backups use `docker exec payram pg_dump`), and images released before
+# the bundled database was limited to localhost still accept that password
+# from anywhere, so updates drop any mapping to it instead of carrying it
+# forward.
+DATABASE_CONTAINER_PORT="5432"
+
+# True when a "[ip:]host:container[/proto]" token maps to the bundled
+# database: the container port is the last ":" field, without "/proto".
+is_database_mapping() {
+  local container_port="${1##*:}"
+  container_port="${container_port%%/*}"
+  [[ "$container_port" == "$DATABASE_CONTAINER_PORT" ]]
+}
+
+# True when the existing payram container publishes the database port.
+publishes_database_port() {
+  local token
+  while IFS= read -r token; do
+    is_database_mapping "$token" && return 0
+  done < <(detect_container_published_ports)
+  return 1
+}
 
 # Decide the install-time host port mapping based on where TLS terminates.
 # This keys off SSL_CERT_PATH (NOT SSL_MODE): certbot and custom certs both
@@ -1848,12 +1880,73 @@ configure_port_mapping() {
 # stripped so the tokens dedupe cleanly against the install-time mapping.
 # Silent (no output) when no container exists.
 detect_container_published_ports() {
-  docker inspect payram >/dev/null 2>&1 || return 0
-  docker inspect payram --format \
+  payram_container_exists || return 0
+  docker inspect --type container payram --format \
     '{{range $p, $conf := .HostConfig.PortBindings}}{{range $conf}}{{if .HostPort}}{{if and .HostIp (ne .HostIp "0.0.0.0")}}{{.HostIp}}:{{end}}{{.HostPort}}:{{$p}}{{println}}{{end}}{{end}}{{end}}' \
     2>/dev/null \
     | sed 's#/tcp$##' \
     | sort -u
+}
+
+# True when a container named payram exists, running or stopped.
+payram_container_exists() {
+  docker inspect --type container payram >/dev/null 2>&1
+}
+
+# Echo the image reference the existing `payram` container (running or
+# stopped) was created from, e.g. payramapp/payram:3.10.0. Silent when there
+# is no container.
+detect_container_image() {
+  docker inspect --type container payram --format '{{.Config.Image}}' 2>/dev/null || true
+}
+
+# Echo the version tag of a payramapp/payram image reference: "3.10.0" for
+# payramapp/payram:3.10.0 or docker.io/payramapp/payram:3.10.0@sha256:...
+# Silent for a reference this script cannot recreate the container from: a
+# digest-only one, an image ID, a bare repository, or another repository.
+payram_image_tag() {
+  local image="${1%%@*}" repo tag
+  if [[ "$image" != *:* ]]; then
+    return 0
+  fi
+  repo="${image%:*}"
+  tag="${image##*:}"
+  repo="${repo#docker.io/}"
+  repo="${repo#index.docker.io/}"
+  # Only a well-formed docker tag is used: it is saved to config.env, which
+  # every run sources as root.
+  if [[ "$repo" == "payramapp/payram" && "$tag" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+    echo "$tag"
+  fi
+  return 0
+}
+
+# Make IMAGE_TAG the version PayRam actually runs and save it at once, before
+# anything is stopped or removed. Dashboard updates (payram-updater) replace
+# the container without writing config.env, so its IMAGE_TAG can be older
+# than the running version; taken as "current", it would recreate PayRam on
+# an older version, over a database the newer version already migrated.
+# config.env's IMAGE_TAG is used only when there is no container or its
+# image has no payramapp/payram version tag. Call it after
+# build_publish_args: save_configuration also writes RETAINED_PORTS, which
+# must hold the container's real ports by then.
+sync_image_tag_from_container() {
+  local image container_tag
+  image="$(detect_container_image)"
+  if [[ -z "$image" ]]; then
+    return 0
+  fi
+  container_tag="$(payram_image_tag "$image")"
+  if [[ -z "$container_tag" ]]; then
+    log "WARN" "The PayRam container runs $image, which has no payramapp/payram version tag; using $IMAGE_TAG from config.env as the current version"
+    return 0
+  fi
+  if [[ "$container_tag" == "$IMAGE_TAG" ]]; then
+    return 0
+  fi
+  log "WARN" "config.env recorded PayRam $IMAGE_TAG, but the container runs $container_tag (for example after an update from the dashboard). Using $container_tag as the current version and saving it to config.env."
+  IMAGE_TAG="$container_tag"
+  save_configuration
 }
 
 # Populate the global PUBLISH_ARGS array (the docker `--publish` flags
@@ -1862,15 +1955,25 @@ detect_container_published_ports() {
 #   1. PRIMARY_PORT_MAPPING — the install-time host:container choice
 #   2. RETAINED_PORTS from config.env — survive forever once recorded
 #   3. ports the live/stopped container currently publishes
-# If all three are empty (an update with no saved ports and no readable
-# container) it falls back to LEGACY_FALLBACK_PORTS. The union is written
-# back to RETAINED_PORTS so save_configuration persists it for all future
-# updates. MUST be called BEFORE the existing container is removed
-# (docker rm), otherwise detection finds nothing.
+# Mappings to the database port are dropped (see DATABASE_CONTAINER_PORT).
+# Only when no source holds any mapping at all (an update with no saved
+# ports and no readable container) does it fall back to
+# LEGACY_FALLBACK_PORTS. If mappings were found but every one was the
+# database port, it publishes nothing: the fallback would open web ports the
+# container never published. The result is written back to RETAINED_PORTS
+# so save_configuration persists it for all future updates; an empty saved
+# RETAINED_PORTS keeps "publish nothing" on the next update too. MUST be
+# called BEFORE the existing container is removed (docker rm), otherwise
+# detection finds nothing.
 build_publish_args() {
-  local token seen=" "
+  local token seen=" " has_saved_ports=false
   local all=() retained=()
   PUBLISH_ARGS=()
+  # A RETAINED_PORTS line in config.env, even an empty one, is a saved
+  # decision; an install made before June 2026 has no line at all.
+  if [[ -n "${RETAINED_PORTS+set}" ]]; then
+    has_saved_ports=true
+  fi
   RETAINED_PORTS="${RETAINED_PORTS:-}"
 
   # PRIMARY_PORT_MAPPING may hold one OR more space-separated tokens (e.g.
@@ -1884,6 +1987,10 @@ build_publish_args() {
   # ${all[@]+...} guard: iterating an empty array under `set -u` errors on
   # bash < 4.4 (incl. macOS bash 3.2). Expands to nothing when empty.
   for token in ${all[@]+"${all[@]}"}; do
+    if is_database_mapping "$token"; then
+      log "WARN" "No longer publishing $token: the PayRam database is only reachable from inside the container"
+      continue
+    fi
     case "$seen" in
       *" $token "*) ;;
       *)
@@ -1894,19 +2001,106 @@ build_publish_args() {
     esac
   done
 
-  # Safety net: nothing in env and no container to read from. Fall back to
-  # the historical production port set (see LEGACY_FALLBACK_PORTS) rather
-  # than guessing a single port, so an existing install is never updated
-  # into fewer ports than it had.
   if [[ ${#PUBLISH_ARGS[@]} -eq 0 ]]; then
-    for token in "${LEGACY_FALLBACK_PORTS[@]}"; do
-      PUBLISH_ARGS+=("--publish" "$token")
-      retained+=("$token")
-    done
+    if [[ ${#all[@]} -gt 0 ]]; then
+      log "WARN" "Publishing no ports: the only port this container published was the database port, which is no longer published. To reach PayRam from this host, add a web port such as 80:80 to RETAINED_PORTS in $PAYRAM_INFO_DIR/config.env and run the update again."
+    elif [[ "$has_saved_ports" == true ]]; then
+      log "WARN" "Publishing no ports: RETAINED_PORTS in $PAYRAM_INFO_DIR/config.env is empty (saved when the only published port was the database port). Add a web port such as 80:80 there to publish one."
+    else
+      # Safety net: nothing saved and no container to read from. Fall back
+      # to the historical production port set (see LEGACY_FALLBACK_PORTS)
+      # rather than guessing a single port, so an existing install is never
+      # updated into fewer ports than it had.
+      for token in "${LEGACY_FALLBACK_PORTS[@]}"; do
+        PUBLISH_ARGS+=("--publish" "$token")
+        retained+=("$token")
+      done
+    fi
   fi
 
-  RETAINED_PORTS="${retained[*]}"
-  log "INFO" "Publishing ports: ${retained[*]}"
+  # ${retained[*]:-}: an empty array under `set -u` is an error on bash < 4.4.
+  RETAINED_PORTS="${retained[*]:-}"
+  if [[ -n "$RETAINED_PORTS" ]]; then
+    log "INFO" "Publishing ports: $RETAINED_PORTS"
+  fi
+}
+
+# Download payramapp/payram:$IMAGE_TAG, showing progress and any error docker
+# reports. Returns non-zero when the download fails.
+pull_payram_image() {
+  local image="payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  log "INFO" "Pulling PayRam image: $image..."
+  echo
+  print_color "blue" "📥 Downloading Docker image..."
+  print_color "gray" "   This may take several minutes depending on your connection"
+  echo
+
+  # Pull with progress monitoring
+  if ! docker pull "$image" 2>&1 | while IFS= read -r line; do
+    if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
+      echo "   $line"
+    elif [[ "$line" =~ Status:.*Downloaded ]]; then
+      print_color "green" "   ✅ Download completed successfully"
+    elif [[ "$line" == *rror* || "$line" == *denied* ]]; then
+      echo "   $line"
+    fi
+  done; then
+    log "ERROR" "Failed to pull Docker image $image"
+    return 1
+  fi
+  echo
+}
+
+# Delete the local payramapp/payram images, except KEEP_IMAGE when one is
+# given (the image the new container runs). Best effort: a failure here
+# never fails an install or update.
+remove_payram_images() {
+  local keep_image="${1:-}" keep_id="" id
+  if [[ -n "$keep_image" ]]; then
+    keep_id="$(docker image inspect --format '{{.Id}}' "$keep_image" 2>/dev/null)" || return 0
+  fi
+  docker images --no-trunc --filter=reference='payramapp/payram' -q 2>/dev/null | sort -u | while IFS= read -r id; do
+    if [[ -n "$id" && "$id" != "$keep_id" ]]; then
+      docker rmi -f "$id" >/dev/null 2>&1 || true
+    fi
+  done || true
+}
+
+# Start the payram container from payramapp/payram:$IMAGE_TAG with the saved
+# settings and the ports in PUBLISH_ARGS (see build_publish_args). Every
+# install, update and reconfigure starts the container here.
+run_payram_container() {
+  local vol_postgres vol_logs
+  # macOS: postgres uses a named volume (VirtioFS ownership conflict); Linux: bind mount
+  if [[ "$OS_FAMILY" == "macos" ]]; then
+    vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
+  else
+    vol_postgres="$PAYRAM_CORE_DIR/db/postgres:/var/lib/payram/db/postgres"
+  fi
+  vol_logs="$PAYRAM_CORE_DIR/log/supervisord:/var/log"
+  # ${PUBLISH_ARGS[@]+...}: PUBLISH_ARGS is empty when no port is published,
+  # and an empty array under `set -u` is an error on bash < 4.4 (incl. macOS
+  # bash 3.2).
+  docker run -d \
+    --name payram \
+    --restart unless-stopped \
+    ${PUBLISH_ARGS[@]+"${PUBLISH_ARGS[@]}"} \
+    -e AES_KEY="$AES_KEY" \
+    -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
+    -e SERVER="$SERVER" \
+    -e POSTGRES_SSLMODE="$POSTGRES_SSLMODE" \
+    -e POSTGRES_HOST="$DB_HOST" \
+    -e POSTGRES_PORT="$DB_PORT" \
+    -e POSTGRES_DATABASE="$DB_NAME" \
+    -e POSTGRES_USERNAME="$DB_USER" \
+    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
+    -e SSL_CERT_PATH="$SSL_CERT_PATH" \
+    -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
+    -v "$PAYRAM_CORE_DIR":/root/payram \
+    -v "$vol_logs" \
+    -v "$vol_postgres" \
+    -v /etc/letsencrypt:/etc/letsencrypt:ro \
+    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
 }
 
 # Container deployment
@@ -1943,28 +2137,12 @@ deploy_payram_container() {
   
   # Clean up old images
   log "INFO" "Cleaning up old PayRam images..."
-  docker images --filter=reference='payramapp/payram' -q | xargs -r docker rmi -f &>/dev/null || true
-  
-  # Pull latest image with progress
-  log "INFO" "Pulling PayRam image: payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
-  echo
-  print_color "blue" "📥 Downloading Docker image..."
-  print_color "gray" "   This may take several minutes depending on your connection"
-  echo
-  
-  # Pull with progress monitoring
-  if ! docker pull "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
-    if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
-      echo "   $line"
-    elif [[ "$line" =~ Status:.*Downloaded ]]; then
-      print_color "green" "   ✅ Download completed successfully"
-    fi
-  done; then
-    log "ERROR" "Failed to pull Docker image"
+  remove_payram_images
+
+  if ! pull_payram_image; then
     return 1
   fi
-  echo
-  
+
   # Create data directories (macOS: only log dir needed; postgres uses a named volume)
   if [[ "$OS_FAMILY" == "macos" ]]; then
     mkdir -p "$PAYRAM_CORE_DIR"/log/supervisord
@@ -1975,35 +2153,10 @@ deploy_payram_container() {
     chown -R "$ORIGINAL_USER:$(id -gn "$ORIGINAL_USER")" "$PAYRAM_CORE_DIR"
   fi
 
-  # macOS: postgres uses a named volume (VirtioFS ownership conflict); Linux: bind mount
-  if [[ "$OS_FAMILY" == "macos" ]]; then
-    vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
-  else
-    vol_postgres="$PAYRAM_CORE_DIR/db/postgres:/var/lib/payram/db/postgres"
-  fi
-  vol_logs="$PAYRAM_CORE_DIR/log/supervisord:/var/log"
   log "INFO" "Starting PayRam container..."
-  docker run -d \
-    --name payram \
-    --restart unless-stopped \
-    "${PUBLISH_ARGS[@]}" \
-    -e AES_KEY="$AES_KEY" \
-    -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
-    -e SERVER="$SERVER" \
-    -e POSTGRES_SSLMODE="$POSTGRES_SSLMODE" \
-    -e POSTGRES_HOST="$DB_HOST" \
-    -e POSTGRES_PORT="$DB_PORT" \
-    -e POSTGRES_DATABASE="$DB_NAME" \
-    -e POSTGRES_USERNAME="$DB_USER" \
-    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
-    -e SSL_CERT_PATH="$SSL_CERT_PATH" \
-    -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
-    -v "$PAYRAM_CORE_DIR":/root/payram \
-    -v "$vol_logs" \
-    -v "$vol_postgres" \
-    -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
-  
+  # The running check below reports a container that did not start.
+  run_payram_container || true
+
   # Verify deployment
   sleep 5
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
@@ -2235,7 +2388,16 @@ update_payram_container() {
     log "ERROR" "Upgrade validation failed"
     return 1
   fi
-  
+
+  # Read the ports the existing container publishes now, before anything is
+  # stopped or removed: the recreate below uses them, and so does every save
+  # of config.env from here on.
+  build_publish_args
+
+  # "Current" is the version the container runs, not the one config.env
+  # last recorded (dashboard updates never write config.env).
+  sync_image_tag_from_container
+
   local current_tag="$IMAGE_TAG"
   local target_tag="${NEW_IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   
@@ -2280,130 +2442,92 @@ update_payram_container() {
   
   read -e -p "Press [Enter] to proceed with update..."
 
-  # If staying on the same tag, just restart — no pull/redeploy needed
+  # Same tag: nothing to download. A restart keeps every published port, so
+  # it is enough unless the container still publishes the database port;
+  # that container is recreated from the local image without it. With no
+  # container at all (an earlier update stopped part-way), the container is
+  # started from the local image.
+  local is_same_version=false
   if [[ "$IMAGE_TAG" == "$current_tag" ]]; then
-    log "INFO" "Same version selected — restarting container without re-pulling..."
-    docker restart payram
-    log "SUCCESS" "PayRam restarted on $IMAGE_TAG"
-    install_payram_updater
-    return 0
+    is_same_version=true
+    if payram_container_exists && ! publishes_database_port; then
+      log "INFO" "Same version selected — restarting container without re-pulling..."
+      restart_payram_container || return 1
+      log "SUCCESS" "PayRam restarted on $IMAGE_TAG"
+      install_payram_updater
+      return 0
+    fi
+    if payram_container_exists; then
+      log "INFO" "Same version selected, but the container still publishes the database port — recreating it from the local image without that port..."
+    else
+      log "INFO" "Same version selected, but there is no PayRam container (an earlier update may have stopped part-way) — starting $IMAGE_TAG..."
+    fi
   fi
 
-  # Validate Docker tag BEFORE stopping container
-  if ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"; then
-    log "ERROR" "Cannot proceed with invalid Docker tag: ${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
-    log "ERROR" "Update cancelled - existing container remains running"
-    return 1
-  fi
-  
-  # Stop existing container
-  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
-    log "INFO" "Stopping existing PayRam container..."
-    docker stop payram || true
-  fi
-
-  # Deploy updated container with update-specific fixes
-  deploy_payram_container_update
+  deploy_payram_container_update "$is_same_version"
 }
 
-# Update-specific container deployment with fixes
+# Replace the payram container with one running payramapp/payram:$IMAGE_TAG.
+# IS_SAME_VERSION is "true" when the tag does not change. Uses PUBLISH_ARGS,
+# which update_payram_container builds while the old container still
+# exists. The image is made ready BEFORE the old container is touched, so a
+# failed download leaves PayRam as it was: a same-version recreate uses the
+# local image and downloads it only when it is missing; a version change
+# always downloads. Old images are removed only after the new container runs.
 deploy_payram_container_update() {
+  local is_same_version="${1:-false}"
+  local image="payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
   show_progress 10 10 "Deploying updated PayRam container..."
-
-  # Detect the current container's published ports BEFORE it is removed
-  # below, then retain them on the recreated container.
-  build_publish_args
 
   # Generate AES key if not exists
   if [[ -z "$AES_KEY" ]]; then
     generate_aes_key
   fi
-  
-  # Check for existing container
-  if docker ps --filter "name=^payram$" --filter "status=running" --format "{{.Names}}" | grep -q "payram"; then
-    log "WARN" "PayRam container is already running"
-    docker ps --filter "name=payram"
-    return 0
-  fi
-  
-  # Remove stopped container if exists
-  if docker ps -a --filter "name=^payram$" --format "{{.Names}}" | grep -q "payram"; then
-    log "INFO" "Removing existing stopped PayRam container..."
-    docker rm -v payram &>/dev/null || true
-  fi
-  
-  # Clean up old images
-  log "INFO" "Cleaning up old PayRam images..."
-  {
-    imgs="$(docker images --filter=reference='payramapp/payram' -q)"
-    if [[ -n "$imgs" ]]; then
-      # shellcheck disable=SC2086
-      docker rmi -f $imgs
+
+  if [[ "$is_same_version" == true ]] && docker image inspect "$image" >/dev/null 2>&1; then
+    log "INFO" "Using the local image $image (nothing to download)"
+  elif ! validate_docker_tag "${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" || ! pull_payram_image; then
+    if payram_container_exists; then
+      log "ERROR" "Update stopped before anything was changed: the existing PayRam container is untouched"
+    else
+      log "ERROR" "PayRam is not running: there is no PayRam container and $image could not be downloaded. Run the update again once the download works."
     fi
-  } &>/dev/null || true
-  
-  # Pull latest image with progress
-  log "INFO" "Pulling PayRam image: payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}..."
-  echo
-  print_color "blue" "📥 Downloading Docker image..."
-  print_color "gray" "   This may take several minutes depending on your connection"
-  echo
-  
-  # Pull with progress monitoring
-  if ! docker pull "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}" 2>&1 | while IFS= read -r line; do
-    if [[ "$line" =~ Pulling|Downloading|Extracting|Pull\ complete ]]; then
-      echo "   $line"
-    elif [[ "$line" =~ Status:.*Downloaded ]]; then
-      print_color "green" "   ✅ Download completed successfully"
-    fi
-  done; then
-    log "ERROR" "Failed to pull Docker image"
     return 1
   fi
-  echo
-  
+
+  if payram_container_exists; then
+    log "INFO" "Stopping existing PayRam container..."
+    docker stop payram >/dev/null 2>&1 || true
+    log "INFO" "Removing the old PayRam container..."
+    if ! docker rm -v payram >/dev/null 2>&1; then
+      log "ERROR" "Could not remove the old PayRam container; starting it again unchanged"
+      docker start payram >/dev/null 2>&1 || true
+      return 1
+    fi
+  fi
+
   # Save configuration BEFORE starting container (update-specific fix)
   save_configuration
-  
-  # Deploy container with update-specific volume mounts
-  if [[ "$OS_FAMILY" == "macos" ]]; then
-    vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
-  else
-    vol_postgres="$PAYRAM_CORE_DIR/db/postgres:/var/lib/payram/db/postgres"
-  fi
-  vol_logs="$PAYRAM_CORE_DIR/log/supervisord:/var/log"
+
   log "INFO" "Starting updated PayRam container..."
-  docker run -d \
-    --name payram \
-    --restart unless-stopped \
-    "${PUBLISH_ARGS[@]}" \
-    -e AES_KEY="$AES_KEY" \
-    -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
-    -e SERVER="$SERVER" \
-    -e POSTGRES_SSLMODE="$POSTGRES_SSLMODE" \
-    -e POSTGRES_HOST="$DB_HOST" \
-    -e POSTGRES_PORT="$DB_PORT" \
-    -e POSTGRES_DATABASE="$DB_NAME" \
-    -e POSTGRES_USERNAME="$DB_USER" \
-    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
-    -e SSL_CERT_PATH="$SSL_CERT_PATH" \
-    -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
-    -v "$PAYRAM_CORE_DIR":/root/payram \
-    -v "$vol_logs" \
-    -v "$vol_postgres" \
-    -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
-  
+  # The running check below reports a container that did not start.
+  run_payram_container || true
+
   # Verify deployment
   sleep 5
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
     log "SUCCESS" "PayRam container updated successfully!"
-    
+
     # Perform health check
     if perform_health_check; then
       log "SUCCESS" "PayRam application is healthy and ready!"
     else
       log "WARN" "Container started but health check failed - may need time to initialize"
+    fi
+
+    if [[ "$is_same_version" != true ]]; then
+      log "INFO" "Cleaning up old PayRam images..."
+      remove_payram_images "$image"
     fi
 
     # Install/update the updater service for existing deployments
@@ -2425,14 +2549,6 @@ reconfigure_container() {
   # (must run before the docker rm below).
   build_publish_args
 
-  local vol_postgres vol_logs
-  if [[ "$OS_FAMILY" == "macos" ]]; then
-    vol_postgres="payram-postgres-data:/var/lib/payram/db/postgres"
-  else
-    vol_postgres="$PAYRAM_CORE_DIR/db/postgres:/var/lib/payram/db/postgres"
-  fi
-  vol_logs="$PAYRAM_CORE_DIR/log/supervisord:/var/log"
-
   print_color "yellow" "⏹️  Stopping PayRam container..."
   docker stop payram 2>/dev/null || true
   print_color "green" "   ✅ Stopped"
@@ -2442,26 +2558,8 @@ reconfigure_container() {
   print_color "green" "   ✅ Removed"
 
   print_color "yellow" "🚀 Starting PayRam with updated configuration..."
-  docker run -d \
-    --name payram \
-    --restart unless-stopped \
-    "${PUBLISH_ARGS[@]}" \
-    -e AES_KEY="$AES_KEY" \
-    -e BLOCKCHAIN_NETWORK_TYPE="$NETWORK_TYPE" \
-    -e SERVER="$SERVER" \
-    -e POSTGRES_SSLMODE="$POSTGRES_SSLMODE" \
-    -e POSTGRES_HOST="$DB_HOST" \
-    -e POSTGRES_PORT="$DB_PORT" \
-    -e POSTGRES_DATABASE="$DB_NAME" \
-    -e POSTGRES_USERNAME="$DB_USER" \
-    -e POSTGRES_PASSWORD="$DB_PASSWORD" \
-    -e SSL_CERT_PATH="$SSL_CERT_PATH" \
-    -e PAYMENTS_APP_SERVER_URL="https://x.payram.com" \
-    -v "$PAYRAM_CORE_DIR":/root/payram \
-    -v "$vol_logs" \
-    -v "$vol_postgres" \
-    -v /etc/letsencrypt:/etc/letsencrypt:ro \
-    "payramapp/payram:${IMAGE_TAG:-$DEFAULT_IMAGE_TAG}"
+  # The running check below reports a container that did not start.
+  run_payram_container || true
 
   sleep 5
   if docker ps --filter name=payram --filter status=running --format '{{.Names}}' | grep -wq '^payram$'; then
@@ -2744,6 +2842,11 @@ configure_ssl_update() {
     print_color "red" "❌ No PayRam installation found. Please install first (option 1)."
     return 1
   fi
+
+  # The wizard recreates the container (reconfigure_container): it must keep
+  # the version the container runs, not an older one config.env recorded.
+  build_publish_args
+  sync_image_tag_from_container
 
   local current_domain
   current_domain=$(get_current_ssl_domain)
