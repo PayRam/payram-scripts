@@ -74,6 +74,17 @@ Env vars:
 EOF
 }
 
+# self_command is how to run this script again, for messages: its path, or,
+# when it was piped in, the download line.
+self_command() {
+	local src="${BASH_SOURCE[0]:-}"
+	if [[ -n "$src" && -f "$src" ]]; then
+		echo "bash $src"
+	else
+		echo "bash <(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram_agents.sh)"
+	fi
+}
+
 resolve_base_dir() {
 	local src="${BASH_SOURCE[0]:-$0}"
 	if [[ -f "$src" ]]; then
@@ -288,10 +299,58 @@ parse_response() {
 # refresh responses don't carry customer_id/email.)
 parse_auth_tokens() {
 	local body="$1"
-	ACCESS_TOKEN=$(echo "$body" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
-	REFRESH_TOKEN=$(echo "$body" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4)
-	CUSTOMER_ID=$(echo "$body" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4)
-	MEMBER_EMAIL=$(echo "$body" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
+	# `|| true`: under set -euo pipefail a missing field must leave the value
+	# empty for the caller to check, not end the script without a word.
+	ACCESS_TOKEN=$(echo "$body" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4 || true)
+	REFRESH_TOKEN=$(echo "$body" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4 || true)
+	CUSTOMER_ID=$(echo "$body" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4 || true)
+	MEMBER_EMAIL=$(echo "$body" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4 || true)
+}
+
+# Sign in with email and password and save the tokens. A member with
+# two-factor sign-in on is asked once for the code from their authenticator
+# app (or a recovery code); without a terminal to ask on, it stops with a
+# clear message rather than saving empty tokens.
+signin_with_password() {
+	local email="$1" password="$2" res
+	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
+		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		echo "Sign-in failed (HTTP $HTTP_CODE): $HTTP_BODY"
+		troubleshoot auth-failed
+		return 1
+	fi
+	if echo "$HTTP_BODY" | grep -q '"status":"two_factor_required"'; then
+		local step code field
+		step=$(echo "$HTTP_BODY" | grep -o '"twoFactorToken":"[^"]*"' | cut -d'"' -f4 || true)
+		# Asked on the terminal, even when the script itself was piped in.
+		if ! (exec </dev/tty) 2>/dev/null; then
+			echo "This account has two-factor sign-in on. Run '$(self_command) signin' in a terminal to enter the code from your authenticator app."
+			return 1
+		fi
+		read -p "Code from your authenticator app (or a recovery code): " code </dev/tty || true
+		code=$(echo "$code" | tr -cd 'A-Za-z0-9-')
+		field="recoveryCode"
+		[[ "$code" =~ ^[0-9]{6}$ ]] && field="otpCode"
+		res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin/two-factor" \
+			-H "Content-Type: application/json" -d "{\"twoFactorToken\":\"$step\",\"$field\":\"$code\"}")
+		parse_response "$res"
+		if [[ "$HTTP_CODE" != "200" ]]; then
+			local reason
+			reason=$(echo "$HTTP_BODY" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+			echo "Code not accepted: ${reason:-HTTP $HTTP_CODE}"
+			echo "Run '$(self_command) signin' to try again."
+			return 1
+		fi
+	fi
+	parse_auth_tokens "$HTTP_BODY"
+	if [[ -z "$ACCESS_TOKEN" || -z "$REFRESH_TOKEN" ]]; then
+		echo "Sign-in returned no tokens: $HTTP_BODY"
+		return 1
+	fi
+	save_tokens
+	echo "Signed in."
 }
 
 # List projects, spanning core versions: older images serve
@@ -927,7 +986,7 @@ ensure_token() {
 			return 0
 		fi
 	fi
-	echo "Not signed in. Run: $0 signin"
+	echo "Not signed in. Run: $(self_command) signin"
 	return 1
 }
 
@@ -1264,18 +1323,7 @@ cmd_signin() {
 		read -s -p "Password: " password
 		echo
 	fi
-	local res
-	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
-		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
-	parse_response "$res"
-	if [[ "$HTTP_CODE" != "200" ]]; then
-		echo "Signin failed (HTTP $HTTP_CODE): $HTTP_BODY"
-		troubleshoot auth-failed
-		return 1
-	fi
-	parse_auth_tokens "$HTTP_BODY"
-	save_tokens
-	echo "Signed in."
+	signin_with_password "$email" "$password"
 }
 
 ensure_config() {
@@ -2120,7 +2168,49 @@ cmd_start_mcp_server() {
 		echo "$mcp_version" > "$mcp_version_file"
 	fi
 
-	# Stop any previously started instance managed by this script
+
+	local base_url="${PAYRAM_API_URL}"
+	# Prefer env vars; fall back to whatever the signin/setup flow saved in the token file
+	local email="${PAYRAM_EMAIL:-${MEMBER_EMAIL:-}}"
+	local password="${PAYRAM_PASSWORD:-}"
+
+	if [[ -z "$email" ]]; then
+		load_tokens
+		email="${MEMBER_EMAIL:-}"
+	fi
+
+	if [[ -z "$email" && -t 0 ]]; then
+		read -p "Email for MCP server: " email
+	fi
+	if [[ -z "$password" && -t 0 ]]; then
+		read -s -p "Password for MCP server: " password
+		echo
+	fi
+
+	if [[ -z "$email" || -z "$password" ]]; then
+		echo "MCP server requires credentials. Set PAYRAM_EMAIL/PAYRAM_PASSWORD or run interactively."
+		return 1
+	fi
+
+	# The analytics MCP server signs in with this email and password itself,
+	# which a two-factor account can't do without its code. Say so now rather
+	# than start a server that can never sign in.
+	local probe probe_code
+	probe=$(curl -s -w "\n%{http_code}" -X POST "${base_url}/api/v1/signin" -H "Content-Type: application/json" \
+		-d "{\"email\":\"$email\",\"password\":\"$password\"}" 2>/dev/null || echo -e "\n000")
+	probe_code=$(echo "$probe" | tail -1)
+	if echo "$probe" | grep -q '"status":"two_factor_required"'; then
+		echo "The analytics MCP server can't sign in as $email: two-factor sign-in is on for that account."
+		echo "Set PAYRAM_EMAIL and PAYRAM_PASSWORD to a team member without two-factor sign-in, with only the roles the analytics server needs, then run this again."
+		return 1
+	fi
+	if [[ "$probe_code" == "401" || "$probe_code" == "429" ]]; then
+		echo "The analytics MCP server can't sign in as $email (HTTP $probe_code): check the email and password, then run this again."
+		return 1
+	fi
+
+	# Stop any previously started instance managed by this script, only now
+	# that the new one is known to be able to sign in
 	if [[ -f "$pid_file" ]]; then
 		local old_pid
 		old_pid=$(cat "$pid_file" 2>/dev/null || echo "")
@@ -2144,29 +2234,6 @@ cmd_start_mcp_server() {
 			fi
 		fi
 		rm -f "$pid_file"
-	fi
-
-	local base_url="${PAYRAM_API_URL}"
-	# Prefer env vars; fall back to whatever the signin/setup flow saved in the token file
-	local email="${PAYRAM_EMAIL:-${MEMBER_EMAIL:-}}"
-	local password="${PAYRAM_PASSWORD:-}"
-
-	if [[ -z "$email" ]]; then
-		load_tokens
-		email="${MEMBER_EMAIL:-}"
-	fi
-
-	if [[ -z "$email" && -t 0 ]]; then
-		read -p "Email for MCP server: " email
-	fi
-	if [[ -z "$password" && -t 0 ]]; then
-		read -s -p "Password for MCP server: " password
-		echo
-	fi
-
-	if [[ -z "$email" || -z "$password" ]]; then
-		echo "MCP server requires credentials. Set PAYRAM_EMAIL/PAYRAM_PASSWORD or run interactively."
-		return 1
 	fi
 
 	log "Starting Analytics MCP server on port $port..."
@@ -2261,16 +2328,7 @@ cmd_run() {
 			[[ -z "$email" ]] && echo "Email required." && return 1
 			local password="${PAYRAM_PASSWORD:-}"
 			[[ -z "$password" ]] && read -s -p "Password: " password && echo
-			res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
-				-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
-			parse_response "$res"
-			if [[ "$HTTP_CODE" != "200" ]]; then
-				echo "Signin failed (HTTP $HTTP_CODE): $HTTP_BODY"
-				return 1
-			fi
-			parse_auth_tokens "$HTTP_BODY"
-			save_tokens
-			echo "Signed in."
+			signin_with_password "$email" "$password" || return 1
 		fi
 	else
 		echo "First-time setup: create root user and project"
