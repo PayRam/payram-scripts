@@ -1521,8 +1521,15 @@ ensure_wallet() {
 		fi
 		mkdir -p "$PAYRAM_INFO_DIR"
 		local secret_file="${PAYRAM_INFO_DIR}/headless-wallet-secret.txt"
-		echo "$mnemonic" > "$secret_file"
-		chmod 600 "$secret_file" 2>/dev/null || true
+		# NEVER clobber an existing mnemonic: this one file holds the EVM SCW
+		# DEPLOYER key (deploy-scw-flow / deploy-scw read it too). The BTC
+		# starter wallet's xpub is registered with the API below, so the seed
+		# is not needed for BTC - overwriting it would silently destroy the
+		# deployer key and strand every already-deployed SCW.
+		if [[ ! -s "$secret_file" ]]; then
+			echo "$mnemonic" > "$secret_file"
+			chmod 600 "$secret_file" 2>/dev/null || true
+		fi
 		# XPUB deposit wallets are BTC-only by design: payram-core derives EVM
 		# deposit addresses from the fund-sweeper CONTRACT (CREATE2), never from
 		# an xpub - registering an ETH_Family xpub would create a wallet whose
