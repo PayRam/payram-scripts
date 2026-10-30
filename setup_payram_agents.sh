@@ -262,6 +262,16 @@ load_tokens() {
 	fi
 }
 
+# A change that needs the code from the member's authenticator app (wallets,
+# projects, API keys, ...) is refused with TWO_FACTOR_CODE_REQUIRED. In a
+# terminal, api asks for the code once and sends the change again with it; the
+# grant the server hands back covers the next such changes for a few minutes,
+# so a setup run asks once. The grant is kept next to the tokens (mode 600).
+# Without a terminal the refusal goes to the caller, which reports it.
+two_factor_grant_file() {
+	echo "$(dirname "${TOKEN_FILE:-./x}")/two-factor-grant.env"
+}
+
 api() {
 	local method="$1"
 	local path="$2"
@@ -269,20 +279,44 @@ api() {
 	local use_token="${4:-true}"
 	load_tokens
 	local url="${PAYRAM_API_URL}${path}"
+	local args=(-s -S -w "\n%{http_code}" -X "$method" "$url")
 	if [[ -n "$data" ]]; then
-		if [[ "$use_token" == "true" && -n "${ACCESS_TOKEN:-}" ]]; then
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url" \
-				-H "Content-Type: application/json" -H "Authorization: Bearer $ACCESS_TOKEN" -d "$data"
-		else
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url" -H "Content-Type: application/json" -d "$data"
-		fi
-	else
-		if [[ "$use_token" == "true" && -n "${ACCESS_TOKEN:-}" ]]; then
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url" -H "Authorization: Bearer $ACCESS_TOKEN"
-		else
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url"
-		fi
+		args+=(-H "Content-Type: application/json" -d "$data")
 	fi
+	if [[ "$use_token" != "true" || -z "${ACCESS_TOKEN:-}" ]]; then
+		curl "${args[@]}"
+		return
+	fi
+	args+=(-H "Authorization: Bearer $ACCESS_TOKEN")
+	local grant_file grant="" res status=0
+	grant_file="$(two_factor_grant_file)"
+	[[ -s "$grant_file" ]] && grant="$(cat "$grant_file")"
+	if [[ -n "$grant" ]]; then
+		res=$(curl "${args[@]}" -H "Two-Factor-Grant: $grant") || status=$?
+	else
+		res=$(curl "${args[@]}") || status=$?
+	fi
+	if [[ "$status" -ne 0 || "$(echo "$res" | tail -1)" != "403" ]] || ! echo "$res" | grep -q '"TWO_FACTOR_CODE_REQUIRED"'; then
+		echo "$res"
+		return "$status"
+	fi
+	rm -f "$grant_file"
+	if ! (exec </dev/tty) 2>/dev/null; then
+		echo "$res"
+		return 0
+	fi
+	local code headers
+	read -r -p "This change needs the code from your authenticator app: " code </dev/tty >/dev/tty 2>&1 || true
+	code=$(echo "$code" | tr -cd '0-9')
+	headers=$(mktemp)
+	res=$(curl "${args[@]}" -H "Two-Factor-Code: $code" -D "$headers") || status=$?
+	grant=$(grep -i '^two-factor-grant:' "$headers" | head -1 | cut -d: -f2- | tr -d ' \r' || true)
+	rm -f "$headers"
+	if [[ -n "$grant" ]]; then
+		(umask 077 && echo "$grant" > "$grant_file")
+	fi
+	echo "$res"
+	return "$status"
 }
 
 parse_response() {

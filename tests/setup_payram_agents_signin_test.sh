@@ -37,6 +37,12 @@ cat > "$FAKE_BIN/curl" <<'EOF'
 url=""
 for arg in "$@"; do [[ "$arg" == http* ]] && url="$arg"; done
 echo "$url" >> "$CASE_DIR/calls"
+echo "$*" >> "$CASE_DIR/args"
+# A change behind the app code: taken with the grant g-1, refused without.
+if [[ "$url" == */api/v1/wallets/hot ]]; then
+  if [[ "$*" == *"Two-Factor-Grant: g-1"* ]]; then printf '{"saved":true}\n200'; else printf '{"error":{"code":"TWO_FACTOR_CODE_REQUIRED"}}\n403'; fi
+  exit 0
+fi
 case "$url" in
   */api/v1/signin/two-factor) reply="$CASE_DIR/reply-two-factor" ;;
   */api/v1/signin) reply="$CASE_DIR/reply-signin" ;;
@@ -124,6 +130,50 @@ run_signin
 [[ "$RC" -ne 0 ]] && pass || fail "exit 0, want an error"
 out_has "Sign-in failed (HTTP 401)" && pass || fail "no failure message: $(cat "$CASE_DIR/out")"
 no_tokens_saved && pass || fail "saved tokens after a refused password"
+
+# run_api METHOD PATH: one api call with saved tokens; output in out, sets RC.
+run_api() {
+  RC=0
+  printf 'ACCESS_TOKEN="acc-1"\n' > "$CASE_DIR/tokens.env"
+  PATH="$FAKE_BIN:$PATH" CASE_DIR="$CASE_DIR" "$BASH_BIN" -c '
+    source "$1"
+    PAYRAM_API_URL="http://payram.test"
+    TOKEN_FILE="$2/tokens.env"
+    api "$3" "$4" "{}" true
+  ' run_api "$LIB" "$CASE_DIR" "$1" "$2" > "$CASE_DIR/out" 2>&1 < /dev/null || RC=$?
+}
+
+# --- A change behind the app code goes through on the saved grant ---
+new_case grant_sent
+printf 'g-1\n' > "$CASE_DIR/two-factor-grant.env"
+run_api POST /api/v1/wallets/hot
+[[ "$RC" -eq 0 ]] && pass || fail "exit $RC"
+out_has '"saved":true' && pass || fail "not taken with the grant: $(cat "$CASE_DIR/out")"
+grep -q 'Authorization: Bearer acc-1' "$CASE_DIR/args" && pass || fail "no session sent"
+
+# --- Without a terminal, a refusal goes to the caller and a stale grant is dropped ---
+if (exec </dev/tty) 2>/dev/null; then
+  echo "SKIP [code_refused_no_terminal]: /dev/tty is available here; run without a terminal (CI) to cover it"
+else
+  new_case code_refused_no_terminal
+  printf 'g-old\n' > "$CASE_DIR/two-factor-grant.env"
+  run_api POST /api/v1/wallets/hot
+  [[ "$RC" -eq 0 ]] && pass || fail "exit $RC"
+  out_has 'TWO_FACTOR_CODE_REQUIRED' && pass || fail "refusal not passed on: $(cat "$CASE_DIR/out")"
+  [[ ! -e "$CASE_DIR/two-factor-grant.env" ]] && pass || fail "stale grant kept"
+  [[ "$(wc -l < "$CASE_DIR/calls" | tr -d ' ')" == "1" ]] && pass || fail "sent again without a code"
+fi
+
+# --- A call without a session is sent as before ---
+new_case no_session
+RC=0
+PATH="$FAKE_BIN:$PATH" CASE_DIR="$CASE_DIR" "$BASH_BIN" -c '
+  source "$1"
+  PAYRAM_API_URL="http://payram.test"
+  TOKEN_FILE="$2/tokens.env"
+  api POST /api/v1/signin "{}" false
+' run_api "$LIB" "$CASE_DIR" > "$CASE_DIR/out" 2>&1 < /dev/null || RC=$?
+grep -q 'Authorization' "$CASE_DIR/args" && fail "sent a session it was told not to" || pass
 
 echo "signin tests: $PASSED passed, $FAILED failed"
 [[ "$FAILED" -eq 0 ]]
