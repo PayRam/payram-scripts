@@ -117,6 +117,8 @@ INSTALL_DIR="${INSTALL_DIR/#\~/$HOME}"
 
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
+# Keep later file paths and bind mounts rooted in the selected directory.
+INSTALL_DIR="$(pwd -P)"
 
 # =============================================================================
 # Helpers for .env
