@@ -69,6 +69,17 @@ Env vars:
 EOF
 }
 
+# self_command is how to run this script again, for messages: its path, or,
+# when it was piped in, the download line.
+self_command() {
+	local src="${BASH_SOURCE[0]:-}"
+	if [[ -n "$src" && -f "$src" ]]; then
+		echo "bash $src"
+	else
+		echo "bash <(curl -fsSL https://raw.githubusercontent.com/PayRam/payram-scripts/main/setup_payram_agents.sh)"
+	fi
+}
+
 resolve_base_dir() {
 	local src="${BASH_SOURCE[0]:-$0}"
 	if [[ -f "$src" ]]; then
@@ -251,6 +262,16 @@ load_tokens() {
 	fi
 }
 
+# A change that needs the code from the member's authenticator app (wallets,
+# projects, API keys, ...) is refused with TWO_FACTOR_CODE_REQUIRED. In a
+# terminal, api asks for the code once and sends the change again with it; the
+# grant the server hands back covers the next such changes for a few minutes,
+# so a setup run asks once. The grant is kept next to the tokens (mode 600).
+# Without a terminal the refusal goes to the caller, which reports it.
+two_factor_grant_file() {
+	echo "$(dirname "${TOKEN_FILE:-./x}")/two-factor-grant.env"
+}
+
 api() {
 	local method="$1"
 	local path="$2"
@@ -258,20 +279,44 @@ api() {
 	local use_token="${4:-true}"
 	load_tokens
 	local url="${PAYRAM_API_URL}${path}"
+	local args=(-s -S -w "\n%{http_code}" -X "$method" "$url")
 	if [[ -n "$data" ]]; then
-		if [[ "$use_token" == "true" && -n "${ACCESS_TOKEN:-}" ]]; then
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url" \
-				-H "Content-Type: application/json" -H "Authorization: Bearer $ACCESS_TOKEN" -d "$data"
-		else
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url" -H "Content-Type: application/json" -d "$data"
-		fi
-	else
-		if [[ "$use_token" == "true" && -n "${ACCESS_TOKEN:-}" ]]; then
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url" -H "Authorization: Bearer $ACCESS_TOKEN"
-		else
-			curl -s -S -w "\n%{http_code}" -X "$method" "$url"
-		fi
+		args+=(-H "Content-Type: application/json" -d "$data")
 	fi
+	if [[ "$use_token" != "true" || -z "${ACCESS_TOKEN:-}" ]]; then
+		curl "${args[@]}"
+		return
+	fi
+	args+=(-H "Authorization: Bearer $ACCESS_TOKEN")
+	local grant_file grant="" res status=0
+	grant_file="$(two_factor_grant_file)"
+	[[ -s "$grant_file" ]] && grant="$(cat "$grant_file")"
+	if [[ -n "$grant" ]]; then
+		res=$(curl "${args[@]}" -H "Two-Factor-Grant: $grant") || status=$?
+	else
+		res=$(curl "${args[@]}") || status=$?
+	fi
+	if [[ "$status" -ne 0 || "$(echo "$res" | tail -1)" != "403" ]] || ! echo "$res" | grep -q '"TWO_FACTOR_CODE_REQUIRED"'; then
+		echo "$res"
+		return "$status"
+	fi
+	rm -f "$grant_file"
+	if ! (exec </dev/tty) 2>/dev/null; then
+		echo "$res"
+		return 0
+	fi
+	local code headers
+	read -r -p "This change needs the code from your authenticator app: " code </dev/tty >/dev/tty 2>&1 || true
+	code=$(echo "$code" | tr -cd '0-9')
+	headers=$(mktemp)
+	res=$(curl "${args[@]}" -H "Two-Factor-Code: $code" -D "$headers") || status=$?
+	grant=$(grep -i '^two-factor-grant:' "$headers" | head -1 | cut -d: -f2- | tr -d ' \r' || true)
+	rm -f "$headers"
+	if [[ -n "$grant" ]]; then
+		(umask 077 && echo "$grant" > "$grant_file")
+	fi
+	echo "$res"
+	return "$status"
 }
 
 parse_response() {
@@ -285,10 +330,58 @@ parse_response() {
 # refresh responses don't carry customer_id/email.)
 parse_auth_tokens() {
 	local body="$1"
-	ACCESS_TOKEN=$(echo "$body" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4)
-	REFRESH_TOKEN=$(echo "$body" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4)
-	CUSTOMER_ID=$(echo "$body" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4)
-	MEMBER_EMAIL=$(echo "$body" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4)
+	# `|| true`: under set -euo pipefail a missing field must leave the value
+	# empty for the caller to check, not end the script without a word.
+	ACCESS_TOKEN=$(echo "$body" | grep -o '"accessToken":"[^"]*"' | cut -d'"' -f4 || true)
+	REFRESH_TOKEN=$(echo "$body" | grep -o '"refreshToken":"[^"]*"' | cut -d'"' -f4 || true)
+	CUSTOMER_ID=$(echo "$body" | grep -o '"customer_id":"[^"]*"' | cut -d'"' -f4 || true)
+	MEMBER_EMAIL=$(echo "$body" | grep -o '"email":"[^"]*"' | tail -1 | cut -d'"' -f4 || true)
+}
+
+# Sign in with email and password and save the tokens. A member with
+# two-factor sign-in on is asked once for the code from their authenticator
+# app (or a recovery code); without a terminal to ask on, it stops with a
+# clear message rather than saving empty tokens.
+signin_with_password() {
+	local email="$1" password="$2" res
+	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
+		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
+	parse_response "$res"
+	if [[ "$HTTP_CODE" != "200" ]]; then
+		echo "Sign-in failed (HTTP $HTTP_CODE): $HTTP_BODY"
+		troubleshoot auth-failed
+		return 1
+	fi
+	if echo "$HTTP_BODY" | grep -q '"status":"two_factor_required"'; then
+		local step code field
+		step=$(echo "$HTTP_BODY" | grep -o '"twoFactorToken":"[^"]*"' | cut -d'"' -f4 || true)
+		# Asked on the terminal, even when the script itself was piped in.
+		if ! (exec </dev/tty) 2>/dev/null; then
+			echo "This account has two-factor sign-in on. Run '$(self_command) signin' in a terminal to enter the code from your authenticator app."
+			return 1
+		fi
+		read -p "Code from your authenticator app (or a recovery code): " code </dev/tty || true
+		code=$(echo "$code" | tr -cd 'A-Za-z0-9-')
+		field="recoveryCode"
+		[[ "$code" =~ ^[0-9]{6}$ ]] && field="otpCode"
+		res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin/two-factor" \
+			-H "Content-Type: application/json" -d "{\"twoFactorToken\":\"$step\",\"$field\":\"$code\"}")
+		parse_response "$res"
+		if [[ "$HTTP_CODE" != "200" ]]; then
+			local reason
+			reason=$(echo "$HTTP_BODY" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+			echo "Code not accepted: ${reason:-HTTP $HTTP_CODE}"
+			echo "Run '$(self_command) signin' to try again."
+			return 1
+		fi
+	fi
+	parse_auth_tokens "$HTTP_BODY"
+	if [[ -z "$ACCESS_TOKEN" || -z "$REFRESH_TOKEN" ]]; then
+		echo "Sign-in returned no tokens: $HTTP_BODY"
+		return 1
+	fi
+	save_tokens
+	echo "Signed in."
 }
 
 # List projects, spanning core versions: older images serve
@@ -932,7 +1025,7 @@ ensure_token() {
 			return 0
 		fi
 	fi
-	echo "Not signed in. Run: $0 signin"
+	echo "Not signed in. Run: $(self_command) signin"
 	return 1
 }
 
@@ -1269,18 +1362,7 @@ cmd_signin() {
 		read -s -p "Password: " password
 		echo
 	fi
-	local res
-	res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
-		-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
-	parse_response "$res"
-	if [[ "$HTTP_CODE" != "200" ]]; then
-		echo "Signin failed (HTTP $HTTP_CODE): $HTTP_BODY"
-		troubleshoot auth-failed
-		return 1
-	fi
-	parse_auth_tokens "$HTTP_BODY"
-	save_tokens
-	echo "Signed in."
+	signin_with_password "$email" "$password"
 }
 
 ensure_config() {
@@ -2182,16 +2264,7 @@ cmd_run() {
 			[[ -z "$email" ]] && echo "Email required." && return 1
 			local password="${PAYRAM_PASSWORD:-}"
 			[[ -z "$password" ]] && read -s -p "Password: " password && echo
-			res=$(curl -s -w "\n%{http_code}" -X POST "${PAYRAM_API_URL}/api/v1/signin" \
-				-H "Content-Type: application/json" -d "{\"email\":\"$email\",\"password\":\"$password\"}")
-			parse_response "$res"
-			if [[ "$HTTP_CODE" != "200" ]]; then
-				echo "Signin failed (HTTP $HTTP_CODE): $HTTP_BODY"
-				return 1
-			fi
-			parse_auth_tokens "$HTTP_BODY"
-			save_tokens
-			echo "Signed in."
+			signin_with_password "$email" "$password" || return 1
 		fi
 	else
 		echo "First-time setup: create root user and project"
