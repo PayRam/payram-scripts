@@ -800,6 +800,9 @@ resolve_node_mode() {
 	return 1
 }
 
+# Run a Node helper from $1, passing the remaining arguments unchanged.
+# Docker mode forwards selected PAYRAM_* values and rewrites a loopback API host;
+# host mode keeps the original environment. Return the helper's exit status.
 run_node() {
 	local workdir="$1"
 	shift
@@ -810,9 +813,16 @@ run_node() {
 		gid=$(id -g)
 		local -a env_flags=()
 		local api_override="${PAYRAM_API_URL:-}"
-		if [[ -n "$api_override" ]] && [[ "$api_override" =~ localhost|127\.0\.0\.1 ]]; then
-			api_override="${api_override/localhost/host.docker.internal}"
-			api_override="${api_override/127.0.0.1/host.docker.internal}"
+		if [[ -n "$api_override" ]]; then
+			# Rewrite only the hostname; preserve userinfo, port, path and query.
+			local api_url_pattern='^([[:alpha:]][[:alnum:]+.-]*://([^/?#]*@)?)([^:/?#@]+)(:[0-9]*)?([/?#].*)?$'
+			if [[ "$api_override" =~ $api_url_pattern ]]; then
+				case "${BASH_REMATCH[3]}" in
+					[Ll][Oo][Cc][Aa][Ll][Hh][Oo][Ss][Tt]|127.0.0.1)
+						api_override="${BASH_REMATCH[1]}host.docker.internal${BASH_REMATCH[4]}${BASH_REMATCH[5]}"
+						;;
+				esac
+			fi
 			env_flags+=("-e" "PAYRAM_API_URL=${api_override}")
 		fi
 		for var in PAYRAM_API_URL PAYRAM_ACCESS_TOKEN PAYRAM_MNEMONIC_FILE PAYRAM_ETH_RPC_URL PAYRAM_FUND_COLLECTOR PAYRAM_SCW_NAME PAYRAM_BLOCKCHAIN_CODE PAYRAM_MNEMONIC PAYRAM_DEPLOYER_ADDRESS PAYRAM_SCW_MIN_BALANCE_ETH PAYRAM_PROJECT_ID PAYRAM_WATCH; do
