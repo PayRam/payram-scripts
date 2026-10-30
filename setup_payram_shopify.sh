@@ -292,12 +292,14 @@ chmod 700 "$DEPLOY_SCRIPT"
 
 # Single Docker run: handles auth (fresh or expired), deploys app + extension,
 # pulls credentials. Works identically on first run and re-runs.
+# Docker reads --mount as CSV; quote the whole source field and escape quotes.
+MOUNT_SOURCE="${INSTALL_DIR//\"/\"\"}"
 DOCKER_DEPLOY_ARGS=(
   docker run --rm -it
   --user root
   -e "SHOPIFY_APP_URL=${SHOPIFY_APP_URL}"
   -v payram-shopify-cli-auth:/root/.config/shopify
-  -v "${INSTALL_DIR}:/workspace"
+  --mount "type=bind,\"source=${MOUNT_SOURCE}\",target=/workspace"
   "$DOCKER_IMAGE"
   sh /workspace/.payram-deploy.sh
 )
@@ -307,7 +309,7 @@ if [ -t 0 ]; then
 else
   command -v script >/dev/null 2>&1 || die "This installer needs a TTY for Shopify login. Install 'script' (util-linux) or run it from an interactive terminal."
   printf -v DOCKER_DEPLOY_CMD '%q ' "${DOCKER_DEPLOY_ARGS[@]}"
-  script -qec "$DOCKER_DEPLOY_CMD" /dev/null || die "App deploy failed. See output above."
+  SHELL="$BASH" script -qec "$DOCKER_DEPLOY_CMD" /dev/null || die "App deploy failed. See output above."
 fi
 
 rm -f "$DEPLOY_SCRIPT"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run only the install-directory/.env bootstrap in disposable fixtures.
+# Run the directory bootstrap and capture deploy arguments in disposable fixtures.
 # Usage: bash tests/setup_payram_shopify_directory_test.sh [installer-source]
 # BASH_UNDER_TEST selects the child Bash; no installer entrypoint is executed.
 set -uo pipefail
@@ -13,6 +13,26 @@ if ! INSTALL_BLOCK=$(awk '
   END { if (!found_end) exit 2 }
 ' "$SOURCE_FILE"); then
   printf 'Could not find both installer bootstrap boundaries in %s\n' "$SOURCE_FILE" >&2
+  exit 2
+fi
+
+if ! DEPLOY_BLOCK=$(awk '
+  /^MOUNT_SOURCE=/ { print; next }
+  /^DOCKER_DEPLOY_ARGS=\(/ { copying = 1 }
+  /^\)$/ && copying { print; found_end = 1; exit }
+  copying { print }
+  END { if (!found_end) exit 2 }
+' "$SOURCE_FILE"); then
+  printf 'Could not find both deploy-argument boundaries in %s\n' "$SOURCE_FILE" >&2
+  exit 2
+fi
+if ! NON_TTY_BLOCK=$(awk '
+  /^  command -v script / { copying = 1 }
+  /^fi$/ && copying { found_end = 1; exit }
+  copying { print }
+  END { if (!found_end) exit 2 }
+' "$SOURCE_FILE"); then
+  printf 'Could not find both non-TTY boundaries in %s\n' "$SOURCE_FILE" >&2
   exit 2
 fi
 
@@ -122,6 +142,69 @@ run_case symlink link real
 run_case preserve connector 'work/connector'
 run_case conflict occupied 'work/occupied'
 run_case literal 'literal $dollar & semi;' 'work/literal $dollar & semi;'
+
+# Capture the production command through shims; never start Docker or Shopify.
+run_deploy_case() {
+  local name="$1" directory="$2" csv_directory="$3"
+  local case_root="$TEST_ROOT/deploy_$name" work expected value index
+  local -a captured
+  work="$case_root/$directory"
+  mkdir -p "$work" "$case_root/bin" || exit 2
+  cat > "$case_root/bin/docker" <<'EOF'
+#!/bin/sh
+printf '%s\0' "$@" > "$CAPTURE_ARGS"
+EOF
+  cat > "$case_root/bin/script" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 3 ] && [ "$1" = -qec ] && [ "$3" = /dev/null ] || exit 2
+[ "$SHELL" = "$EXPECTED_SHELL" ] || { echo 'Deploy command requires its producing Bash' >&2; exit 2; }
+exec "$SHELL" -c "$2"
+EOF
+  chmod +x "$case_root/bin/docker" "$case_root/bin/script" || exit 2
+  if ! (
+    cd "$work" || exit 2
+    printf '.\n' | LC_ALL=C SHELL=/bin/sh PATH="$case_root/bin:$PATH" \
+      CAPTURE_ARGS="$case_root/args" "$BASH_BIN" -c "$PRELUDE
+DOCKER_IMAGE=fixture/image:local
+SHOPIFY_APP_URL=https://example.invalid
+export EXPECTED_SHELL=\"\$BASH\"
+die() { printf '%s\\n' \"\$*\" >&2; exit 1; }
+$INSTALL_BLOCK
+$DEPLOY_BLOCK
+$NON_TTY_BLOCK"
+  ) > "$case_root/stdout" 2> "$case_root/stderr"; then
+    fail_case "deploy_$name" "argument capture failed: $(cat "$case_root/stderr")"
+    return
+  fi
+  if [ ! -f "$case_root/args" ]; then
+    fail_case "deploy_$name" 'the deploy command did not reach the Docker shim'
+    return
+  fi
+  captured=()
+  while IFS= read -r -d '' value; do
+    captured+=("$value")
+  done < "$case_root/args"
+  value=''
+  for ((index = 0; index + 1 < ${#captured[@]}; index++)); do
+    if [ "${captured[index]}" = --mount ]; then
+      value="${captured[index + 1]}"
+    fi
+  done
+  expected="type=bind,\"source=$case_root/$csv_directory\",target=/workspace"
+  if [ "$value" != "$expected" ]; then
+    fail_case "deploy_$name" 'workspace mount source did not survive command quoting and CSV encoding'
+    return
+  fi
+  PASSED=$((PASSED + 1))
+  printf 'PASS deploy_%s\n' "$name"
+}
+
+run_deploy_case ascii plain plain
+run_deploy_case unicode 'café' 'café'
+run_deploy_case colon 'with:colon' 'with:colon'
+run_deploy_case comma 'with,comma' 'with,comma'
+run_deploy_case quote 'with"quote' 'with""quote'
+run_deploy_case mixed 'café:with,"quote' 'café:with,""quote'
 
 printf '%s passed, %s failed (%s)\n' "$PASSED" "$FAILED" "$BASH_VERSION"
 [ "$FAILED" -eq 0 ]
