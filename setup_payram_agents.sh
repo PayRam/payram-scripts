@@ -800,6 +800,9 @@ resolve_node_mode() {
 	return 1
 }
 
+# Run a Node helper from $1, passing the remaining arguments unchanged.
+# Docker mode forwards selected PAYRAM_* values and rewrites a loopback API host;
+# host mode keeps the original environment. Return the helper's exit status.
 run_node() {
 	local workdir="$1"
 	shift

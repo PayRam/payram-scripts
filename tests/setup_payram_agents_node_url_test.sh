@@ -19,6 +19,9 @@ fi
 
 PASSED=0
 FAILED=0
+# Verify a captured call for LABEL MODE INPUT EXPECTED, recording pass/fail.
+# INPUT=UNSET leaves the URL absent; an empty EXPECTED requires Docker omission.
+# A failed case is recorded so the remaining regression cases can still run.
 run_case() {
   local label="$1" mode="$2" input="$3" expected="$4"
   local capture="$WORK_DIR/arguments" arg value='' count=0 project_count=0
